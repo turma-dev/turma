@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Turma</title>
+    <meta
+      name="description"
+      content="Provider-pool-aware multi-agent coding orchestration with spec-driven planning and resumable execution."
+    >
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f4ef;
+        --panel: #fffdf8;
+        --ink: #1d1c1a;
+        --muted: #5f5a52;
+        --line: #d8d0c4;
+        --accent: #0d6b57;
+        --accent-2: #d56b2d;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+        background:
+          radial-gradient(circle at top left, rgba(213, 107, 45, 0.12), transparent 32rem),
+          radial-gradient(circle at top right, rgba(13, 107, 87, 0.12), transparent 30rem),
+          var(--bg);
+        color: var(--ink);
+      }
+
+      main {
+        max-width: 62rem;
+        margin: 0 auto;
+        padding: 4rem 1.25rem 5rem;
+      }
+
+      .eyebrow {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 0.8rem;
+      }
+
+      h1 {
+        margin: 0.5rem 0 1rem;
+        font-size: clamp(2.8rem, 7vw, 5.5rem);
+        line-height: 0.95;
+      }
+
+      .lede {
+        max-width: 42rem;
+        font-size: 1.2rem;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+
+      .hero {
+        background: rgba(255, 253, 248, 0.82);
+        border: 1px solid var(--line);
+        border-radius: 1.25rem;
+        padding: 2rem;
+        box-shadow: 0 18px 60px rgba(29, 28, 26, 0.08);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin: 1.5rem 0 2rem;
+      }
+
+      .button,
+      .link {
+        display: inline-block;
+        padding: 0.8rem 1rem;
+        border-radius: 999px;
+        text-decoration: none;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        background: var(--panel);
+      }
+
+      .button {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      pre {
+        margin: 0;
+        overflow-x: auto;
+        padding: 1rem 1.1rem;
+        border-radius: 1rem;
+        background: #1f2421;
+        color: #f6f4ef;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+        gap: 1rem;
+        margin-top: 2rem;
+      }
+
+      .card {
+        background: rgba(255, 253, 248, 0.82);
+        border: 1px solid var(--line);
+        border-radius: 1rem;
+        padding: 1rem;
+      }
+
+      .card h2 {
+        margin-top: 0;
+        font-size: 1.1rem;
+      }
+
+      .status {
+        margin-top: 2rem;
+        padding: 1rem 1.1rem;
+        border-left: 4px solid var(--accent-2);
+        background: rgba(213, 107, 45, 0.08);
+        border-radius: 0.75rem;
+      }
+
+      footer {
+        margin-top: 2rem;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div class="eyebrow">Turma</div>
+        <h1>Provider-pool-aware multi-agent coding orchestration.</h1>
+        <p class="lede">
+          Turma is a Python CLI for spec-driven planning, task routing, and
+          resumable execution across multiple agent runtimes.
+        </p>
+
+        <div class="actions">
+          <a class="button" href="https://github.com/turma-dev/turma">GitHub</a>
+          <a class="link" href="https://pypi.org/project/turma/">PyPI</a>
+          <a class="link" href="architecture.md">Architecture</a>
+        </div>
+
+        <pre><code>uv sync
+cp turma.example.toml turma.toml
+uv run turma --help</code></pre>
+
+        <div class="status">
+          <strong>Status:</strong> early scaffold. The package installs, the CLI
+          entry points work, and the architecture is documented. The full
+          orchestrator is not implemented yet.
+        </div>
+      </section>
+
+      <section class="grid" aria-label="Project links">
+        <article class="card">
+          <h2>Repository</h2>
+          <p>Source, issue tracker, and development history.</p>
+          <a href="https://github.com/turma-dev/turma">github.com/turma-dev/turma</a>
+        </article>
+        <article class="card">
+          <h2>Package</h2>
+          <p>Installable Python package and CLI distribution.</p>
+          <a href="https://pypi.org/project/turma/">pypi.org/project/turma</a>
+        </article>
+        <article class="card">
+          <h2>Docs</h2>
+          <p>Architecture, workflow, and contribution guidance.</p>
+          <a href="architecture.md">Read the architecture</a>
+        </article>
+      </section>
+
+      <footer>
+        Built as a small, honest project page. The credibility comes from the
+        code, docs, and release discipline, not from a large marketing site.
+      </footer>
+    </main>
+  </body>
+</html>

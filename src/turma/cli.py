@@ -1,0 +1,66 @@
+"""CLI entry point for the Turma project."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from turma import __version__
+from turma.planning import run_planning
+from turma.swarm import run_swarm, status_summary
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="turma",
+        description="Provider-pool-aware multi-agent coding orchestration.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="Initialize local project scaffolding.")
+    init_parser.add_argument(
+        "--path",
+        default=".",
+        help="Project directory to initialize. Defaults to the current directory.",
+    )
+
+    plan_parser = subparsers.add_parser("plan", help="Run the planning workflow scaffold.")
+    plan_parser.add_argument("--feature", required=True, help="Feature name to plan.")
+
+    run_parser = subparsers.add_parser("run", help="Run the implementation swarm scaffold.")
+    run_parser.add_argument("--feature", help="Feature name to run.")
+
+    subparsers.add_parser("status", help="Show current swarm status scaffold.")
+
+    return parser
+
+
+def cmd_init(path: str) -> int:
+    project_path = Path(path).resolve()
+    print(
+        f"Initialization scaffold for {project_path}. "
+        "This repo already contains the baseline layout, config, and docs."
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "init":
+        return cmd_init(args.path)
+    if args.command == "plan":
+        print(run_planning(args.feature))
+        return 0
+    if args.command == "run":
+        print(run_swarm(args.feature))
+        return 0
+    if args.command == "status":
+        print(status_summary())
+        return 0
+
+    parser.error("unknown command")
+    return 2

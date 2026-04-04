@@ -1,0 +1,65 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Vim
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+.vim/
+
+# Local tool settings
+.claude/settings.local.json
+.claude/todos/
+.codex/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+site/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment and secrets
+.env
+.env.*
+*.local
+turma.toml
+
+# LangGraph and orchestration runtime state
+.langgraph/
+*.db
+.turma/state/
+*.task_complete
+*.task_progress
+
+# Logs
+*.log

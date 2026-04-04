@@ -1,0 +1,31 @@
+[swarm]
+max_parallel = 4
+agent_timeout = 1800
+worktree_base = "~/.worktrees"
+
+[models]
+impl_complex = "claude-opus-4-6"
+spec = "claude-sonnet-4-6"
+impl_codex = "codex-1"
+impl = "openai/gpt-oss-120b"
+test = "openai/gpt-oss-120b"
+review = "openai/gpt-oss-120b"
+docs = "openai/gpt-oss-20b"
+boilerplate = "openai/gpt-oss-20b"
+
+[planning]
+max_rounds = 4
+interactive = true
+author_model = "claude-opus-4-6"
+critic_model = "claude-sonnet-4-6"
+
+[pool_limits]
+impl_complex = 2
+spec = 1
+impl_codex = 2
+impl = 3
+test = 3
+review = 1
+docs = 4
+boilerplate = 4
+
