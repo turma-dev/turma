@@ -5,9 +5,10 @@ Beads task tracking, and resumable swarm execution.
 
 ## Status
 
-Early scaffold. This repo now has the initial Python package layout, corrected
-design docs, baseline CLI entry point, and project configuration. The full
-orchestrator described in the architecture docs is not implemented yet.
+Early implementation phase. This repo now has the Python package layout,
+OpenSpec workflow scaffolding, a working `turma init` command, baseline CI, and
+public architecture documentation. The full orchestrator described in the
+architecture docs is not implemented yet.
 
 ## What It Is
 
@@ -25,12 +26,14 @@ without overstating that pool independence alone solves throughput.
 
 ```text
 .
+├── .github/workflows/          # minimal CI
 ├── .agents/                    # role guidance for author / critic / implementer / reviewer
 ├── .claude/commands/           # slash commands used in project context
+├── openspec/                   # feature specs and changes
 ├── docs/
-│   ├── architecture.md         # detailed system design
-├── src/turma/                 # Python package scaffold
-├── tests/                      # initial test scaffold
+│   ├── architecture.md         # public system model
+├── src/turma/                  # Python package and CLI
+├── tests/                      # automated tests
 ├── CHANGELOG.md
 ├── LICENSE
 ├── README.md
@@ -44,7 +47,6 @@ Default development workflow:
 
 ```bash
 uv sync
-cp turma.example.toml turma.toml
 uv run turma --help
 uv run turma init
 uv run turma plan --feature oauth-auth
@@ -52,8 +54,10 @@ uv run turma run --feature oauth-auth
 uv run turma status
 ```
 
-These commands are scaffolds today. They provide the initial package and entry
-point structure that the orchestrator can grow into.
+Current command status:
+
+- `turma init` is implemented
+- `turma plan`, `turma run`, and `turma status` are still scaffolds
 
 Validation commands:
 
@@ -70,7 +74,7 @@ uv run pytest
 
 ## Next Implementation Steps
 
-- wire `turma plan` to the planning graph
+- wire `turma plan` to the planning graph and OpenSpec artifacts
 - wire `turma run` to Beads plus worktree orchestration
 - persist reconciliation metadata for resumable task recovery
 - replace placeholder status output with task, PR, and CI state
