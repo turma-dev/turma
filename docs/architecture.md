@@ -118,11 +118,13 @@ record and surface ambiguous cases for review rather than guessing.
 Today, the public repo contains:
 
 - a Python package scaffold
-- a CLI scaffold
+- OpenSpec workflow scaffolding
+- a working `turma init` command
+- minimal CI for install and test validation
 - project configuration and validation basics
 - architecture and workflow documentation
 
-The full orchestrator is not implemented yet.
+The full planning and orchestration workflow is not implemented yet.
 
 ## Scope Of This Document
 

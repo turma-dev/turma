@@ -100,7 +100,7 @@ Do not treat "PR opened" as equivalent to "task done."
 
 For now, use this practical contributor flow:
 
-1. read the relevant design and task context first
+1. read the relevant OpenSpec change, design, and task context first
 2. make the smallest coherent change that satisfies the task
 3. validate locally with the project-standard commands
 4. update docs/config/examples if the public contract changed
@@ -110,11 +110,16 @@ Current validation baseline:
 
 ```bash
 uv sync
-cp turma.example.toml turma.toml
+uv run turma init
 uv run turma --help
 uv run python -m turma --help
 uv run pytest
 ```
+
+Current implementation note:
+
+- `turma init` is real and covered by tests
+- `turma plan`, `turma run`, and `turma status` are still placeholder surfaces
 
 ## Agent Roles
 

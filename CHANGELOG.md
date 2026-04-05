@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project uses Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- Added OpenSpec workflow scaffolding for Claude-based repo-local commands and skills.
+- Added the first real feature spec under `openspec/changes/turma-init/`.
+- Added automated tests for `turma init`.
+- Added a minimal GitHub Actions CI workflow for install and test validation.
+
+### Changed
+- Implemented `turma init` as the first non-stub CLI command.
+- Updated public docs to reflect the OpenSpec workflow and current command status.
+
 ## [0.1.3] - 2026-04-04
 
 ### Changed
