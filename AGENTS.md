@@ -52,6 +52,22 @@ Do not commit:
 - each contributor copies it to local `turma.toml`
 - local provider settings, paths, and concurrency overrides stay untracked
 
+## OpenSpec Workflow
+
+OpenSpec is part of this repo's intended feature workflow, but it does not
+replace `AGENTS.md` as the repo-wide contract.
+
+Use OpenSpec for feature changes that are mature enough to enter the real spec
+and implementation loop.
+
+Practical rules:
+
+- feature specs live under `openspec/changes/`
+- rough ideation should be stabilized before it becomes an OpenSpec change
+- implementation should follow approved specs rather than ad hoc chat history
+- OpenSpec tool integrations may be repo-local for some tools and global for
+  others, but the source of truth for feature artifacts is the repo
+
 ## Change Scope
 
 Use this rule for implementation work:
