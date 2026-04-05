@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 from turma import __version__
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         help="Project directory to initialize. Defaults to the current directory.",
     )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing turma.toml.",
+    )
 
     plan_parser = subparsers.add_parser("plan", help="Run the planning workflow scaffold.")
     plan_parser.add_argument("--feature", required=True, help="Feature name to plan.")
@@ -37,13 +43,70 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_init(path: str) -> int:
+GITIGNORE_MANAGED = [
+    "# Turma local state",
+    "turma.toml",
+    ".turma/",
+    ".langgraph/",
+    "*.task_complete",
+    "*.task_progress",
+]
+
+
+def cmd_init(path: str, force: bool = False) -> int:
     project_path = Path(path).resolve()
-    print(
-        f"Initialization scaffold for {project_path}. "
-        "This repo already contains the baseline layout, config, and docs."
-    )
+    example = project_path / "turma.example.toml"
+    target = project_path / "turma.toml"
+
+    try:
+        if not example.exists():
+            print(f"error: {example} not found")
+            return 1
+
+        if target.exists() and not force:
+            print("skipped turma.toml (already exists, use --force to overwrite)")
+        else:
+            shutil.copy2(example, target)
+            print("created turma.toml from turma.example.toml")
+
+        _update_gitignore(project_path)
+    except OSError as exc:
+        print(f"error: {exc}")
+        return 1
+
     return 0
+
+
+def _update_gitignore(project_path: Path) -> None:
+    gitignore = project_path / ".gitignore"
+
+    if gitignore.exists():
+        existing = gitignore.read_text()
+    else:
+        existing = ""
+
+    existing_lines = set(existing.splitlines())
+    missing = [e for e in GITIGNORE_MANAGED if e not in existing_lines]
+    missing_entries = [e for e in missing if not e.startswith("#")]
+
+    if not missing_entries and GITIGNORE_MANAGED[0] in existing_lines:
+        print("skipped .gitignore (all entries present)")
+        return
+
+    block = "\n".join(missing) + "\n"
+
+    if existing and not existing.endswith("\n"):
+        block = "\n" + block
+
+    if existing:
+        block = "\n" + block
+
+    gitignore.write_text(existing + block)
+    entry_count = len(missing_entries)
+    if GITIGNORE_MANAGED[0] in missing and entry_count == 0:
+        print("updated .gitignore (added header)")
+    else:
+        print(f"updated .gitignore (added {entry_count} entries)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "init":
-        return cmd_init(args.path)
+        return cmd_init(args.path, force=args.force)
     if args.command == "plan":
         print(run_planning(args.feature))
         return 0
