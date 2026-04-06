@@ -6,9 +6,10 @@ Beads task tracking, and resumable swarm execution.
 ## Status
 
 Early implementation phase. This repo now has the Python package layout,
-OpenSpec workflow scaffolding, a working `turma init` command, baseline CI, and
-public architecture documentation. The full orchestrator described in the
-architecture docs is not implemented yet.
+OpenSpec workflow scaffolding, a working `turma init` command, a working
+single-pass `turma plan` command, baseline CI, and public architecture
+documentation. The full author/critic planning loop and execution orchestrator
+described in the architecture docs are not implemented yet.
 
 ## What It Is
 
@@ -57,11 +58,22 @@ uv run turma status
 Current command status:
 
 - `turma init` is implemented
-- `turma plan`, `turma run`, and `turma status` are still scaffolds
+- `turma plan` is implemented as a single-pass author workflow
+- `turma run` and `turma status` are still scaffolds
 
 `turma init` expects `turma.example.toml` to exist in the target directory. It
 creates `turma.toml` from that template and updates `.gitignore` with
 Turma-managed entries.
+
+`turma plan --feature <name>` currently:
+
+- reads `planning.author_model` from `turma.toml`
+- requires `.agents/author.md`
+- scaffolds an OpenSpec change with `openspec`
+- generates `proposal`, `design`, and `tasks` in a fixed order
+- supports Claude and Codex-backed author generation
+
+It does not yet run a critic loop, commit changes, or orchestrate execution.
 
 Validation commands:
 
@@ -78,7 +90,7 @@ uv run pytest
 
 ## Next Implementation Steps
 
-- wire `turma plan` to the planning graph and OpenSpec artifacts
+- add the critic loop and approval flow on top of `turma plan`
 - wire `turma run` to Beads plus worktree orchestration
 - persist reconciliation metadata for resumable task recovery
 - replace placeholder status output with task, PR, and CI state

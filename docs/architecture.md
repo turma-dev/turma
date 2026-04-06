@@ -120,11 +120,13 @@ Today, the public repo contains:
 - a Python package scaffold
 - OpenSpec workflow scaffolding
 - a working `turma init` command
+- a working single-pass `turma plan` command with provider-backed artifact generation
 - minimal CI for install and test validation
 - project configuration and validation basics
 - architecture and workflow documentation
 
-The full planning and orchestration workflow is not implemented yet.
+The full author/critic planning loop and execution orchestrator are not
+implemented yet.
 
 ## Scope Of This Document
 
