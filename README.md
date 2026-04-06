@@ -59,6 +59,10 @@ Current command status:
 - `turma init` is implemented
 - `turma plan`, `turma run`, and `turma status` are still scaffolds
 
+`turma init` expects `turma.example.toml` to exist in the target directory. It
+creates `turma.toml` from that template and updates `.gitignore` with
+Turma-managed entries.
+
 Validation commands:
 
 ```bash
