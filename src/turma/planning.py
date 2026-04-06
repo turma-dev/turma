@@ -12,6 +12,7 @@ from typing import Sequence
 from turma.authoring.base import AuthorBackend
 from turma.authoring.claude import ClaudeAuthorBackend
 from turma.authoring.codex import CodexAuthorBackend
+from turma.authoring.opencode import OpenCodeAuthorBackend
 from turma.config import ConfigError, load_config
 from turma.errors import PlanningError
 
@@ -110,6 +111,8 @@ def run_planning(feature: str) -> None:
 
 def _get_backend(model: str) -> AuthorBackend:
     """Return the author backend for the configured model."""
+    if "/" in model:
+        return OpenCodeAuthorBackend()
     if model.startswith("claude-"):
         return ClaudeAuthorBackend()
     if (
@@ -120,7 +123,7 @@ def _get_backend(model: str) -> AuthorBackend:
         return CodexAuthorBackend()
     raise PlanningError(
         f"unsupported planning author model: {model}. "
-        "Supported model prefixes in v1: claude-*, gpt-*, codex-*, and o*."
+        "Supported prefixes: claude-*, gpt-*, codex-*, o*, or provider/model format."
     )
 
 
