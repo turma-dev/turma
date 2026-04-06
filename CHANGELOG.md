@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-04-05
+
 ### Added
 - Added OpenSpec workflow scaffolding for Claude-based repo-local commands and skills.
 - Added the first real feature spec under `openspec/changes/turma-init/`.
