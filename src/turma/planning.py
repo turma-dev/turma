@@ -25,6 +25,22 @@ QUESTION_PATTERNS = (
     "my best guess",
     "which direction should i take",
 )
+BACKEND_FEATURE_TOKENS = {"backend", "provider", "opencode", "codex", "claude"}
+OFF_TARGET_BACKEND_PATTERNS = (
+    "microservices-based architecture",
+    "ai-driven coding assistance",
+    "project management capabilities",
+    "roll out the integration to users",
+    "update the user interface",
+    "beads task tracking system",
+    "package.json",
+    "api integration",
+    "rest api",
+    "deploy the changes",
+    "monitor performance",
+    "production environment",
+    "rollout plan",
+)
 
 
 def run_planning(feature: str) -> None:
@@ -83,11 +99,13 @@ def run_planning(feature: str) -> None:
         dep_content = _read_dependencies(instructions, written_artifacts)
 
         # Assemble prompt
+        repo_context = _build_repo_context()
         prompt = _build_prompt(
             author_role=author_role,
             instructions=instructions,
             dep_content=dep_content,
             feature=feature,
+            repo_context=repo_context,
         )
 
         # Run claude
@@ -98,6 +116,7 @@ def run_planning(feature: str) -> None:
             raw_output,
             artifact_id,
             instructions.get("template", ""),
+            feature,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(artifact_text)
@@ -180,6 +199,61 @@ def _extract_instructions_json(raw: str, artifact_id: str) -> dict:
         ) from exc
 
 
+def _build_repo_context() -> str:
+    """Build a compact summary of the repository for prompt grounding."""
+    cwd = Path.cwd()
+    lines = [
+        "This is the Turma repository — a Python CLI tool.",
+        "Language: Python. Build tool: setuptools + uv. No JavaScript, no package.json.",
+        "",
+        "Source layout:",
+    ]
+
+    src_dir = cwd / "src" / "turma"
+    if src_dir.exists():
+        for p in sorted(src_dir.rglob("*.py")):
+            if "__pycache__" in str(p):
+                continue
+            rel = p.relative_to(cwd)
+            lines.append(f"  {rel}")
+
+    tests_dir = cwd / "tests"
+    if tests_dir.exists():
+        lines.append("")
+        lines.append("Test files:")
+        for p in sorted(tests_dir.glob("test_*.py")):
+            rel = p.relative_to(cwd)
+            lines.append(f"  {rel}")
+
+    # Include a compact sample of an existing backend to show the pattern
+    authoring_dir = src_dir / "authoring" if src_dir.exists() else None
+    if authoring_dir and authoring_dir.exists():
+        for backend_file in sorted(authoring_dir.glob("*.py")):
+            if backend_file.name in ("__init__.py", "base.py"):
+                continue
+            sample_lines = backend_file.read_text().splitlines()[:25]
+            lines.append("")
+            lines.append(f"Existing backend pattern ({backend_file.name}):")
+            for line in sample_lines:
+                lines.append(f"  {line}")
+            break  # one example is enough
+
+    config = cwd / "turma.example.toml"
+    if config.exists():
+        lines.append("")
+        lines.append("Config template: turma.example.toml")
+
+    readme = cwd / "README.md"
+    if readme.exists():
+        first_lines = readme.read_text().splitlines()[:5]
+        lines.append("")
+        lines.append("README excerpt:")
+        for line in first_lines:
+            lines.append(f"  {line}")
+
+    return "\n".join(lines)
+
+
 def _read_dependencies(
     instructions: dict,
     written_artifacts: dict[str, Path],
@@ -199,6 +273,7 @@ def _build_prompt(
     instructions: dict,
     dep_content: str,
     feature: str,
+    repo_context: str = "",
 ) -> str:
     """Assemble the author prompt for a single artifact."""
     artifact_id = instructions["artifactId"]
@@ -210,9 +285,15 @@ def _build_prompt(
     parts = [
         f"You are an author agent. Your role:\n\n<role>\n{author_role}\n</role>",
         f'You are creating the "{artifact_id}" artifact for change "{feature}".',
+    ]
+
+    if repo_context:
+        parts.append(f"<repo-context>\n{repo_context}\n</repo-context>")
+
+    parts.extend([
         f"<instructions>\n{instruction}\n</instructions>",
         f"<template>\n{template}\n</template>",
-    ]
+    ])
 
     if context:
         parts.append(f"<context>\n{context}\n</context>")
@@ -235,6 +316,35 @@ def _build_prompt(
     parts.append(
         "Return a complete artifact, not notes about what information is missing."
     )
+    parts.append(
+        "Stay grounded in the requested feature and the existing Turma codebase. "
+        "Do not invent unrelated product changes, new user-facing systems, "
+        "UI work, microservices, rollout plans, or broad architecture shifts "
+        "unless the instructions explicitly require them."
+    )
+    parts.append(
+        "For backend or provider features, focus on concrete code-level changes "
+        "such as CLI invocation, backend routing, config, tests, validation, "
+        "and smoke-test behavior."
+    )
+    parts.append(
+        "Mirror the existing backend pattern in src/turma/authoring/. "
+        "If the repository already contains backends like claude.py or codex.py, "
+        "follow that file shape and the existing routing in src/turma/planning.py "
+        "instead of inventing new modules, APIs, services, or frameworks."
+    )
+    parts.append(
+        "Do not propose Beads integration, package.json changes, REST/API layers, "
+        "or module names outside the current src/turma/authoring/ backend pattern "
+        "unless the instructions explicitly require them."
+    )
+    parts.append(
+        "Do not invent new config keys if the existing config format already "
+        "supports the feature (e.g. provider/model format in author_model). "
+        "Do not add deployment, monitoring, rollout, or production-readiness "
+        "tasks. Scope all work to code, tests, config template, and docs "
+        "within this repository."
+    )
 
     return "\n\n".join(parts)
 
@@ -243,6 +353,7 @@ def _validate_artifact_output(
     raw: str,
     artifact_id: str,
     template: str,
+    feature: str,
 ) -> str:
     """Reject empty or obviously non-artifact model output."""
     text = raw.strip()
@@ -278,7 +389,40 @@ def _validate_artifact_output(
             f"template headings: {', '.join(missing_headings)}"
         )
 
+    _validate_feature_relevance(text, artifact_id, feature)
+
     return text + "\n"
+
+
+def _validate_feature_relevance(
+    text: str,
+    artifact_id: str,
+    feature: str,
+) -> None:
+    """Reject obviously off-target artifacts for backend/provider feature work."""
+    tokens = set(re.findall(r"[a-z0-9]+", feature.lower()))
+    if not tokens.intersection(BACKEND_FEATURE_TOKENS):
+        return
+
+    lowered = text.lower()
+    for pattern in OFF_TARGET_BACKEND_PATTERNS:
+        if pattern in lowered:
+            raise PlanningError(
+                f"generating {artifact_id} failed: output drifted into unrelated "
+                f"product-planning content ({pattern})"
+            )
+
+    if "opencode_planning.py" in lowered:
+        raise PlanningError(
+            f"generating {artifact_id} failed: output invented a backend module "
+            "instead of reusing the existing authoring backend pattern"
+        )
+
+    if "src/turma/authoring/" in lowered and "src/turma/authoring/opencode.py" not in lowered:
+        raise PlanningError(
+            f"generating {artifact_id} failed: output referenced an unexpected "
+            "backend module path instead of the existing src/turma/authoring/ pattern"
+        )
 
 
 def _strip_leading_preamble(text: str) -> str:

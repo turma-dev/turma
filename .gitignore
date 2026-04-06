@@ -50,6 +50,7 @@ pip-wheel-metadata/
 
 # Local environment and secrets
 .env
+.env.local
 .env.*
 *.local
 turma.toml
