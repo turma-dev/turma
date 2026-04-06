@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from turma import __version__
+from turma.errors import PlanningError
 from turma.planning import run_planning
 from turma.swarm import run_swarm, status_summary
 
@@ -116,8 +117,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return cmd_init(args.path, force=args.force)
     if args.command == "plan":
-        print(run_planning(args.feature))
-        return 0
+        try:
+            run_planning(args.feature)
+            return 0
+        except PlanningError as exc:
+            print(f"error: {exc}")
+            return 1
     if args.command == "run":
         print(run_swarm(args.feature))
         return 0
