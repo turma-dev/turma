@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing turma.toml.",
     )
 
-    plan_parser = subparsers.add_parser("plan", help="Run the planning workflow scaffold.")
+    plan_parser = subparsers.add_parser("plan", help="Run the single-pass planning workflow.")
     plan_parser.add_argument("--feature", required=True, help="Feature name to plan.")
 
     run_parser = subparsers.add_parser("run", help="Run the implementation swarm scaffold.")
