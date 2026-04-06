@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-04-06
+
 ### Added
 - Added `turma plan` as a working single-pass author workflow for generating OpenSpec `proposal`, `design`, and `tasks` artifacts.
 - Added provider-specific planning backends for both Claude and Codex.
