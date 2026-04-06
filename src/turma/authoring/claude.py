@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from turma.authoring.base import AuthorBackend
+from turma.authoring.base import AuthorBackend, extract_process_error
 from turma.errors import PlanningError
 
 
@@ -41,14 +41,8 @@ class ClaudeAuthorBackend(AuthorBackend):
             ) from exc
 
         if result.returncode != 0:
-            detail = (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or "unknown error"
-            )
             raise PlanningError(
-                f"claude author generation failed: claude exited with "
-                f"{result.returncode}\n{detail}"
+                extract_process_error(result, provider_name="claude")
             )
 
         return result.stdout
