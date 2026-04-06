@@ -9,6 +9,7 @@ import pytest
 from turma.errors import PlanningError
 from turma.planning import (
     _build_prompt,
+    _build_repo_context,
     _extract_template_headings,
     _extract_instructions_json,
     _get_backend,
@@ -489,6 +490,65 @@ def test_prompt_tells_author_to_make_reasonable_assumptions() -> None:
     assert "make the most reasonable implementation-oriented assumptions" in prompt
 
 
+def test_prompt_tells_author_to_stay_grounded_in_requested_feature() -> None:
+    """Prompt explicitly forbids unrelated product reinvention."""
+    prompt = _build_prompt(
+        author_role=AUTHOR_ROLE,
+        instructions=PROPOSAL_INSTRUCTIONS,
+        dep_content="",
+        feature="turma-plan-opencode",
+    )
+
+    assert "Stay grounded in the requested feature and the existing Turma codebase" in prompt
+    assert "Do not invent unrelated product changes" in prompt
+
+
+def test_prompt_tells_author_to_follow_existing_backend_pattern() -> None:
+    """Prompt explicitly anchors backend work to the existing authoring files."""
+    prompt = _build_prompt(
+        author_role=AUTHOR_ROLE,
+        instructions=PROPOSAL_INSTRUCTIONS,
+        dep_content="",
+        feature="add-opencode-planning-backend",
+    )
+
+    assert "Mirror the existing backend pattern in src/turma/authoring/" in prompt
+    assert "follow that file shape and the existing routing in src/turma/planning.py" in prompt
+    assert "Do not propose Beads integration" in prompt
+
+
+def test_build_repo_context_includes_source_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repo context includes Python source file paths."""
+    (tmp_path / "src" / "turma" / "authoring").mkdir(parents=True)
+    (tmp_path / "src" / "turma" / "cli.py").write_text("")
+    (tmp_path / "src" / "turma" / "authoring" / "claude.py").write_text("")
+    (tmp_path / "README.md").write_text("# Turma\nA Python CLI.\n")
+    monkeypatch.chdir(tmp_path)
+
+    ctx = _build_repo_context()
+
+    assert "Python CLI" in ctx
+    assert "src/turma/cli.py" in ctx
+    assert "src/turma/authoring/claude.py" in ctx
+    assert "No JavaScript" in ctx
+
+
+def test_build_prompt_includes_repo_context() -> None:
+    """Prompt includes repo context when provided."""
+    prompt = _build_prompt(
+        author_role=AUTHOR_ROLE,
+        instructions=PROPOSAL_INSTRUCTIONS,
+        dep_content="",
+        feature="test-feat",
+        repo_context="This is a Python CLI. No JavaScript.",
+    )
+
+    assert "<repo-context>" in prompt
+    assert "This is a Python CLI" in prompt
+
+
 def test_extract_instructions_json_accepts_plain_json() -> None:
     """JSON parsing works when openspec emits only JSON."""
     raw = json.dumps(PROPOSAL_INSTRUCTIONS)
@@ -520,7 +580,7 @@ def test_extract_instructions_json_fails_when_no_json_present() -> None:
 def test_validate_artifact_output_rejects_empty_output() -> None:
     """Empty model output fails clearly instead of writing a blank artifact."""
     with pytest.raises(PlanningError, match="empty output"):
-        _validate_artifact_output("", "proposal", PROPOSAL_INSTRUCTIONS["template"])
+        _validate_artifact_output("", "proposal", PROPOSAL_INSTRUCTIONS["template"], "test-feat")
 
 
 def test_validate_artifact_output_rejects_clarification_request() -> None:
@@ -530,6 +590,7 @@ def test_validate_artifact_output_rejects_clarification_request() -> None:
             "I need to understand the scope before writing this. Could you clarify?",
             "proposal",
             PROPOSAL_INSTRUCTIONS["template"],
+            "test-feat",
         )
 
 
@@ -543,6 +604,7 @@ def test_validate_artifact_output_strips_preamble_and_normalizes() -> None:
         raw,
         "proposal",
         PROPOSAL_INSTRUCTIONS["template"],
+        "test-feat",
     ) == "## Why\nText\n\n## What Changes\nStuff\n"
 
 
@@ -553,6 +615,7 @@ def test_validate_artifact_output_rejects_missing_template_headings() -> None:
             "## Why\nText",
             "proposal",
             PROPOSAL_INSTRUCTIONS["template"],
+            "test-feat",
         )
 
 
@@ -572,7 +635,56 @@ def test_validate_artifact_output_accepts_wrapped_markdown_artifact() -> None:
         "```markdown\n## Why\nText\n\n## What Changes\nStuff\n```",
         "proposal",
         PROPOSAL_INSTRUCTIONS["template"],
+        "test-feat",
     ) == "## Why\nText\n\n## What Changes\nStuff\n"
+
+
+def test_validate_artifact_output_rejects_off_target_backend_boilerplate() -> None:
+    """Backend/provider features reject generic product-planning drift."""
+    with pytest.raises(PlanningError, match="drifted into unrelated product-planning content"):
+        _validate_artifact_output(
+            (
+                "## Why\n"
+                "This change adds AI-driven coding assistance.\n\n"
+                "## What Changes\n"
+                "Use a microservices-based architecture and update the user interface.\n"
+            ),
+            "proposal",
+            PROPOSAL_INSTRUCTIONS["template"],
+            "turma-plan-opencode",
+        )
+
+
+def test_validate_artifact_output_rejects_invented_backend_module() -> None:
+    """Backend features should not invent new authoring module names."""
+    with pytest.raises(PlanningError, match="invented a backend module"):
+        _validate_artifact_output(
+            (
+                "## Why\n"
+                "Need OpenCode planning support.\n\n"
+                "## What Changes\n"
+                "Implement src/turma/authoring/opencode_planning.py to add the backend.\n"
+            ),
+            "proposal",
+            PROPOSAL_INSTRUCTIONS["template"],
+            "add-opencode-planning-backend",
+        )
+
+
+def test_validate_artifact_output_rejects_beads_for_backend_feature() -> None:
+    """Backend/provider features should reject Beads drift."""
+    with pytest.raises(PlanningError, match="beads task tracking system"):
+        _validate_artifact_output(
+            (
+                "## Why\n"
+                "Need OpenCode planning support.\n\n"
+                "## What Changes\n"
+                "Integrate the backend with the Beads task tracking system.\n"
+            ),
+            "proposal",
+            PROPOSAL_INSTRUCTIONS["template"],
+            "add-opencode-planning-backend",
+        )
 
 
 def test_extract_template_headings_reads_markdown_headings() -> None:
