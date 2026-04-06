@@ -442,6 +442,34 @@ def test_get_backend_selects_codex_for_o_series_models(
     mock_backend_cls.assert_called_once_with()
 
 
+@patch("turma.planning.OpenCodeAuthorBackend")
+def test_get_backend_selects_opencode_for_provider_model_format(
+    mock_backend_cls: MagicMock,
+) -> None:
+    """provider/model format selects the OpenCode backend."""
+    backend = MagicMock()
+    mock_backend_cls.return_value = backend
+
+    selected = _get_backend("groq/llama-3.3-70b-versatile")
+
+    assert selected is backend
+    mock_backend_cls.assert_called_once_with()
+
+
+@patch("turma.planning.OpenCodeAuthorBackend")
+def test_get_backend_selects_opencode_for_anthropic_provider_format(
+    mock_backend_cls: MagicMock,
+) -> None:
+    """anthropic/claude-* routes to OpenCode, not Claude CLI."""
+    backend = MagicMock()
+    mock_backend_cls.return_value = backend
+
+    selected = _get_backend("anthropic/claude-sonnet-4-6")
+
+    assert selected is backend
+    mock_backend_cls.assert_called_once_with()
+
+
 def test_get_backend_rejects_unknown_model_prefix() -> None:
     """Unknown planning models fail clearly until more backends are added."""
     with pytest.raises(PlanningError, match="unsupported planning author model"):
