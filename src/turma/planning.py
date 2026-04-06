@@ -11,6 +11,7 @@ from typing import Sequence
 
 from turma.authoring.base import AuthorBackend
 from turma.authoring.claude import ClaudeAuthorBackend
+from turma.authoring.codex import CodexAuthorBackend
 from turma.config import ConfigError, load_config
 from turma.errors import PlanningError
 
@@ -111,9 +112,15 @@ def _get_backend(model: str) -> AuthorBackend:
     """Return the author backend for the configured model."""
     if model.startswith("claude-"):
         return ClaudeAuthorBackend()
+    if (
+        model.startswith("gpt-")
+        or model.startswith("codex-")
+        or re.match(r"^o\d", model)
+    ):
+        return CodexAuthorBackend()
     raise PlanningError(
         f"unsupported planning author model: {model}. "
-        "Only claude-* models are supported in v1."
+        "Supported model prefixes in v1: claude-*, gpt-*, codex-*, and o*."
     )
 
 
@@ -238,14 +245,15 @@ def _validate_artifact_output(
     text = raw.strip()
     if not text:
         raise PlanningError(
-            f"generating {artifact_id} failed: claude returned empty output"
+            f"generating {artifact_id} failed: author returned empty output"
         )
 
+    text = _strip_wrapping_code_fence(text)
     text = _strip_leading_preamble(text)
     lowered = text.lower()
     if any(pattern in lowered for pattern in QUESTION_PATTERNS):
         raise PlanningError(
-            f"generating {artifact_id} failed: claude asked for clarification "
+            f"generating {artifact_id} failed: author asked for clarification "
             "instead of producing the artifact"
         )
 
@@ -253,7 +261,7 @@ def _validate_artifact_output(
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if lines and all(re.search(r"\?$", line) for line in lines[:2]):
             raise PlanningError(
-                f"generating {artifact_id} failed: claude returned a follow-up "
+                f"generating {artifact_id} failed: author returned a follow-up "
                 "question instead of the artifact"
             )
 
@@ -277,6 +285,20 @@ def _strip_leading_preamble(text: str) -> str:
         if re.match(r"^#{1,6}\s+\S", line.strip()):
             return "\n".join(lines[index:]).strip()
     return text
+
+
+def _strip_wrapping_code_fence(text: str) -> str:
+    """Remove a single outer markdown fence if the whole artifact is wrapped."""
+    lines = text.splitlines()
+    if len(lines) < 3:
+        return text
+
+    first = lines[0].strip()
+    last = lines[-1].strip()
+    if not first.startswith("```") or last != "```":
+        return text
+
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _extract_template_headings(template: str) -> list[str]:

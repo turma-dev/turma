@@ -13,6 +13,7 @@ from turma.planning import (
     _extract_instructions_json,
     _get_backend,
     _strip_leading_preamble,
+    _strip_wrapping_code_fence,
     _validate_artifact_output,
     run_planning,
 )
@@ -413,10 +414,38 @@ def test_get_backend_selects_claude_for_claude_models(
     mock_backend_cls.assert_called_once_with()
 
 
+@patch("turma.planning.CodexAuthorBackend")
+def test_get_backend_selects_codex_for_gpt_models(
+    mock_backend_cls: MagicMock,
+) -> None:
+    """OpenAI/Codex models select the Codex backend."""
+    backend = MagicMock()
+    mock_backend_cls.return_value = backend
+
+    selected = _get_backend("gpt-5.4")
+
+    assert selected is backend
+    mock_backend_cls.assert_called_once_with()
+
+
+@patch("turma.planning.CodexAuthorBackend")
+def test_get_backend_selects_codex_for_o_series_models(
+    mock_backend_cls: MagicMock,
+) -> None:
+    """o-series models select the Codex backend."""
+    backend = MagicMock()
+    mock_backend_cls.return_value = backend
+
+    selected = _get_backend("o3")
+
+    assert selected is backend
+    mock_backend_cls.assert_called_once_with()
+
+
 def test_get_backend_rejects_unknown_model_prefix() -> None:
     """Unknown planning models fail clearly until more backends are added."""
     with pytest.raises(PlanningError, match="unsupported planning author model"):
-        _get_backend("gpt-5.4")
+        _get_backend("llama-3")
 
 
 def test_prompt_tells_author_to_make_reasonable_assumptions() -> None:
@@ -502,6 +531,20 @@ def test_validate_artifact_output_rejects_missing_template_headings() -> None:
 def test_strip_leading_preamble_keeps_first_heading_block() -> None:
     """Preamble stripping starts output at the first markdown heading."""
     assert _strip_leading_preamble("hello\n\n## Why\nText") == "## Why\nText"
+
+
+def test_strip_wrapping_code_fence_removes_outer_fence() -> None:
+    """A single full-output markdown fence is stripped before validation."""
+    assert _strip_wrapping_code_fence("```markdown\n## Why\nText\n```") == "## Why\nText"
+
+
+def test_validate_artifact_output_accepts_wrapped_markdown_artifact() -> None:
+    """Wrapped markdown artifacts are normalized instead of rejected."""
+    assert _validate_artifact_output(
+        "```markdown\n## Why\nText\n\n## What Changes\nStuff\n```",
+        "proposal",
+        PROPOSAL_INSTRUCTIONS["template"],
+    ) == "## Why\nText\n\n## What Changes\nStuff\n"
 
 
 def test_extract_template_headings_reads_markdown_headings() -> None:
