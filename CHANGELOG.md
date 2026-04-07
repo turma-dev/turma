@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-04-06
+
 ### Added
 - Added OpenCode as a supported `turma plan` author backend via provider/model routing.
 
