@@ -147,29 +147,62 @@ No new config keys. The existing `author_model` field is sufficient.
 
 ## Smoke test expectations
 
-A successful smoke test should:
-
-1. Set `author_model = "groq/llama-3.3-70b-versatile"` in `turma.toml`
-2. Ensure `GROQ_API_KEY` is set in the environment
-3. Run `turma plan --feature smoke-opencode`
-4. Observe three artifacts generated faster than Claude Opus (~10-30s each
-   vs ~100s)
-5. Verify artifacts contain the expected template headings
-6. Verify no OpenCode tool noise in the artifact content (stderr is
-   captured separately)
-
-A failed smoke test should surface:
-- Missing `GROQ_API_KEY` → OpenCode exits non-zero with auth error
-- Missing `opencode` CLI → PlanningError at backend init
-- Timeout → PlanningError with duration
-
 This smoke test is not optional for merge readiness. The feature depends on
 source-code analysis today, but the implementation must be validated against a
 real `opencode run` invocation before it is treated as complete.
 
-If the smoke test reveals stdout contamination from tool/status output, the
+A successful smoke test should confirm two separate things:
+
+1. **Transport/mechanical correctness**
+   - Set `author_model` in `turma.toml` to an OpenCode-compatible model
+   - Ensure the provider credential (for example `GROQ_API_KEY`) is present
+   - Run `turma plan --feature <name>`
+   - Verify `proposal.md`, `design.md`, and `tasks.md` are generated
+   - Verify no OpenCode tool noise contaminates the artifact content
+
+2. **Artifact quality**
+   - Verify the generated artifacts stay grounded in the requested feature
+   - Verify they follow the existing backend pattern in `src/turma/authoring/`
+   - Verify they do not invent unrelated config, deployment, API, or Beads work
+
+### Observed smoke-test matrix
+
+The current implementation has now been validated against real OpenCode runs:
+
+- `groq/llama-3.3-70b-versatile`
+  - Transport: works
+  - Artifact quality: poor
+  - Observed issue: semantically drifty output that invents unrelated work
+  - Conclusion: backend path is valid, but this model is not yet reliable for
+    grounded planning artifacts
+
+- `groq/openai/gpt-oss-120b`
+  - Transport: mixed
+  - Artifact quality: not validated
+  - Observed issues:
+    - one full `turma plan` run returned empty output
+    - a focused repo-aware prompt triggered OpenCode tool-call validation errors
+    - a narrower no-tools prompt returned text, but still drifted semantically
+  - Conclusion: this model/provider path is not yet validated for grounded
+    planning quality through OpenCode
+
+- `claude-opus-4-6` via the native Claude CLI backend
+  - Transport: works
+  - Artifact quality: good
+  - Observed trade-off: slower (~100s per artifact), but best planning quality
+
+Engineering conclusion:
+
+- The OpenCode backend transport is proven.
+- The remaining quality gap is model-dependent, not a Turma transport bug.
+- V1 should document that OpenCode backend support exists, while planning
+  quality depends on the chosen provider/model.
+
+If a smoke test reveals stdout contamination from tool/status output, the
 feature is not ready as designed. In that case, the implementation should move
-to `--format json` and parse only the assistant text stream.
+to `--format json` and parse only the assistant text stream. That fallback is
+still part of the design, but it was not required for the transport validation
+above.
 
 ## Flags not used in v1
 

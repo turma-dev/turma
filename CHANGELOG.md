@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+- Added OpenCode as a supported `turma plan` author backend via provider/model routing.
+
+### Changed
+- Documented that `turma plan` planning quality depends on the selected provider/model even though Claude, Codex, and OpenCode transport paths are supported.
+
 ## [0.1.5] - 2026-04-06
 
 ### Added

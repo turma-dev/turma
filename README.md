@@ -71,7 +71,11 @@ Turma-managed entries.
 - requires `.agents/author.md`
 - scaffolds an OpenSpec change with `openspec`
 - generates `proposal`, `design`, and `tasks` in a fixed order
-- supports Claude and Codex-backed author generation
+- supports Claude, Codex, and OpenCode-backed author generation
+
+Planning quality depends on the chosen backend/model. Claude-backed planning is
+currently the strongest validated path. OpenCode transport is validated, but
+provider/model quality varies.
 
 It does not yet run a critic loop, commit changes, or orchestrate execution.
 
