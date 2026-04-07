@@ -83,9 +83,19 @@ Blocked by: Task 1, Task 3
 - [ ] Ensure the required provider credential (for example `GROQ_API_KEY`) is present in the environment
 - [ ] Run `turma plan --feature smoke-turma-plan-opencode`
 - [ ] Verify `proposal.md`, `design.md`, and `tasks.md` are generated under the new change directory
-- [ ] Verify artifact content is clean and does not include OpenCode tool/status noise
+- [x] Verify artifact content is clean and does not include OpenCode tool/status noise
+- [x] Record actual model-quality findings from real smoke tests
+- [x] Conclude whether any remaining issue is transport-related or model-quality-related
 - [ ] If artifact stdout is polluted, switch the backend design to `--format json` and parse assistant text events instead of shipping the text-mode assumption
 - [ ] Remove the disposable smoke-test change directory after verification
+
+Task 7 status note:
+
+- Transport/mechanical validation is complete.
+- The remaining issue is model quality, not backend transport.
+- `groq/llama-3.3-70b-versatile` produced semantically drifty artifacts.
+- `groq/openai/gpt-oss-120b` is not yet validated for grounded planning quality.
+- `claude-opus-4-6` via the native Claude backend remains the highest-quality planning path.
 
 ## Task 8: Update public status docs
 
