@@ -6,6 +6,16 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-04-08
+
+### Added
+- Added Gemini as a supported `turma plan` author backend via the `gemini` CLI.
+- Added backend and planning test coverage for Gemini-backed artifact generation.
+
+### Changed
+- Updated public docs and config examples to reflect Gemini support in `turma plan`.
+- Documented the Gemini headless trust invariant behind the read-only planning safety boundary.
+
 ## [0.1.6] - 2026-04-06
 
 ### Added
