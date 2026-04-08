@@ -17,6 +17,7 @@ boilerplate = "openai/gpt-oss-20b"
 max_rounds = 4
 interactive = true
 author_model = "claude-opus-4-6"
+# author_model = "gemini-2.5-flash"                # Gemini CLI
 # author_model = "groq/llama-3.3-70b-versatile"   # OpenCode + Groq
 critic_model = "claude-sonnet-4-6"
 

@@ -71,11 +71,12 @@ Turma-managed entries.
 - requires `.agents/author.md`
 - scaffolds an OpenSpec change with `openspec`
 - generates `proposal`, `design`, and `tasks` in a fixed order
-- supports Claude, Codex, and OpenCode-backed author generation
+- supports Claude, Codex, Gemini, and OpenCode-backed author generation
 
 Planning quality depends on the chosen backend/model. Claude-backed planning is
 currently the strongest validated path. OpenCode transport is validated, but
-provider/model quality varies.
+provider/model quality varies. Gemini requires the `gemini` CLI
+(`npm install -g @google/gemini-cli`).
 
 It does not yet run a critic loop, commit changes, or orchestrate execution.
 
