@@ -471,6 +471,20 @@ def test_get_backend_selects_opencode_for_anthropic_provider_format(
     mock_backend_cls.assert_called_once_with()
 
 
+@patch("turma.planning.GeminiAuthorBackend")
+def test_get_backend_selects_gemini_for_gemini_models(
+    mock_backend_cls: MagicMock,
+) -> None:
+    """Gemini models select the Gemini backend."""
+    backend = MagicMock()
+    mock_backend_cls.return_value = backend
+
+    selected = _get_backend("gemini-2.5-flash")
+
+    assert selected is backend
+    mock_backend_cls.assert_called_once_with()
+
+
 def test_get_backend_rejects_unknown_model_prefix() -> None:
     """Unknown planning models fail clearly until more backends are added."""
     with pytest.raises(PlanningError, match="unsupported planning author model"):
@@ -685,6 +699,22 @@ def test_validate_artifact_output_rejects_beads_for_backend_feature() -> None:
             PROPOSAL_INSTRUCTIONS["template"],
             "add-opencode-planning-backend",
         )
+
+
+def test_validate_artifact_output_accepts_known_gemini_backend_path() -> None:
+    """Artifacts referencing the gemini backend path should not be rejected."""
+    result = _validate_artifact_output(
+        (
+            "## Why\n"
+            "Need Gemini planning support.\n\n"
+            "## What Changes\n"
+            "Add src/turma/authoring/gemini.py as the Gemini backend.\n"
+        ),
+        "proposal",
+        PROPOSAL_INSTRUCTIONS["template"],
+        "add-gemini-backend",
+    )
+    assert "src/turma/authoring/gemini.py" in result
 
 
 def test_extract_template_headings_reads_markdown_headings() -> None:

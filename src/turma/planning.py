@@ -12,6 +12,7 @@ from typing import Sequence
 from turma.authoring.base import AuthorBackend
 from turma.authoring.claude import ClaudeAuthorBackend
 from turma.authoring.codex import CodexAuthorBackend
+from turma.authoring.gemini import GeminiAuthorBackend
 from turma.authoring.opencode import OpenCodeAuthorBackend
 from turma.config import ConfigError, load_config
 from turma.errors import PlanningError
@@ -25,7 +26,7 @@ QUESTION_PATTERNS = (
     "my best guess",
     "which direction should i take",
 )
-BACKEND_FEATURE_TOKENS = {"backend", "provider", "opencode", "codex", "claude"}
+BACKEND_FEATURE_TOKENS = {"backend", "provider", "opencode", "codex", "claude", "gemini"}
 OFF_TARGET_BACKEND_PATTERNS = (
     "microservices-based architecture",
     "ai-driven coding assistance",
@@ -140,9 +141,11 @@ def _get_backend(model: str) -> AuthorBackend:
         or re.match(r"^o\d", model)
     ):
         return CodexAuthorBackend()
+    if model.startswith("gemini-"):
+        return GeminiAuthorBackend()
     raise PlanningError(
         f"unsupported planning author model: {model}. "
-        "Supported prefixes: claude-*, gpt-*, codex-*, o*, or provider/model format."
+        "Supported prefixes: claude-*, gpt-*, codex-*, o*, gemini-*, or provider/model format."
     )
 
 
@@ -418,7 +421,15 @@ def _validate_feature_relevance(
             "instead of reusing the existing authoring backend pattern"
         )
 
-    if "src/turma/authoring/" in lowered and "src/turma/authoring/opencode.py" not in lowered:
+    known_backends = {
+        "src/turma/authoring/claude.py",
+        "src/turma/authoring/codex.py",
+        "src/turma/authoring/opencode.py",
+        "src/turma/authoring/gemini.py",
+    }
+    if "src/turma/authoring/" in lowered and not any(
+        b in lowered for b in known_backends
+    ):
         raise PlanningError(
             f"generating {artifact_id} failed: output referenced an unexpected "
             "backend module path instead of the existing src/turma/authoring/ pattern"
