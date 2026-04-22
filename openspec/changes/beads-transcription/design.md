@@ -255,11 +255,12 @@ re-consult this design doc.
    d. Invoke `BeadsAdapter.create_task(...)` and record the returned
       task id keyed by section number.
 4. On the first adapter error mid-pipeline, abort. Already-created
-   tasks are left in place; the command exits with a non-zero status
-   and the error surfaced to the user. Partial state is resolvable
-   manually via `bd` or with a fresh `--force` retry once
-   `TRANSCRIBED.md` has been written (see "Partial-failure rule"
-   below).
+   tasks are left in place as feature-tagged orphans (no
+   `TRANSCRIBED.md` is written on failure). The command exits with a
+   non-zero status and the error surfaced to the user. Partial state
+   is resolvable via a manual `bd close` cycle or via a `--force`
+   retry that uses the orphan-teardown path (see "Partial-failure
+   rule" below).
 5. On success, write `TRANSCRIBED.md` in the change directory with
    the feature name, timestamp, and the full list of created Beads
    task IDs for future `--force` teardown.
