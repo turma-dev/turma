@@ -28,7 +28,9 @@
 
 - [ ] New module `src/turma/transcription/beads.py`.
 - [ ] `BeadsAdapter.__init__` validates `shutil.which("bd")` and raises
-      `PlanningError` with a `pip install beads` hint on failure.
+      `PlanningError` with a `brew install beads` hint on failure
+      (Beads ships as a Go binary via Homebrew; it is not a PyPI
+      package).
 - [ ] **Determine the body-writing mechanism first.** Run
       `bd create --help` (and `bd --version` for the record) in a
       scratch venv and pick the first mechanism the CLI supports:

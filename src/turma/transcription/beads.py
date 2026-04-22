@@ -1,0 +1,194 @@
+"""Beads CLI subprocess adapter for transcription.
+
+Thin wrapper around the `bd` binary (Beads; https://github.com/steveyegge/beads)
+that mirrors the authoring-backend pattern. Validates `shutil.which("bd")`
+at construction time; delegates each operation to a single
+`subprocess.run` call and raises `PlanningError` on non-zero exit with
+`bd`'s stderr preserved.
+
+Beads semantics captured here:
+
+- Body-writing mechanism: inline `-d` / `--description <text>` flag.
+  `bd create` accepts multi-line descriptions directly on the argv
+  (via subprocess list form, no shell escaping). No title-prefix
+  fallback is needed.
+- Feature association: recorded via `--labels feature:<name>`. The
+  `list_feature_tasks(feature)` method filters on that label.
+- Dependency direction: `bd create --deps` uses *inverted* semantics
+  (`blocks:<id>` means the new task blocks `<id>`). For the common
+  "new task is blocked by <blocker>" case Turma needs, the adapter
+  creates the task first and then runs `bd dep add <new> <blocker>`
+  once per blocker. `bd dep add <blocked> <blocker>` means `blocked`
+  depends on `blocker`, which is the direction Turma's pipeline
+  produces.
+- Types: bd's first-class types are `bug|feature|task|epic|chore|
+  decision`. Turma's parser emits `impl|test|docs|spec`; translation
+  from parser-type to bd-type lives in the pipeline (Task 3), not in
+  this adapter.
+- Priority: bd's scale is 0-4 (0=highest). The adapter receives
+  bd-native priority; any translation from a section-number scale is
+  the pipeline's job.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from dataclasses import dataclass
+
+from turma.errors import PlanningError
+
+
+BEADS_INSTALL_HINT = (
+    "bd CLI not found. Install it with `brew install beads` "
+    "(Beads is a Go binary; see https://github.com/steveyegge/beads "
+    "for non-macOS install paths)."
+)
+
+# bd's first-class issue types. Keeping this set here pins the argv
+# contract so a bd CLI change that renames a type surfaces as an
+# obvious adapter-level failure.
+VALID_BD_TYPES = frozenset({
+    "bug",
+    "feature",
+    "task",
+    "epic",
+    "chore",
+    "decision",
+})
+
+
+@dataclass(frozen=True)
+class BeadsTaskRef:
+    """Minimal record of a Beads task surfaced by `list_feature_tasks`."""
+
+    id: str
+    title: str
+    labels: tuple[str, ...]
+
+
+class BeadsAdapter:
+    """Subprocess wrapper for the `bd` CLI."""
+
+    def __init__(self) -> None:
+        if shutil.which("bd") is None:
+            raise PlanningError(BEADS_INSTALL_HINT)
+
+    def create_task(
+        self,
+        *,
+        title: str,
+        description: str,
+        bd_type: str,
+        priority: int,
+        feature: str,
+        extra_labels: tuple[str, ...] = (),
+        blocker_ids: tuple[str, ...] = (),
+    ) -> str:
+        """Create a new Beads task and return its id.
+
+        Feature association is recorded via a `feature:<name>` label.
+        Each `blocker_id` becomes a blocking dependency on the new task
+        via a follow-up `bd dep add` call (see the module docstring for
+        why `--deps` on `create` is not used).
+        """
+        if bd_type not in VALID_BD_TYPES:
+            raise PlanningError(
+                f"unsupported bd task type: {bd_type!r}. "
+                f"Valid: {sorted(VALID_BD_TYPES)}"
+            )
+        if not 0 <= priority <= 4:
+            raise PlanningError(
+                f"priority out of range: {priority} (expected 0-4)"
+            )
+
+        labels = (f"feature:{feature}", *extra_labels)
+        argv = [
+            "bd", "create",
+            "--silent",
+            "--type", bd_type,
+            "--priority", str(priority),
+            "--description", description,
+            "--labels", ",".join(labels),
+            title,
+        ]
+        result = self._run(argv, step="bd create")
+        new_id = result.stdout.strip()
+        if not new_id:
+            raise PlanningError(
+                "bd create returned empty stdout; "
+                f"stderr: {result.stderr!r}"
+            )
+
+        for blocker in blocker_ids:
+            self._add_dependency(blocked_id=new_id, blocker_id=blocker)
+
+        return new_id
+
+    def close_task(self, task_id: str) -> None:
+        """Close a Beads task by id."""
+        self._run(["bd", "close", task_id], step="bd close")
+
+    def list_feature_tasks(
+        self, feature: str
+    ) -> tuple[BeadsTaskRef, ...]:
+        """List open tasks tagged with `feature:<name>`."""
+        argv = [
+            "bd", "list",
+            "--label", f"feature:{feature}",
+            "--json",
+            "--limit", "0",
+        ]
+        result = self._run(argv, step="bd list")
+        payload = result.stdout.strip()
+        if not payload:
+            return ()
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                f"bd list returned non-JSON output: {exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(records, list):
+            raise PlanningError(
+                f"bd list returned non-array JSON: {type(records).__name__}"
+            )
+        return tuple(
+            BeadsTaskRef(
+                id=str(rec["id"]),
+                title=str(rec.get("title", "")),
+                labels=tuple(str(label) for label in rec.get("labels", ())),
+            )
+            for rec in records
+            if isinstance(rec, dict) and "id" in rec
+        )
+
+    def _add_dependency(self, *, blocked_id: str, blocker_id: str) -> None:
+        # `bd dep add <blocked> <blocker>` — blocked depends on blocker.
+        self._run(
+            ["bd", "dep", "add", blocked_id, blocker_id],
+            step="bd dep add",
+        )
+
+    @staticmethod
+    def _run(
+        argv: list[str],
+        *,
+        step: str,
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "unknown error"
+            )
+            raise PlanningError(
+                f"{step} failed: exit {result.returncode}\n{detail}"
+            )
+        return result
