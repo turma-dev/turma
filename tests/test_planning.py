@@ -323,8 +323,11 @@ def test_run_planning_reports_pause_not_completion(
 
     out = capsys.readouterr().out
     assert "planning suspended before: awaiting_human_approval" in out
-    assert "planning paused." in out
+    assert "planning paused" in out
     assert "planning complete" not in out
+    assert "--resume --approve" in out
+    assert "--resume --revise" in out
+    assert "--resume --abandon" in out
 
 
 @patch("turma.planning._get_backend")
