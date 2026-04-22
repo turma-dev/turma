@@ -136,6 +136,10 @@ def run_planning(
             f"openspec/changes/{feature}/NEEDS_HUMAN_REVIEW.md then override with:"
         )
         _print_resume_command_hints(feature, include_override=True)
+    elif current_state == "abandoned":
+        print(
+            f"\nplanning abandoned. see openspec/changes/{feature}/ABANDONED.md"
+        )
     else:
         print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
 
