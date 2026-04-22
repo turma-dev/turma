@@ -14,11 +14,34 @@ docs = "openai/gpt-oss-20b"
 boilerplate = "openai/gpt-oss-20b"
 
 [planning]
+# Planning runs an author/critic loop. Each round, the author generates
+# or revises proposal/design/tasks; the critic writes a strict
+# critique_N.md; the graph routes on the critic's `## Status:` token.
+# A human gate at `awaiting_human_approval` must be resumed explicitly
+# via `turma plan --resume --approve | --revise | --abandon |
+# --approve --override`.
+
+# Maximum author/critic rounds before escalation. Exhaustion and
+# repeated-unresolved-blocking-ID loop detection both route to
+# needs_human_review and never auto-approve.
 max_rounds = 4
+
+# When true, the graph halts at the human gate and prints the exact
+# resume commands. When false, it still halts without auto-approving —
+# the flag is informational today and does not change routing.
 interactive = true
+
+# Author backend runs initial generation, per-finding response, and
+# revision of all three artifacts. Model prefix selects the backend:
+# claude-*, gpt-*/codex-*/o*, gemini-*, or provider/model for OpenCode.
 author_model = "claude-opus-4-6"
 # author_model = "gemini-2.5-flash"                # Gemini CLI
 # author_model = "groq/llama-3.3-70b-versatile"   # OpenCode + Groq
+
+# Critic backend writes critique_N.md per round. Output must be in the
+# strict format (`## Status: blocking | nits_only | approved`, findings
+# with stable IDs `[B###]`/`[N###]`/`[Q###]`). Malformed output
+# escalates to needs_human_review.
 critic_model = "claude-sonnet-4-6"
 
 [pool_limits]
