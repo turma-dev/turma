@@ -11,6 +11,7 @@ from typing import Literal, TypedDict
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
+from turma.errors import PlanningError
 from turma.planning import (
     PlanningSession,
     _generate_initial_artifacts,
@@ -30,6 +31,8 @@ PlanningStateName = Literal[
     "abandoned",
 ]
 
+ResumeActionName = Literal["approve", "revise", "abandon"]
+
 
 class PlanningGraphState(TypedDict, total=False):
     """Serializable state stored by the planning graph checkpointer."""
@@ -41,6 +44,8 @@ class PlanningGraphState(TypedDict, total=False):
     critic_route: str
     parse_failure_reason: str
     last_critique: str
+    resume_action: ResumeActionName | None
+    resume_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -83,8 +88,14 @@ def _build_planning_graph(session: PlanningSession) -> StateGraph:
     graph.add_node("drafting", lambda state: _drafting_node(session, state))
     graph.add_node("critic_review", lambda state: _critic_review_node(session, state))
     graph.add_node("needs_revision", _halt_node("needs_revision"))
-    graph.add_node("awaiting_human_approval", _halt_node("awaiting_human_approval"))
-    graph.add_node("needs_human_review", _halt_node("needs_human_review"))
+    graph.add_node(
+        "awaiting_human_approval",
+        lambda state: _awaiting_human_approval_node(session, state),
+    )
+    graph.add_node(
+        "needs_human_review",
+        lambda state: _needs_human_review_node(session, state),
+    )
     graph.add_node("approved", _halt_node("approved"))
     graph.add_node("abandoned", _halt_node("abandoned"))
 
@@ -99,9 +110,17 @@ def _build_planning_graph(session: PlanningSession) -> StateGraph:
             "needs_human_review": "needs_human_review",
         },
     )
+    graph.add_conditional_edges(
+        "awaiting_human_approval",
+        _route_after_human_approval,
+        {
+            "approved": "approved",
+            "needs_revision": "needs_revision",
+            "abandoned": "abandoned",
+        },
+    )
     # Task 6 wires needs_revision back to drafting after two-call revision.
     graph.add_edge("needs_revision", END)
-    graph.add_edge("awaiting_human_approval", END)
     graph.add_edge("needs_human_review", END)
     graph.add_edge("approved", END)
     graph.add_edge("abandoned", END)
@@ -192,3 +211,219 @@ def _write_planning_state(
     }
     path = session.change_dir / "PLANNING_STATE.json"
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _awaiting_human_approval_node(
+    session: PlanningSession,
+    state: PlanningGraphState,
+) -> PlanningGraphState:
+    action = state.get("resume_action")
+    reason = state.get("resume_reason") or ""
+    round_num = int(state.get("round", 1))
+
+    if action == "approve":
+        _write_approved(session)
+        next_state: PlanningGraphState = {"state": "approved"}
+    elif action == "revise":
+        _write_response_human(session, reason, round_num)
+        next_state = {"state": "needs_revision"}
+    elif action == "abandon":
+        _write_abandoned(session, reason, round_num)
+        next_state = {"state": "abandoned"}
+    else:
+        raise PlanningError(
+            "awaiting_human_approval reached without a resume action; "
+            "did you call update_state with resume_action before invoke?"
+        )
+
+    updated: PlanningGraphState = {
+        **state,
+        **next_state,
+        "resume_action": None,
+        "resume_reason": None,
+    }
+    _write_planning_state(session, updated)
+    return {**next_state, "resume_action": None, "resume_reason": None}
+
+
+def _needs_human_review_node(
+    session: PlanningSession,
+    state: PlanningGraphState,
+) -> PlanningGraphState:
+    reason = state.get("parse_failure_reason") or "See PLANNING_STATE.json"
+    round_num = int(state.get("round", 1))
+    _write_needs_human_review(session, reason, round_num)
+    return {"state": "needs_human_review"}
+
+
+def _route_after_human_approval(state: PlanningGraphState) -> str:
+    return state["state"]
+
+
+def _write_approved(session: PlanningSession) -> Path:
+    path = session.change_dir / "APPROVED"
+    path.write_text(
+        f"approved by human on {datetime.now(UTC).isoformat()}\n"
+    )
+    return path
+
+
+def _write_abandoned(
+    session: PlanningSession,
+    reason: str,
+    round_num: int,
+    actor: str = "human",
+) -> Path:
+    path = session.change_dir / "ABANDONED.md"
+    path.write_text(
+        "# ABANDONED\n\n"
+        f"- reason: {reason}\n"
+        f"- timestamp: {datetime.now(UTC).isoformat()}\n"
+        f"- round: {round_num}\n"
+        f"- actor: {actor}\n"
+    )
+    return path
+
+
+def _write_override(session: PlanningSession, reason: str) -> Path:
+    path = session.change_dir / "OVERRIDE.md"
+    path.write_text(
+        "# OVERRIDE\n\n"
+        f"- reason: {reason}\n"
+        f"- timestamp: {datetime.now(UTC).isoformat()}\n"
+    )
+    return path
+
+
+def _write_response_human(
+    session: PlanningSession,
+    reason: str,
+    round_num: int,
+) -> Path:
+    path = session.change_dir / f"response_{round_num}_human.md"
+    path.write_text(
+        f"# Human revision reason (round {round_num})\n\n{reason}\n"
+    )
+    return path
+
+
+def _write_needs_human_review(
+    session: PlanningSession,
+    reason: str,
+    round_num: int,
+) -> Path:
+    path = session.change_dir / "NEEDS_HUMAN_REVIEW.md"
+    path.write_text(
+        "# NEEDS HUMAN REVIEW\n\n"
+        f"- reason: {reason}\n"
+        f"- timestamp: {datetime.now(UTC).isoformat()}\n"
+        f"- round: {round_num}\n"
+    )
+    return path
+
+
+def read_planning_state(session: PlanningSession) -> PlanningGraphResult:
+    """Load the checkpoint and return current state without mutating."""
+    checkpoint_path = checkpoint_path_for(session.feature)
+    if not checkpoint_path.exists():
+        raise PlanningError(
+            f"no planning checkpoint found for {session.feature!r}. "
+            "Run turma plan first."
+        )
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        graph = _build_planning_graph(session).compile(
+            checkpointer=checkpointer,
+            interrupt_before=["awaiting_human_approval"],
+        )
+        config = {"configurable": {"thread_id": session.feature}}
+        snapshot = graph.get_state(config)
+
+    return PlanningGraphResult(
+        state=snapshot.values,
+        next_nodes=tuple(snapshot.next),
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def resume_awaiting_human_approval(
+    session: PlanningSession,
+    action: ResumeActionName,
+    reason: str = "",
+) -> PlanningGraphResult:
+    """Inject a resume action and drive the graph past awaiting_human_approval."""
+    checkpoint_path = checkpoint_path_for(session.feature)
+    if not checkpoint_path.exists():
+        raise PlanningError(
+            f"no planning checkpoint found for {session.feature!r}. "
+            "Run turma plan first."
+        )
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        graph = _build_planning_graph(session).compile(
+            checkpointer=checkpointer,
+            interrupt_before=["awaiting_human_approval"],
+        )
+        config = {"configurable": {"thread_id": session.feature}}
+        snapshot = graph.get_state(config)
+
+        if "awaiting_human_approval" not in snapshot.next:
+            current = snapshot.values.get("state")
+            raise PlanningError(
+                f"--{action} requires the graph suspended at "
+                f"awaiting_human_approval (current state: {current!r})"
+            )
+
+        graph.update_state(
+            config,
+            {"resume_action": action, "resume_reason": reason},
+        )
+        final_state = graph.invoke(None, config)
+        final_snapshot = graph.get_state(config)
+
+    return PlanningGraphResult(
+        state=final_state,
+        next_nodes=tuple(final_snapshot.next),
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def override_needs_human_review(
+    session: PlanningSession,
+    reason: str,
+) -> PlanningGraphResult:
+    """Write OVERRIDE.md then APPROVED and move the graph state to approved."""
+    checkpoint_path = checkpoint_path_for(session.feature)
+    if not checkpoint_path.exists():
+        raise PlanningError(
+            f"no planning checkpoint found for {session.feature!r}. "
+            "Run turma plan first."
+        )
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        graph = _build_planning_graph(session).compile(
+            checkpointer=checkpointer,
+            interrupt_before=["awaiting_human_approval"],
+        )
+        config = {"configurable": {"thread_id": session.feature}}
+        snapshot = graph.get_state(config)
+
+        current = snapshot.values.get("state")
+        if current != "needs_human_review":
+            raise PlanningError(
+                f"--override requires current state needs_human_review "
+                f"(got {current!r})"
+            )
+
+        # Fail-safe order: OVERRIDE.md first, APPROVED second. If the second
+        # write crashes, recovery sees an orphaned OVERRIDE.md and treats
+        # the plan as still-unapproved pending re-confirmation.
+        _write_override(session, reason)
+        _write_approved(session)
+
+        graph.update_state(config, {"state": "approved"})
+        new_snapshot = graph.get_state(config)
+        _write_planning_state(session, new_snapshot.values)
+
+    return PlanningGraphResult(
+        state=new_snapshot.values,
+        next_nodes=tuple(new_snapshot.next),
+        checkpoint_path=checkpoint_path,
+    )

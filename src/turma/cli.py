@@ -8,7 +8,8 @@ from pathlib import Path
 
 from turma import __version__
 from turma.errors import PlanningError
-from turma.planning import run_planning
+from turma.planning import default_planning_services, run_planning
+from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
 from turma.swarm import run_swarm, status_summary
 
 
@@ -33,8 +34,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing turma.toml.",
     )
 
-    plan_parser = subparsers.add_parser("plan", help="Run the single-pass planning workflow.")
+    plan_parser = subparsers.add_parser("plan", help="Run the planning critic loop.")
     plan_parser.add_argument("--feature", required=True, help="Feature name to plan.")
+    plan_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a suspended plan for --feature instead of starting a new one.",
+    )
+    plan_parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Approve the plan at the human gate (requires --resume).",
+    )
+    plan_parser.add_argument(
+        "--revise",
+        metavar="REASON",
+        help="Send the plan back for revision with a reason (requires --resume).",
+    )
+    plan_parser.add_argument(
+        "--abandon",
+        metavar="REASON",
+        help="Abandon the plan with a reason (requires --resume).",
+    )
+    plan_parser.add_argument(
+        "--override",
+        metavar="REASON",
+        help=(
+            "Override halted needs_human_review (requires --resume --approve)."
+        ),
+    )
 
     run_parser = subparsers.add_parser("run", help="Run the implementation swarm scaffold.")
     run_parser.add_argument("--feature", help="Feature name to run.")
@@ -42,6 +70,72 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Show current swarm status scaffold.")
 
     return parser
+
+
+def _build_resume_request(args: argparse.Namespace) -> ResumeRequest:
+    """Parse the --resume action flags into a structured ResumeRequest."""
+    primary_flags = [
+        name
+        for name, value in (
+            ("approve", args.approve),
+            ("revise", bool(args.revise)),
+            ("abandon", bool(args.abandon)),
+        )
+        if value
+    ]
+
+    if len(primary_flags) > 1:
+        raise PlanningError(
+            "choose exactly one of --approve, --revise, --abandon"
+        )
+
+    if args.override and not args.approve:
+        raise PlanningError("--override must be combined with --approve")
+    if args.override and (args.revise or args.abandon):
+        raise PlanningError(
+            "--override may not be combined with --revise or --abandon"
+        )
+
+    if args.approve and args.override:
+        return ResumeRequest(
+            action=ResumeAction.OVERRIDE_APPROVE,
+            reason=args.override,
+        )
+    if args.approve:
+        return ResumeRequest(action=ResumeAction.APPROVE)
+    if args.revise:
+        return ResumeRequest(action=ResumeAction.REVISE, reason=args.revise)
+    if args.abandon:
+        return ResumeRequest(action=ResumeAction.ABANDON, reason=args.abandon)
+    return ResumeRequest(action=ResumeAction.STATUS)
+
+
+def _reject_stray_resume_flags(args: argparse.Namespace) -> None:
+    """Reject resume-only flags when --resume is not set."""
+    stray = [
+        name
+        for name, value in (
+            ("--approve", args.approve),
+            ("--revise", args.revise),
+            ("--abandon", args.abandon),
+            ("--override", args.override),
+        )
+        if value
+    ]
+    if stray:
+        raise PlanningError(
+            f"{', '.join(stray)} require --resume"
+        )
+
+
+def _print_resume_result(request: ResumeRequest, result) -> None:
+    """Print a compact summary of the resume outcome."""
+    state = result.state.get("state")
+    print(f"action: {request.action.value}")
+    print(f"state: {state}")
+    if result.next_nodes:
+        print(f"next: {', '.join(result.next_nodes)}")
+    print(f"checkpoint: {result.checkpoint_path}")
 
 
 GITIGNORE_MANAGED = [
@@ -118,7 +212,17 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args.path, force=args.force)
     if args.command == "plan":
         try:
-            run_planning(args.feature)
+            if args.resume:
+                request = _build_resume_request(args)
+                result = resume_plan(
+                    args.feature,
+                    default_planning_services(),
+                    request,
+                )
+                _print_resume_result(request, result)
+            else:
+                _reject_stray_resume_flags(args)
+                run_planning(args.feature)
             return 0
         except PlanningError as exc:
             print(f"error: {exc}")
