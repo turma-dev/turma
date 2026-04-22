@@ -270,8 +270,12 @@ def _critic_review_node(
         # unresolved blocking finding ID set, the author is not making
         # progress and the plan escalates to needs_human_review.
         if critique.status is CritiqueStatus.BLOCKING:
+            # Under Status: blocking, both B-prefixed findings and
+            # Q-prefixed questions count as unresolved — the design says
+            # questions under blocking are blocking until answered.
+            # N-prefixed (nits) are advisory only and excluded.
             current_ids = sorted(
-                {f.id for f in critique.findings if f.id.startswith("B")}
+                {f.id for f in critique.findings if f.id[:1] in ("B", "Q")}
             )
             prev_ids = state.get("prev_blocking_finding_ids") or []
             if current_ids and prev_ids == current_ids:

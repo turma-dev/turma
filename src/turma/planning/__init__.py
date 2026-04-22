@@ -20,6 +20,16 @@ from turma.errors import PlanningError
 from turma.planning.critique_parser import ParseFailure, ParsedCritique, ParseResult, parse_critique
 
 ARTIFACT_ORDER = ["proposal", "design", "tasks"]
+# Terminal markers written by the state machine / resume commands.
+# Mirrored in state_machine.reconcile_current_state; kept local here to avoid
+# a circular import between planning/__init__.py and planning/state_machine.py.
+_TERMINAL_MARKER_FILES = ("APPROVED", "ABANDONED.md", "NEEDS_HUMAN_REVIEW.md")
+
+
+def _has_terminal_marker(change_dir: Path) -> bool:
+    """True if the change directory contains any terminal-state marker."""
+    return any((change_dir / name).exists() for name in _TERMINAL_MARKER_FILES)
+
 QUESTION_PATTERNS = (
     "could you clarify",
     "can you clarify",
@@ -165,7 +175,7 @@ def _prepare_planning_session(
     critic_model = config.planning.critic_model
 
     change_dir = Path.cwd() / "openspec" / "changes" / feature
-    if require_fresh and change_dir.exists():
+    if require_fresh and change_dir.exists() and not _has_terminal_marker(change_dir):
         raise PlanningError(
             f"openspec/changes/{feature}/ already exists. "
             "Remove it or pick a different feature name."

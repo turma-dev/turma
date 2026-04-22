@@ -409,6 +409,50 @@ def test_loop_detection_halts_on_repeated_blocking_finding_ids(
     assert "repeated" in needs_review
 
 
+def test_loop_detection_counts_blocking_questions_not_just_B_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Questions under Status: blocking are blocking until answered.
+
+    Per the v1 design, routing is Status-authoritative. A critique of
+    `## Status: blocking` with only [Q001] question findings is still a
+    blocking round; if the same [Q001] recurs next round, that is the
+    same "no progress" signal as a repeated [B001]. Loop detection must
+    include Q-prefixed finding IDs under blocking, not just B-prefixed.
+    """
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    blocking_question_critique = (
+        "## Status: blocking\n\n"
+        "## Findings\n"
+        "- [Q001] [question] [design.md] Does this cover OAuth refresh?\n"
+    )
+
+    author_backend = FakeBackend(_author_output)
+    critic_callback = _SequencedCriticCallback(
+        [blocking_question_critique, blocking_question_critique]
+    )
+    critic_backend = FakeBackend(critic_callback)
+    services = PlanningServices(
+        get_backend=lambda model: (
+            critic_backend if model == "claude-sonnet-4-6" else author_backend
+        ),
+        run_openspec=_run_openspec,
+    )
+
+    session = _prepare_planning_session("test-feature", services)
+    result = run_planning_state_machine(session)
+
+    assert result.state["state"] == "needs_human_review"
+    assert result.next_nodes == ()
+    reason = result.state.get("needs_human_review_reason", "")
+    assert "repeated" in reason
+    assert "Q001" in reason
+
+
 def test_loop_detection_ignores_different_blocking_finding_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -533,6 +577,62 @@ def test_run_state_machine_short_circuits_on_terminal_marker(
     assert result.next_nodes == ()
     assert author_calls == [], "author was invoked despite APPROVED marker"
     assert critic_calls == [], "critic was invoked despite APPROVED marker"
+
+
+def test_run_planning_short_circuits_on_existing_terminal_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`turma plan --feature X` on an already-terminal plan is read-only.
+
+    A pre-existing change directory with a terminal marker (APPROVED /
+    ABANDONED.md / NEEDS_HUMAN_REVIEW.md) must not be rejected by the
+    fresh-dir guard. The public entry should accept the prepared session,
+    let the state machine short-circuit on the terminal marker, and
+    never call the author or critic.
+    """
+    from turma.planning import run_planning
+
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    change_dir = tmp_path / "openspec" / "changes" / "already-approved"
+    change_dir.mkdir(parents=True)
+    (change_dir / "APPROVED").write_text(
+        "approved by human on 2026-04-22T00:00:00+00:00\n"
+    )
+
+    author_calls: list[str] = []
+    critic_calls: list[str] = []
+
+    def _tracked_author(prompt: str, *_: object) -> str:
+        author_calls.append(prompt)
+        return "should not be called"
+
+    def _tracked_critic(prompt: str, *_: object) -> str:
+        critic_calls.append(prompt)
+        return "should not be called"
+
+    services = PlanningServices(
+        get_backend=lambda model: FakeBackend(
+            _tracked_critic if model == "claude-sonnet-4-6" else _tracked_author
+        ),
+        run_openspec=_run_openspec,
+    )
+
+    # Should not raise despite change_dir existing.
+    run_planning("already-approved", services)
+
+    assert author_calls == []
+    assert critic_calls == []
+    out = capsys.readouterr().out
+    # Short-circuit path: no "planning paused" (we're terminal) and no
+    # "planning complete" (terminal-marker short-circuit path surfaces
+    # the state via the planning-complete branch since next_nodes is
+    # empty and current_state is "approved").
+    assert "planning complete" in out
 
 
 def test_planning_state_json_is_not_authoritative_for_terminal_state(
