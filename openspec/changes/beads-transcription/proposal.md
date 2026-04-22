@@ -3,7 +3,7 @@
 The critic loop now produces human-approved `proposal.md` / `design.md` /
 `tasks.md` artifacts, but nothing consumes `tasks.md`. Turma's v1 execution
 plan routes work through Beads — a git-backed task DAG with atomic claiming
-— so `tasks.md` needs a translation layer that produces a Beads epic with
+— so `tasks.md` needs a translation layer that produces a feature task set with
 typed tasks, priorities, and dependency edges. Without this layer the
 execution orchestrator cannot start and approved plans sit on disk as
 prose, unusable by the swarm.
@@ -13,7 +13,10 @@ prose, unusable by the swarm.
 - New `BeadsAdapter` subprocess wrapper for the `bd` CLI, mirroring the
   existing authoring-backend shape: thin class whose `__init__`
   validates `shutil.which("bd")` and whose methods call `subprocess.run`
-  and raise typed errors on non-zero exit.
+  and raise typed errors on non-zero exit. The adapter records, per
+  task, a feature-association tag and the tasks.md subtask list via
+  whichever body/description mechanism the `bd` CLI actually supports
+  (verified during Task 2 against `bd create --help`).
 - New pure parser for `tasks.md` that extracts numbered sections
   (`### N. Title`) and their checkbox subtasks. Parser is pure (no
   subprocess, no filesystem), returns a typed representation consumed
@@ -40,7 +43,7 @@ prose, unusable by the swarm.
 
 ### New Capabilities
 
-- `plan-to-beads`: translate an approved `tasks.md` into a Beads epic
+- `plan-to-beads`: translate an approved `tasks.md` into a feature task set
   with typed tasks, priorities, and dependency edges.
 - `beads-adapter`: subprocess wrapper for the `bd` CLI following the
   existing authoring-backend pattern.
@@ -76,7 +79,7 @@ prose, unusable by the swarm.
 - Swarm execution (`turma run`) and worktree orchestration. Covered
   separately; Beads is the consumer of this transcription's output,
   not part of this change.
-- Cross-feature dependencies between different Beads epics.
+- Cross-feature dependencies between different feature task sets.
 - Automatic re-transcription when a plan is resumed for another round.
   Manual `--force` re-invocation only.
 - Beads UI, Dolt tuning, or migration of tasks between epics.
