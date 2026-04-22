@@ -11,6 +11,8 @@ from turma.errors import PlanningError
 from turma.planning import default_planning_services, run_planning
 from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
 from turma.swarm import run_swarm, status_summary
+from turma.transcription import TranscriptionResult, transcribe_to_beads
+from turma.transcription.beads import BeadsAdapter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +63,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REASON",
         help=(
             "Override halted needs_human_review (requires --resume --approve)."
+        ),
+    )
+
+    beads_parser = subparsers.add_parser(
+        "plan-to-beads",
+        help="Transcribe an approved plan into a feature-tagged Beads task set.",
+    )
+    beads_parser.add_argument(
+        "--feature",
+        required=True,
+        help="Feature name whose openspec/changes/<feature>/ to transcribe.",
+    )
+    beads_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Tear down existing TRANSCRIBED.md-recorded or feature-tagged "
+            "orphan Beads tasks before re-creating. Refuses when a prior "
+            "TRANSCRIBED.md has no parseable task ids."
         ),
     )
 
@@ -136,6 +157,15 @@ def _print_resume_result(request: ResumeRequest, result) -> None:
     if result.next_nodes:
         print(f"next: {', '.join(result.next_nodes)}")
     print(f"checkpoint: {result.checkpoint_path}")
+
+
+def _print_transcription_result(result: TranscriptionResult) -> None:
+    """Print a compact summary of the transcription outcome."""
+    print(f"feature: {result.feature}")
+    print(f"marker:  {result.transcribed_path}")
+    print("tasks:")
+    for num in sorted(result.ids_by_section):
+        print(f"  section {num}: {result.ids_by_section[num]}")
 
 
 GITIGNORE_MANAGED = [
@@ -223,6 +253,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _reject_stray_resume_flags(args)
                 run_planning(args.feature)
+            return 0
+        except PlanningError as exc:
+            print(f"error: {exc}")
+            return 1
+    if args.command == "plan-to-beads":
+        try:
+            adapter = BeadsAdapter()
+            result = transcribe_to_beads(
+                args.feature,
+                adapter,
+                force=args.force,
+            )
+            _print_transcription_result(result)
             return 0
         except PlanningError as exc:
             print(f"error: {exc}")
