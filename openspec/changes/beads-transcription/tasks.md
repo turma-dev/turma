@@ -31,31 +31,39 @@
       `PlanningError` with a `brew install beads` hint on failure
       (Beads ships as a Go binary via Homebrew; it is not a PyPI
       package).
-- [ ] **Determine the body-writing mechanism first.** Run
-      `bd create --help` (and `bd --version` for the record) in a
-      scratch venv and pick the first mechanism the CLI supports:
-      `--description <text>` / `--body <text>` flag, stdin-based body
-      input, or the title-prefix fallback. Document the chosen
-      mechanism in the `BeadsAdapter` class docstring.
-- [ ] `create_task(title, body, task_type, priority, blocked_by_ids)`
-      returns the new `bd` task id. Body is recorded via the mechanism
-      chosen above; the first body line is `feature: <name>`, followed
-      by the verbatim subtask list. If the title-prefix fallback is
-      used, prepend `[feature:<name>] ` to the title and also write
-      `.beads/<feature>-subtasks.md` once per feature.
-- [ ] Parse the returned `bd` task id from stdout (JSON preferred if
-      available, otherwise text).
+- [ ] Body-writing mechanism chosen per `bd create --help` (Beads
+      1.0.2): inline `-d` / `--description <text>` flag. No fallback
+      mechanism needed. Chosen mechanism is recorded in the
+      `BeadsAdapter` class docstring.
+- [ ] `create_task(*, title, description, bd_type, priority, feature,
+      extra_labels=(), blocker_ids=())` returns the new `bd` task id
+      as a `str`. Feature association is recorded via the
+      `feature:<name>` label (first entry of `--labels`, followed by
+      any `extra_labels` comma-joined). Description is passed via
+      `--description`. Adapter receives bd-native types
+      (`bug|feature|task|epic|chore|decision`) and bd-native priority
+      in `[0,4]`; parser-type → bd-type translation lives in the
+      pipeline (Task 3).
+- [ ] For each `blocker_id`, follow the create with
+      `bd dep add <new-id> <blocker-id>` (direction: new depends on
+      blocker). `bd create --deps` is not used — its `blocks:<id>`
+      form is inverted from what Turma needs.
+- [ ] Parse the returned `bd` task id from stdout (`--silent` makes
+      create emit only the id).
 - [ ] `close_task(task_id)` runs `bd close <id>`, raises on non-zero.
-- [ ] `list_feature_tasks(feature)` runs `bd ls --json` and filters on
-      the `feature: <name>` first-line body tag (or the
-      `[feature:<name>] ` title prefix, depending on the mechanism
-      chosen above).
+- [ ] `list_feature_tasks(feature)` runs
+      `bd list --label feature:<feature> --json --limit 0` and returns
+      a tuple of `BeadsTaskRef(id, title, labels)` records for open
+      tasks.
 - [ ] All non-zero exits raise `PlanningError` with `bd` stderr
-      preserved verbatim.
+      preserved verbatim (falling back to stdout if stderr is empty).
 - [ ] Unit tests in `tests/test_transcription_beads.py` using
-      subprocess stubs covering create, close, list, missing-CLI, and
-      non-zero-exit paths. Tests pin the chosen argv shape so a
-      subsequent `bd` CLI change surfaces as a failing test.
+      subprocess stubs covering create (argv shape pinned, extra
+      labels, blocker follow-up calls), close, list (argv pinned,
+      empty, non-JSON, non-array, missing-id rows), missing-CLI, and
+      non-zero-exit paths including the orphan-on-dep-failure case.
+      The `VALID_BD_TYPES` frozenset is pinned to the upstream set as
+      a canary for bd CLI drift.
 
 ### 3. Wire the translation pipeline
 
@@ -70,8 +78,15 @@
       `--force` and surface the orphan IDs in the error message with
       both manual and `--force` recovery paths.
 - [ ] Implement the pipeline: parse, iterate sections in order,
-      resolve `blocked_by_ids` from prior create calls, invoke the
-      adapter.
+      translate parser task_type → bd_type (`impl`/`test` → `task`,
+      `docs` → `chore`, `spec` → `decision`) and parser priority →
+      bd priority (`min(N - 1, 4)`), resolve `blocker_ids` from prior
+      create calls, and invoke
+      `BeadsAdapter.create_task(title=..., description=...,
+      bd_type=..., priority=..., feature=..., extra_labels=(
+      f"turma-type:{parser_type}",), blocker_ids=...)`. Record each
+      returned id keyed by section number for dependency resolution
+      of later sections.
 - [ ] On full success, write `TRANSCRIBED.md` with feature name,
       timestamp, and the created task IDs in section order.
 - [ ] `--force` teardown: if `TRANSCRIBED.md` is present, close the
