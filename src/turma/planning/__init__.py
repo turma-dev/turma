@@ -74,6 +74,7 @@ class PlanningSession:
     critic_backend: AuthorBackend
     roles: PlanningRoles
     services: PlanningServices
+    max_rounds: int = 4
 
 
 def default_planning_services() -> PlanningServices:
@@ -166,6 +167,7 @@ def _prepare_planning_session(
         feature=feature,
         change_dir=change_dir,
         author_model=author_model,
+        max_rounds=config.planning.max_rounds,
         critic_model=critic_model,
         author_backend=author_backend,
         critic_backend=critic_backend,
@@ -293,8 +295,9 @@ def _generate_round_revision(
     """Run the two-call revision path for a round N >= 2 and return artifact paths.
 
     First call generates ``response_{N-1}.md`` from ``critique_{N-1}.md`` plus
-    the prior-round artifact set. Second call regenerates proposal/design/
-    tasks using the response as context.
+    the prior-round artifact set (and any human revision reason recorded in
+    ``response_{N-1}_human.md``). Second call regenerates proposal/design/
+    tasks using the response, human reason, and prior artifacts as context.
 
     Partial-failure rule: if the response file already exists on disk (from a
     prior crashed attempt), it is reused verbatim and only the revised-draft
@@ -320,6 +323,11 @@ def _generate_round_revision(
     }
     prior_artifact_content = _read_artifact_set(prior_artifacts)
 
+    human_reason_path = session.change_dir / f"response_{prev_round}_human.md"
+    human_reason = (
+        human_reason_path.read_text() if human_reason_path.exists() else ""
+    )
+
     response_path = session.change_dir / f"response_{prev_round}.md"
     if response_path.exists():
         response_text = response_path.read_text()
@@ -329,6 +337,7 @@ def _generate_round_revision(
             prev_round=prev_round,
             critique_text=critique_text,
             prior_artifact_content=prior_artifact_content,
+            human_reason=human_reason,
         )
         _write_artifact(response_path, response_text)
 
@@ -339,6 +348,7 @@ def _generate_round_revision(
         critique_text=critique_text,
         response_text=response_text,
         prior_artifact_content=prior_artifact_content,
+        human_reason=human_reason,
     )
 
 
@@ -347,6 +357,7 @@ def _generate_response(
     prev_round: int,
     critique_text: str,
     prior_artifact_content: str,
+    human_reason: str = "",
 ) -> str:
     """Author call 1: produce the per-finding response to a prior critique."""
     print(
@@ -360,6 +371,7 @@ def _generate_response(
         prev_round=prev_round,
         critique_text=critique_text,
         prior_artifact_content=prior_artifact_content,
+        human_reason=human_reason,
         repo_context=_build_repo_context(),
     )
     raw_output = session.author_backend.generate(
@@ -378,6 +390,7 @@ def _build_response_prompt(
     prev_round: int,
     critique_text: str,
     prior_artifact_content: str,
+    human_reason: str = "",
     repo_context: str = "",
 ) -> str:
     """Assemble the author prompt for the per-finding response artifact."""
@@ -395,6 +408,19 @@ def _build_response_prompt(
 
     parts.append(f"<critique>\n{critique_text}</critique>")
     parts.append(f"<artifacts>\n{prior_artifact_content}\n</artifacts>")
+
+    if human_reason.strip():
+        parts.append(
+            f"<human-revision-reason>\n{human_reason}\n</human-revision-reason>"
+        )
+        parts.append(
+            "The <human-revision-reason> block is operator-supplied "
+            "context that justifies why a revision was requested after the "
+            "prior round. Treat it as authoritative intent: any finding it "
+            "implicitly supports should be Accepted, and the revision must "
+            "address it directly even if the critic did not emphasize it."
+        )
+
     parts.append(
         "For each finding ID in the critique, write a single markdown section "
         "with an explicit Accept or Reject decision and a short rationale. "
@@ -417,6 +443,7 @@ def _generate_revised_artifacts(
     critique_text: str,
     response_text: str,
     prior_artifact_content: str,
+    human_reason: str = "",
 ) -> dict[str, Path]:
     """Author call 2: regenerate the three planning artifacts using the response."""
     written_artifacts: dict[str, Path] = {}
@@ -442,6 +469,7 @@ def _generate_revised_artifacts(
             critique_text=critique_text,
             response_text=response_text,
             prior_artifact_content=prior_artifact_content,
+            human_reason=human_reason,
             repo_context=_build_repo_context(),
         )
 
@@ -470,6 +498,7 @@ def _build_revision_prompt(
     critique_text: str,
     response_text: str,
     prior_artifact_content: str,
+    human_reason: str = "",
     repo_context: str = "",
 ) -> str:
     """Assemble the author prompt for a revised artifact in round N >= 2."""
@@ -508,6 +537,16 @@ def _build_revision_prompt(
     parts.append(
         f"<prior-artifacts>\n{prior_artifact_content}\n</prior-artifacts>"
     )
+
+    if human_reason.strip():
+        parts.append(
+            f"<human-revision-reason>\n{human_reason}\n</human-revision-reason>"
+        )
+        parts.append(
+            "The revised artifact must directly address the concerns in "
+            "<human-revision-reason>, which is operator-supplied intent from "
+            "the prior human approval gate."
+        )
 
     if dep_content:
         parts.append(

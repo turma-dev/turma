@@ -123,7 +123,14 @@ def _build_planning_graph(session: PlanningSession) -> StateGraph:
             "abandoned": "abandoned",
         },
     )
-    graph.add_edge("needs_revision", "drafting")
+    graph.add_conditional_edges(
+        "needs_revision",
+        _route_after_needs_revision,
+        {
+            "drafting": "drafting",
+            "needs_human_review": "needs_human_review",
+        },
+    )
     graph.add_edge("needs_human_review", END)
     graph.add_edge("approved", END)
     graph.add_edge("abandoned", END)
@@ -158,13 +165,29 @@ def _needs_revision_node(
     state: PlanningGraphState,
 ) -> PlanningGraphState:
     next_round = int(state.get("round", 1)) + 1
-    updated: PlanningGraphState = {
-        **state,
-        "round": next_round,
-        "state": "drafting",
-    }
+    if next_round > session.max_rounds:
+        reason = (
+            f"max_rounds ({session.max_rounds}) exceeded; refusing to enter "
+            f"round {next_round}"
+        )
+        updated: PlanningGraphState = {
+            **state,
+            "state": "needs_human_review",
+            "parse_failure_reason": reason,
+        }
+        _write_planning_state(session, updated)
+        return {
+            "state": "needs_human_review",
+            "parse_failure_reason": reason,
+        }
+
+    updated = {**state, "round": next_round, "state": "drafting"}
     _write_planning_state(session, updated)
     return {"round": next_round, "state": "drafting"}
+
+
+def _route_after_needs_revision(state: PlanningGraphState) -> str:
+    return state["state"]
 
 
 def _critic_review_node(
