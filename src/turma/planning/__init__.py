@@ -236,15 +236,17 @@ def _generate_initial_artifacts(session: PlanningSession) -> dict[str, Path]:
     return written_artifacts
 
 
-def _run_initial_critic_review(
+def _run_critic_review(
     session: PlanningSession,
     written_artifacts: dict[str, Path],
+    round_num: int = 1,
 ) -> ParseResult:
-    """Run the first critic review and write critique_1.md."""
+    """Run the critic review for a given round and write critique_N.md."""
     prompt = _build_critic_prompt(
         critic_role=session.roles.critic,
         feature=session.feature,
         artifact_content=_read_artifact_set(written_artifacts),
+        round_num=round_num,
         repo_context=_build_repo_context(),
     )
     raw_output = session.critic_backend.generate(
@@ -253,9 +255,15 @@ def _run_initial_critic_review(
         timeout=300,
     )
     critique_text = _normalize_generated_markdown(raw_output)
-    critique_path = session.change_dir / "critique_1.md"
+    critique_path = session.change_dir / f"critique_{round_num}.md"
     _write_artifact(critique_path, critique_text)
     return parse_critique(critique_text)
+
+
+# Back-compat alias: pre-existing callers expect the name
+# `_run_initial_critic_review`. Delegates to the generalized round-aware
+# implementation.
+_run_initial_critic_review = _run_critic_review
 
 
 def _print_critic_result(result: ParseResult) -> None:
@@ -278,16 +286,256 @@ def _read_artifact_set(written_artifacts: dict[str, Path]) -> str:
     return "\n\n".join(parts)
 
 
+def _generate_round_revision(
+    session: PlanningSession,
+    round_num: int,
+) -> dict[str, Path]:
+    """Run the two-call revision path for a round N >= 2 and return artifact paths.
+
+    First call generates ``response_{N-1}.md`` from ``critique_{N-1}.md`` plus
+    the prior-round artifact set. Second call regenerates proposal/design/
+    tasks using the response as context.
+
+    Partial-failure rule: if the response file already exists on disk (from a
+    prior crashed attempt), it is reused verbatim and only the revised-draft
+    call runs. Response is written before revised drafts so recovery from a
+    mid-revision crash always has the response artifact to replay against.
+    """
+    if round_num < 2:
+        raise PlanningError(
+            f"_generate_round_revision requires round >= 2 (got {round_num})"
+        )
+
+    prev_round = round_num - 1
+    critique_path = session.change_dir / f"critique_{prev_round}.md"
+    if not critique_path.exists():
+        raise PlanningError(
+            f"cannot run round {round_num}: {critique_path.name} not found"
+        )
+    critique_text = critique_path.read_text()
+
+    prior_artifacts = {
+        artifact_id: session.change_dir / f"{artifact_id}.md"
+        for artifact_id in ARTIFACT_ORDER
+    }
+    prior_artifact_content = _read_artifact_set(prior_artifacts)
+
+    response_path = session.change_dir / f"response_{prev_round}.md"
+    if response_path.exists():
+        response_text = response_path.read_text()
+    else:
+        response_text = _generate_response(
+            session,
+            prev_round=prev_round,
+            critique_text=critique_text,
+            prior_artifact_content=prior_artifact_content,
+        )
+        _write_artifact(response_path, response_text)
+
+    return _generate_revised_artifacts(
+        session,
+        round_num=round_num,
+        prev_round=prev_round,
+        critique_text=critique_text,
+        response_text=response_text,
+        prior_artifact_content=prior_artifact_content,
+    )
+
+
+def _generate_response(
+    session: PlanningSession,
+    prev_round: int,
+    critique_text: str,
+    prior_artifact_content: str,
+) -> str:
+    """Author call 1: produce the per-finding response to a prior critique."""
+    print(
+        f"generating response_{prev_round}.md (this may take 1-2 min) ...",
+        end=" ",
+        flush=True,
+    )
+    prompt = _build_response_prompt(
+        author_role=session.roles.author,
+        feature=session.feature,
+        prev_round=prev_round,
+        critique_text=critique_text,
+        prior_artifact_content=prior_artifact_content,
+        repo_context=_build_repo_context(),
+    )
+    raw_output = session.author_backend.generate(
+        prompt,
+        session.author_model,
+        timeout=300,
+    )
+    response_text = _normalize_generated_markdown(raw_output)
+    print("done")
+    return response_text
+
+
+def _build_response_prompt(
+    author_role: str,
+    feature: str,
+    prev_round: int,
+    critique_text: str,
+    prior_artifact_content: str,
+    repo_context: str = "",
+) -> str:
+    """Assemble the author prompt for the per-finding response artifact."""
+    parts = [
+        f"You are an author agent. Your role:\n\n<role>\n{author_role}\n</role>",
+        (
+            f'You are generating the per-finding response artifact for change '
+            f'"{feature}". You must emit response_{prev_round}.md responding '
+            f"to critique_{prev_round}.md BEFORE any revised draft is written."
+        ),
+    ]
+
+    if repo_context:
+        parts.append(f"<repo-context>\n{repo_context}\n</repo-context>")
+
+    parts.append(f"<critique>\n{critique_text}</critique>")
+    parts.append(f"<artifacts>\n{prior_artifact_content}\n</artifacts>")
+    parts.append(
+        "For each finding ID in the critique, write a single markdown section "
+        "with an explicit Accept or Reject decision and a short rationale. "
+        "Use this exact shape:\n\n"
+        "## [B001] Accept — one-line rationale\n\n"
+        "Keep one section per finding ID. Do not revise the spec artifacts "
+        "in this output — revision is a separate call."
+    )
+    parts.append(
+        "Output ONLY the response markdown. No preamble, no commentary, "
+        "no code fences."
+    )
+    return "\n\n".join(parts)
+
+
+def _generate_revised_artifacts(
+    session: PlanningSession,
+    round_num: int,
+    prev_round: int,
+    critique_text: str,
+    response_text: str,
+    prior_artifact_content: str,
+) -> dict[str, Path]:
+    """Author call 2: regenerate the three planning artifacts using the response."""
+    written_artifacts: dict[str, Path] = {}
+    backend = session.author_backend
+
+    for artifact_id in ARTIFACT_ORDER:
+        print(
+            f"revising {artifact_id} for round {round_num} (this may take 1-2 min) ...",
+            end=" ",
+            flush=True,
+        )
+
+        instructions = _get_instructions(artifact_id, session)
+        output_path = session.change_dir / instructions["outputPath"]
+        dep_content = _read_dependencies(instructions, written_artifacts)
+        prompt = _build_revision_prompt(
+            author_role=session.roles.author,
+            instructions=instructions,
+            dep_content=dep_content,
+            feature=session.feature,
+            round_num=round_num,
+            prev_round=prev_round,
+            critique_text=critique_text,
+            response_text=response_text,
+            prior_artifact_content=prior_artifact_content,
+            repo_context=_build_repo_context(),
+        )
+
+        raw_output = backend.generate(prompt, session.author_model, timeout=300)
+        artifact_text = _validate_artifact_output(
+            raw_output,
+            artifact_id,
+            instructions.get("template", ""),
+            session.feature,
+        )
+        _write_artifact(output_path, artifact_text)
+        written_artifacts[artifact_id] = output_path
+
+        print("done")
+
+    return written_artifacts
+
+
+def _build_revision_prompt(
+    author_role: str,
+    instructions: dict,
+    dep_content: str,
+    feature: str,
+    round_num: int,
+    prev_round: int,
+    critique_text: str,
+    response_text: str,
+    prior_artifact_content: str,
+    repo_context: str = "",
+) -> str:
+    """Assemble the author prompt for a revised artifact in round N >= 2."""
+    artifact_id = instructions["artifactId"]
+    instruction = instructions.get("instruction", "")
+    template = instructions.get("template", "")
+    context = instructions.get("context", "")
+    rules = instructions.get("rules", "")
+
+    parts = [
+        f"You are an author agent. Your role:\n\n<role>\n{author_role}\n</role>",
+        (
+            f'You are revising the "{artifact_id}" artifact for change '
+            f'"{feature}" in round {round_num}. Apply the Accepted findings '
+            f"from response_{prev_round}.md and do not regress any previously "
+            "correct content. Rejected findings may be left unchanged."
+        ),
+    ]
+
+    if repo_context:
+        parts.append(f"<repo-context>\n{repo_context}\n</repo-context>")
+
+    parts.extend([
+        f"<instructions>\n{instruction}\n</instructions>",
+        f"<template>\n{template}\n</template>",
+    ])
+
+    if context:
+        parts.append(f"<context>\n{context}\n</context>")
+
+    if rules:
+        parts.append(f"<rules>\n{rules}\n</rules>")
+
+    parts.append(f"<critique>\n{critique_text}</critique>")
+    parts.append(f"<response>\n{response_text}</response>")
+    parts.append(
+        f"<prior-artifacts>\n{prior_artifact_content}\n</prior-artifacts>"
+    )
+
+    if dep_content:
+        parts.append(
+            f"<revised-dependencies>\n{dep_content}\n</revised-dependencies>"
+        )
+
+    parts.append(
+        "Output ONLY the revised artifact markdown. No preamble, no commentary, "
+        "no code fences."
+    )
+    parts.append(
+        "Keep the same document shape as the prior artifact. Incorporate "
+        "Accepted findings; do not introduce unrelated changes."
+    )
+    return "\n\n".join(parts)
+
+
 def _build_critic_prompt(
     critic_role: str,
     feature: str,
     artifact_content: str,
+    round_num: int = 1,
     repo_context: str = "",
 ) -> str:
     """Assemble the critic prompt for a completed author round."""
     parts = [
         f"You are a critic agent. Your role:\n\n<role>\n{critic_role}\n</role>",
-        f'Review the round 1 planning artifacts for change "{feature}".',
+        f'Review the round {round_num} planning artifacts for change "{feature}".',
     ]
 
     if repo_context:

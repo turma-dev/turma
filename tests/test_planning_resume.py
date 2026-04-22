@@ -89,6 +89,14 @@ def _author_output(prompt: str, model: str, timeout: int) -> str:
         return "## Goals\nGoal\n\n## Non-goals\nNone\n"
     if 'creating the "tasks" artifact' in prompt:
         return "## Task 1\nDo it\n"
+    if "generating the per-finding response artifact" in prompt:
+        return "# Response\n\n## [B001] Accept — addressed in revision\n"
+    if 'revising the "proposal" artifact' in prompt:
+        return "## Why\nRevised need\n\n## What Changes\nRevised add\n"
+    if 'revising the "design" artifact' in prompt:
+        return "## Goals\nRevised goal\n\n## Non-goals\nRevised none\n"
+    if 'revising the "tasks" artifact' in prompt:
+        return "## Task 1\nRevised do it\n"
     raise AssertionError(f"unexpected author prompt: {prompt}")
 
 
@@ -165,16 +173,15 @@ def test_resume_approve_writes_marker_and_transitions_to_approved(
     assert state["state"] == "approved"
 
 
-def test_resume_revise_writes_human_reason_and_suspends_for_next_round(
+def test_resume_revise_writes_human_reason_and_loops_to_round_two(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--revise writes response_N_human.md and routes to needs_revision.
+    """--revise writes response_N_human.md and drives the graph into round 2.
 
-    Task 5 only validates the suspended state. The downstream needs_revision
-    → drafting loop is intentionally incomplete until Task 6 wires the
-    two-call revision path. Do not treat the lack of a round-2 transition
-    as a bug in this test.
+    Task 6 wired needs_revision → drafting, so --revise now loops through a
+    round-2 author two-call revision and a fresh critic_review, halting at
+    the round-2 human gate.
     """
     services = _seed_project(tmp_path, monkeypatch, APPROVED_CRITIQUE)
     change_dir = tmp_path / "openspec" / "changes" / "test-feature"
@@ -185,12 +192,17 @@ def test_resume_revise_writes_human_reason_and_suspends_for_next_round(
         ResumeRequest(action=ResumeAction.REVISE, reason="too vague"),
     )
 
-    assert result.state["state"] == "needs_revision"
-    assert result.next_nodes == ()
+    assert result.state["state"] == "awaiting_human_approval"
+    assert result.next_nodes == ("awaiting_human_approval",)
+    assert int(result.state["round"]) == 2
+
     reason_path = change_dir / "response_1_human.md"
     assert "too vague" in reason_path.read_text()
+    assert (change_dir / "response_1.md").exists()
+    assert (change_dir / "critique_2.md").exists()
     state = json.loads((change_dir / "PLANNING_STATE.json").read_text())
-    assert state["state"] == "needs_revision"
+    assert state["state"] == "awaiting_human_approval"
+    assert state["round"] == 2
 
 
 def test_resume_abandon_writes_marker_and_transitions_to_abandoned(
