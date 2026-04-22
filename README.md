@@ -130,7 +130,7 @@ uv run turma plan-to-beads --feature <name> --force
 Dolt (Beads' storage backend):
 
 ```bash
-brew install beads        # pulls dolt + icu4c@78 as dependencies
+brew install beads        # pulls Dolt and other required dependencies
 ```
 
 `turma plan-to-beads` raises a clear error with the `brew install beads`
