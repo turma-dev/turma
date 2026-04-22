@@ -5,11 +5,12 @@ Beads task tracking, and resumable swarm execution.
 
 ## Status
 
-Early implementation phase. This repo now has the Python package layout,
-OpenSpec workflow scaffolding, a working `turma init` command, a working
-single-pass `turma plan` command, baseline CI, and public architecture
-documentation. The full author/critic planning loop and execution orchestrator
-described in the architecture docs are not implemented yet.
+Early implementation phase. This repo has the Python package layout, OpenSpec
+workflow scaffolding, a working `turma init` command, a working `turma plan`
+command running a full author/critic loop with an explicit human approval
+gate and resume CLI, baseline CI, and public architecture documentation. The
+execution orchestrator described in the architecture docs is not implemented
+yet.
 
 ## What It Is
 
@@ -58,27 +59,55 @@ uv run turma status
 Current command status:
 
 - `turma init` is implemented
-- `turma plan` is implemented as a single-pass author workflow
+- `turma plan` runs the full author/critic loop with a human approval gate
+  and a resume CLI
 - `turma run` and `turma status` are still scaffolds
 
 `turma init` expects `turma.example.toml` to exist in the target directory. It
 creates `turma.toml` from that template and updates `.gitignore` with
 Turma-managed entries.
 
-`turma plan --feature <name>` currently:
+`turma plan --feature <name>` does the following per round:
 
-- reads `planning.author_model` from `turma.toml`
-- requires `.agents/author.md`
-- scaffolds an OpenSpec change with `openspec`
-- generates `proposal`, `design`, and `tasks` in a fixed order
-- supports Claude, Codex, Gemini, and OpenCode-backed author generation
+- reads `planning.author_model` and `planning.critic_model` from `turma.toml`
+- requires `.agents/author.md` and `.agents/critic.md`
+- on round 1, scaffolds an OpenSpec change with `openspec` and generates
+  `proposal.md`, `design.md`, and `tasks.md`
+- on round ≥ 2, runs the two-call revision: author first writes
+  `response_{N-1}.md` replying to each finding in `critique_{N-1}.md`, then
+  regenerates the three artifacts using that response as context
+- runs the critic backend to produce a strict `critique_N.md`
+- routes on the critic's `## Status:` token: `blocking` → revise,
+  `nits_only` / `approved` → await human, malformed → `needs_human_review`
+- suspends at `awaiting_human_approval` with the exact resume commands
+  printed
 
-Planning quality depends on the chosen backend/model. Claude-backed planning is
-currently the strongest validated path. OpenCode transport is validated, but
-provider/model quality varies. Gemini requires the `gemini` CLI
+Loop budget: `planning.max_rounds` caps the iterations; repeated unresolved
+blocking finding IDs across two rounds also route to `needs_human_review`.
+Filesystem terminal markers (`APPROVED`, `ABANDONED.md`,
+`NEEDS_HUMAN_REVIEW.md`) are authoritative — re-running `turma plan` on an
+already-terminal plan is a read-only no-op.
+
+Planning quality depends on the chosen backend/model. Claude-backed planning
+is currently the strongest validated path. OpenCode transport is validated,
+but provider/model quality varies. Gemini requires the `gemini` CLI
 (`npm install -g @google/gemini-cli`).
 
-It does not yet run a critic loop, commit changes, or orchestrate execution.
+It does not yet commit changes or orchestrate execution.
+
+## Resume CLI
+
+```bash
+uv run turma plan --feature <name> --resume                           # read-only status
+uv run turma plan --feature <name> --resume --approve                 # write APPROVED
+uv run turma plan --feature <name> --resume --revise "<why>"          # advance into a new round
+uv run turma plan --feature <name> --resume --abandon "<why>"         # write ABANDONED.md
+uv run turma plan --feature <name> --resume --approve --override "<why>"  # override from needs_human_review
+```
+
+`--approve`, `--revise`, and `--abandon` are valid only when the graph is
+suspended at `awaiting_human_approval`. `--approve --override` is valid only
+when the graph has halted in `needs_human_review`.
 
 Validation commands:
 
@@ -95,7 +124,6 @@ uv run pytest
 
 ## Next Implementation Steps
 
-- add the critic loop and approval flow on top of `turma plan`
 - wire `turma run` to Beads plus worktree orchestration
 - persist reconciliation metadata for resumable task recovery
 - replace placeholder status output with task, PR, and CI state

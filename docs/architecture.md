@@ -47,11 +47,33 @@ The important properties are:
 - planning output must be concrete enough that implementation workers are not
   forced to guess intent
 
-A useful planning state model is:
+The committed v1 state model is:
 
-`drafting -> critic_review -> awaiting_human_approval -> approved`
+```
+drafting -> critic_review -> {needs_revision | awaiting_human_approval}
+awaiting_human_approval -> {approved | needs_revision | abandoned}
+needs_revision -> drafting (round++)
+any state -> needs_human_review
+  on: round budget exhaustion
+    | critique parse failure
+    | repeated unresolved blocking finding IDs across consecutive rounds
+needs_human_review -> approved (only via explicit --approve --override)
+```
 
-with revision paths back into drafting when the spec is incomplete or wrong.
+Routing at `critic_review` is decided by the critic's `Status:` token
+(`blocking | nits_only | approved`). Blocking rounds always revise;
+non-blocking rounds suspend at the human gate. A human must approve
+explicitly — critic `approved` never ends the loop on its own.
+
+Revisions use a two-call contract: the author first writes a per-finding
+`response_N.md`, then regenerates the spec artifacts using that response
+as input. A partial failure between the two calls preserves the response
+on disk for retry.
+
+Terminal filesystem markers (`APPROVED`, `ABANDONED.md`,
+`NEEDS_HUMAN_REVIEW.md`) are the authoritative indicator of current
+state. A LangGraph SQLite checkpoint and a `PLANNING_STATE.json` hint
+back up the marker-based authority order but do not override it.
 
 ## Task Translation
 
@@ -120,13 +142,17 @@ Today, the public repo contains:
 - a Python package scaffold
 - OpenSpec workflow scaffolding
 - a working `turma init` command
-- a working single-pass `turma plan` command with Claude, Codex, Gemini, and OpenCode-backed artifact generation
+- a working `turma plan` command running the full author/critic loop with
+  max-rounds and loop-detection guards, a resume CLI
+  (`--approve | --revise | --abandon | --approve --override`), and
+  LangGraph SQLite checkpointing, backed by Claude, Codex, Gemini, and
+  OpenCode authoring backends
 - minimal CI for install and test validation
 - project configuration and validation basics
 - architecture and workflow documentation
 
-Planning quality still depends on the chosen provider/model. The full
-author/critic planning loop and execution orchestrator are not implemented yet.
+Planning quality still depends on the chosen provider/model. The execution
+orchestrator is not implemented yet.
 
 ## Scope Of This Document
 
