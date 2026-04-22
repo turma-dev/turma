@@ -18,8 +18,8 @@ boilerplate = "openai/gpt-oss-20b"
 # or revises proposal/design/tasks; the critic writes a strict
 # critique_N.md; the graph routes on the critic's `## Status:` token.
 # A human gate at `awaiting_human_approval` must be resumed explicitly
-# via `turma plan --resume --approve | --revise | --abandon |
-# --approve --override`.
+# via `turma plan --feature <name> --resume --approve | --revise |
+# --abandon | --approve --override`.
 
 # Maximum author/critic rounds before escalation. Exhaustion and
 # repeated-unresolved-blocking-ID loop detection both route to
