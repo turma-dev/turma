@@ -145,6 +145,18 @@ def _run_idempotency_preflight(
                 "change already transcribed to Beads; use --force to re-create"
             )
         recorded_ids = _read_transcribed_ids(transcribed_path)
+        if not recorded_ids:
+            # A marker we cannot parse is untrustworthy — silently
+            # unlinking it here and creating fresh tasks would
+            # duplicate any already-existing feature-tagged tasks.
+            # Refuse and force the operator to resolve manually.
+            raise PlanningError(
+                f"TRANSCRIBED.md at {transcribed_path} exists but no "
+                "`- section N: <id>` lines could be parsed. Cannot "
+                "determine what to tear down. Inspect the file, delete "
+                "it manually, or close feature-tagged tasks with "
+                "`bd close` and retry."
+            )
         for task_id in reversed(recorded_ids):
             adapter.close_task(task_id)
         transcribed_path.unlink()
