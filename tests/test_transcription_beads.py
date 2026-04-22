@@ -124,6 +124,51 @@ def test_create_task_includes_extra_labels_in_order() -> None:
     )
 
 
+def test_create_task_leaves_labeled_orphan_when_dep_add_fails() -> None:
+    """Orphan-on-dep-failure is a documented, recoverable condition.
+
+    `bd create` is a separate call from each `bd dep add`; if the task
+    is created successfully and a subsequent `bd dep add` fails, the
+    new task already exists in Beads. The caller (Task 3's pipeline)
+    catches the raised PlanningError and relies on orphan detection
+    via the feature label to recover. This test pins that behavior:
+    the adapter surfaces the underlying `bd dep add` stderr verbatim
+    and does not attempt to close the new task itself.
+    """
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "create"]:
+            return _completed(argv, stdout="bd-orphan\n")
+        if argv[:3] == ["bd", "dep", "add"]:
+            raise PlanningError(
+                f"bd dep add failed: exit 3\nblocker bd-missing not found"
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    with pytest.raises(PlanningError) as exc:
+        adapter.create_task(
+            title="Needs a blocker",
+            description="body",
+            bd_type="task",
+            priority=2,
+            feature="foo",
+            blocker_ids=("bd-missing",),
+        )
+
+    assert "bd dep add failed" in str(exc.value)
+    assert "blocker bd-missing not found" in str(exc.value)
+    # bd create ran (task exists), then the dep add failed.
+    assert seen[0][:2] == ["bd", "create"]
+    assert seen[1][:3] == ["bd", "dep", "add"]
+    # No second `bd create` or `bd close` call — the orphan is left in
+    # place for Task 3's orphan-detection path to clean up.
+    assert len([a for a in seen if a[:2] == ["bd", "create"]]) == 1
+    assert not any(a[:2] == ["bd", "close"] for a in seen)
+
+
 def test_create_task_adds_dependency_per_blocker() -> None:
     seen: list[list[str]] = []
 
