@@ -45,6 +45,19 @@ def test_plan_to_beads_requires_feature(
     assert "--feature" in err
 
 
+def test_plan_to_beads_rejects_unknown_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """argparse rejects stray / unknown flags on `plan-to-beads`."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "plan-to-beads", "--feature", "oauth", "--bogus",
+        ])
+    err = capsys.readouterr().err
+    assert "--bogus" in err or "unrecognized" in err
+
+
 # ---------------------------------------------------------------------
 # Dispatch behavior
 # ---------------------------------------------------------------------
