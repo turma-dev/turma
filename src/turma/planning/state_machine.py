@@ -15,8 +15,9 @@ from turma.errors import PlanningError
 from turma.planning import (
     PlanningSession,
     _generate_initial_artifacts,
+    _generate_round_revision,
     _print_critic_result,
-    _run_initial_critic_review,
+    _run_critic_review,
     _scaffold_change,
 )
 from turma.planning.critique_parser import CritiqueStatus, ParseFailure, ParsedCritique
@@ -87,7 +88,10 @@ def _build_planning_graph(session: PlanningSession) -> StateGraph:
     graph = StateGraph(PlanningGraphState)
     graph.add_node("drafting", lambda state: _drafting_node(session, state))
     graph.add_node("critic_review", lambda state: _critic_review_node(session, state))
-    graph.add_node("needs_revision", _halt_node("needs_revision"))
+    graph.add_node(
+        "needs_revision",
+        lambda state: _needs_revision_node(session, state),
+    )
     graph.add_node(
         "awaiting_human_approval",
         lambda state: _awaiting_human_approval_node(session, state),
@@ -119,8 +123,7 @@ def _build_planning_graph(session: PlanningSession) -> StateGraph:
             "abandoned": "abandoned",
         },
     )
-    # Task 6 wires needs_revision back to drafting after two-call revision.
-    graph.add_edge("needs_revision", END)
+    graph.add_edge("needs_revision", "drafting")
     graph.add_edge("needs_human_review", END)
     graph.add_edge("approved", END)
     graph.add_edge("abandoned", END)
@@ -139,23 +142,42 @@ def _drafting_node(
     session: PlanningSession,
     state: PlanningGraphState,
 ) -> PlanningGraphState:
-    _scaffold_change(session)
-    _generate_initial_artifacts(session)
+    round_num = int(state.get("round", 1))
+    if round_num == 1:
+        _scaffold_change(session)
+        _generate_initial_artifacts(session)
+    else:
+        _generate_round_revision(session, round_num)
     updated = {**state, "state": "critic_review"}
     _write_planning_state(session, updated)
     return updated
+
+
+def _needs_revision_node(
+    session: PlanningSession,
+    state: PlanningGraphState,
+) -> PlanningGraphState:
+    next_round = int(state.get("round", 1)) + 1
+    updated: PlanningGraphState = {
+        **state,
+        "round": next_round,
+        "state": "drafting",
+    }
+    _write_planning_state(session, updated)
+    return {"round": next_round, "state": "drafting"}
 
 
 def _critic_review_node(
     session: PlanningSession,
     state: PlanningGraphState,
 ) -> PlanningGraphState:
+    round_num = int(state.get("round", 1))
     artifact_paths = {
         "proposal": session.change_dir / "proposal.md",
         "design": session.change_dir / "design.md",
         "tasks": session.change_dir / "tasks.md",
     }
-    critique = _run_initial_critic_review(session, artifact_paths)
+    critique = _run_critic_review(session, artifact_paths, round_num=round_num)
     _print_critic_result(critique)
 
     next_state = _state_name_for_critique(critique)
@@ -163,7 +185,7 @@ def _critic_review_node(
         **state,
         "state": next_state,
         "critic_route": critique.route.value,
-        "last_critique": "critique_1.md",
+        "last_critique": f"critique_{round_num}.md",
     }
 
     if isinstance(critique, ParsedCritique):
