@@ -393,6 +393,54 @@ def test_force_with_transcribed_md_closes_recorded_ids_in_reverse(
     assert (change_dir / "TRANSCRIBED.md").exists()
 
 
+def test_force_refuses_empty_transcribed_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty TRANSCRIBED.md under --force must NOT proceed silently.
+
+    If the marker existed but contains no parseable `- section N: <id>`
+    lines, the pipeline cannot know which Beads tasks to tear down.
+    Silently unlinking the marker and re-running would duplicate any
+    already-existing feature-tagged tasks. Hard fail with an actionable
+    message instead.
+    """
+    change_dir = _setup_approved_change(tmp_path)
+    (change_dir / "TRANSCRIBED.md").write_text("")
+    monkeypatch.chdir(tmp_path)
+
+    adapter = StubBeadsAdapter()
+    with pytest.raises(PlanningError, match="no `- section N: <id>` lines"):
+        transcribe_to_beads("oauth", adapter, force=True)
+
+    # Marker must remain on disk so the operator can inspect it.
+    assert (change_dir / "TRANSCRIBED.md").exists()
+    assert adapter.closed_ids == []
+    assert adapter.created_calls == []
+
+
+def test_force_refuses_malformed_transcribed_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A marker with no parseable id lines under --force also hard-fails."""
+    change_dir = _setup_approved_change(tmp_path)
+    (change_dir / "TRANSCRIBED.md").write_text(
+        "# TRANSCRIBED\n\n"
+        "- feature: oauth\n"
+        "- timestamp: 2026-04-22T00:00:00+00:00\n"
+        "- task_ids:\n"
+        "  (list got corrupted somehow)\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    adapter = StubBeadsAdapter()
+    with pytest.raises(PlanningError, match="Cannot determine what to tear down"):
+        transcribe_to_beads("oauth", adapter, force=True)
+
+    assert (change_dir / "TRANSCRIBED.md").exists()
+    assert adapter.closed_ids == []
+    assert adapter.created_calls == []
+
+
 def test_force_with_orphans_closes_them_then_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

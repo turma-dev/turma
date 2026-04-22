@@ -68,10 +68,16 @@
 ### 3. Wire the translation pipeline
 
 - [ ] `src/turma/transcription/__init__.py` exposes
-      `transcribe_to_beads(feature, services, *, force=False)` that
-      returns the created task IDs on success.
-- [ ] Gate on `reconcile_current_state(session) == "approved"` before
-      any other work.
+      `transcribe_to_beads(feature, adapter, *, force=False)` that
+      returns a `TranscriptionResult(feature, ids_by_section,
+      transcribed_path)`. The adapter is injected directly (not via
+      `PlanningServices`) because transcription has none of planning's
+      backend / role / openspec-CLI needs; passing a heavyweight
+      session is disproportionate.
+- [ ] Gate on the `APPROVED` terminal marker in the change directory
+      before any other work. Checking the file directly is equivalent
+      to `reconcile_current_state(session) == "approved"` for the top
+      tier of the authority order, without the session dependency.
 - [ ] Preflight `TRANSCRIBED.md`: refuse without `--force` if present.
 - [ ] Preflight `list_feature_tasks(feature)` when `TRANSCRIBED.md` is
       absent: if the adapter returns any orphans, refuse without
@@ -102,10 +108,11 @@
 
 - [ ] Add `plan-to-beads` subparser to `src/turma/cli.py` with
       `--feature` (required) and `--force` (flag).
-- [ ] Dispatch to `transcribe_to_beads(feature, services,
-      force=args.force)`. Reuse the existing
-      `default_planning_services()` factory where the adapter can be
-      substituted for tests.
+- [ ] Construct a `BeadsAdapter()` and dispatch to
+      `transcribe_to_beads(feature, adapter, force=args.force)`. The
+      adapter's `__init__` handles the `bd` missing-CLI check and
+      surfaces the `brew install beads` hint. Tests can inject a stub
+      adapter by calling `transcribe_to_beads` directly.
 - [ ] Map `PlanningError` to a non-zero exit and print the message.
 - [ ] `tests/test_transcription_cli.py`: invocations, exit codes,
       stray-flag rejection, `--force` combinations.
