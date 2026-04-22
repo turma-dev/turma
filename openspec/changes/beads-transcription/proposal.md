@@ -31,9 +31,12 @@ prose, unusable by the swarm.
   on an `APPROVED` terminal marker in the change directory, invokes the
   parser and translation pipeline, creates the Beads tasks, and writes
   a `TRANSCRIBED.md` marker in the change directory on success.
-- Idempotency: re-running refuses unless `--force` is set. `--force`
-  requires the prior `TRANSCRIBED.md` to exist and clears before
-  re-creating (documented as a deliberate user action).
+- Idempotency: re-running refuses unless `--force` is set. The
+  pipeline preflights both a `TRANSCRIBED.md` marker (success signal)
+  and `list_feature_tasks(feature)` (orphan detection from prior
+  failed attempts). `--force` clears whichever is present — recorded
+  IDs from the marker, orphan IDs from Beads, or neither — and
+  re-runs the pipeline from scratch.
 - `beads` runtime dependency (the `bd` CLI) declared in the README and
   surfaced with a clear error if missing. `bd` is not a Python package
   Turma imports; it is a CLI installed separately (currently via
