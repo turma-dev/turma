@@ -75,6 +75,7 @@ class PlanningSession:
     roles: PlanningRoles
     services: PlanningServices
     max_rounds: int = 4
+    interactive: bool = True
 
 
 def default_planning_services() -> PlanningServices:
@@ -109,13 +110,37 @@ def run_planning(
         print(f"planning suspended before: {', '.join(result.next_nodes)}")
     print(f"checkpoint: {result.checkpoint_path}")
 
+    round_num = int(result.state.get("round", 1))
+    current_state = result.state.get("state")
+
     if result.next_nodes:
         print(
-            f"\nplanning paused. review openspec/changes/{feature}/critique_1.md "
-            "before resuming."
+            f"\nplanning paused at round {round_num}. "
+            f"review openspec/changes/{feature}/critique_{round_num}.md "
+            "then resume with:"
         )
+        _print_resume_command_hints(feature, include_override=False)
+    elif current_state == "needs_human_review":
+        print(
+            f"\nplanning halted at needs_human_review. review "
+            f"openspec/changes/{feature}/NEEDS_HUMAN_REVIEW.md then override with:"
+        )
+        _print_resume_command_hints(feature, include_override=True)
     else:
         print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
+
+
+def _print_resume_command_hints(feature: str, *, include_override: bool) -> None:
+    """Print the resume command surface for a suspended or halted plan."""
+    if include_override:
+        print(
+            f'  turma plan --feature {feature} --resume --approve '
+            f'--override "<reason>"'
+        )
+        return
+    print(f"  turma plan --feature {feature} --resume --approve")
+    print(f'  turma plan --feature {feature} --resume --revise "<reason>"')
+    print(f'  turma plan --feature {feature} --resume --abandon "<reason>"')
 
 
 def _prepare_planning_session(
@@ -168,6 +193,7 @@ def _prepare_planning_session(
         change_dir=change_dir,
         author_model=author_model,
         max_rounds=config.planning.max_rounds,
+        interactive=config.planning.interactive,
         critic_model=critic_model,
         author_backend=author_backend,
         critic_backend=critic_backend,

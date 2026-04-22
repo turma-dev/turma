@@ -43,10 +43,11 @@ class PlanningGraphState(TypedDict, total=False):
     state: PlanningStateName
     critic_status: str
     critic_route: str
-    parse_failure_reason: str
+    needs_human_review_reason: str
     last_critique: str
     resume_action: ResumeActionName | None
     resume_reason: str | None
+    prev_blocking_finding_ids: list[str] | None
 
 
 @dataclass(frozen=True)
@@ -64,9 +65,21 @@ def checkpoint_path_for(feature: str) -> Path:
 
 
 def run_planning_state_machine(session: PlanningSession) -> PlanningGraphResult:
-    """Run round 1 through critic review and suspend at the human gate."""
+    """Run round 1 through critic review and suspend at the human gate.
+
+    Reconciles against terminal markers on the filesystem before invoking
+    the graph (authority order per the v1 design: terminal artifacts win
+    over checkpoint and JSON hint). If a terminal marker is present, the
+    graph is not re-invoked; instead the terminal state is surfaced
+    directly so re-running the planner on an already-terminal plan is a
+    read-only no-op.
+    """
     checkpoint_path = checkpoint_path_for(session.feature)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    terminal = reconcile_current_state(session)
+    if terminal is not None:
+        return _short_circuit_on_terminal(session, terminal, checkpoint_path)
 
     with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
         graph = _build_planning_graph(session).compile(
@@ -80,6 +93,46 @@ def run_planning_state_machine(session: PlanningSession) -> PlanningGraphResult:
     return PlanningGraphResult(
         state=state,
         next_nodes=tuple(snapshot.next),
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def reconcile_current_state(
+    session: PlanningSession,
+) -> PlanningStateName | None:
+    """Return the terminal state on disk, or None if no terminal marker exists.
+
+    Authority order (highest first): terminal artifacts (APPROVED,
+    ABANDONED.md, NEEDS_HUMAN_REVIEW.md). This function deliberately does
+    NOT consult the checkpoint, git history, or PLANNING_STATE.json — a
+    present terminal artifact always wins for "current state" per the v1
+    design doc. Callers that need deeper reconciliation (e.g. merging
+    critique/response files with checkpoint state) should layer their own
+    logic on top.
+    """
+    change_dir = session.change_dir
+    if (change_dir / "APPROVED").exists():
+        return "approved"
+    if (change_dir / "ABANDONED.md").exists():
+        return "abandoned"
+    if (change_dir / "NEEDS_HUMAN_REVIEW.md").exists():
+        return "needs_human_review"
+    return None
+
+
+def _short_circuit_on_terminal(
+    session: PlanningSession,
+    terminal: PlanningStateName,
+    checkpoint_path: Path,
+) -> PlanningGraphResult:
+    """Return a PlanningGraphResult reflecting a terminal marker without invoking the graph."""
+    state: PlanningGraphState = {
+        "feature": session.feature,
+        "state": terminal,
+    }
+    return PlanningGraphResult(
+        state=state,
+        next_nodes=(),
         checkpoint_path=checkpoint_path,
     )
 
@@ -173,12 +226,12 @@ def _needs_revision_node(
         updated: PlanningGraphState = {
             **state,
             "state": "needs_human_review",
-            "parse_failure_reason": reason,
+            "needs_human_review_reason": reason,
         }
         _write_planning_state(session, updated)
         return {
             "state": "needs_human_review",
-            "parse_failure_reason": reason,
+            "needs_human_review_reason": reason,
         }
 
     updated = {**state, "round": next_round, "state": "drafting"}
@@ -213,8 +266,30 @@ def _critic_review_node(
 
     if isinstance(critique, ParsedCritique):
         updated["critic_status"] = critique.status.value
+        # Loop detection: if two consecutive blocking rounds flag the same
+        # unresolved blocking finding ID set, the author is not making
+        # progress and the plan escalates to needs_human_review.
+        if critique.status is CritiqueStatus.BLOCKING:
+            current_ids = sorted(
+                {f.id for f in critique.findings if f.id.startswith("B")}
+            )
+            prev_ids = state.get("prev_blocking_finding_ids") or []
+            if current_ids and prev_ids == current_ids:
+                reason = (
+                    "repeated unresolved blocking finding IDs across "
+                    f"rounds {round_num - 1} and {round_num}: "
+                    f"{current_ids}"
+                )
+                updated["state"] = "needs_human_review"
+                updated["needs_human_review_reason"] = reason
+                updated["prev_blocking_finding_ids"] = current_ids
+            else:
+                updated["prev_blocking_finding_ids"] = current_ids
+        else:
+            # Non-blocking round clears the loop-detection memory.
+            updated["prev_blocking_finding_ids"] = []
     else:
-        updated["parse_failure_reason"] = critique.reason
+        updated["needs_human_review_reason"] = critique.reason
 
     _write_planning_state(session, updated)
     return updated
@@ -248,10 +323,14 @@ def _write_planning_state(
         "feature": session.feature,
         "round": state.get("round", 1),
         "state": state.get("state"),
-        # Task 7 will wire this to the last round-level git commit SHA.
+        # Git SHA wiring is orthogonal to the critic loop and lives with the
+        # future commit-per-round work; kept as None here so the JSON shape
+        # matches the design doc schema.
         "last_commit": None,
         "last_critique": state.get("last_critique"),
         "critic_status": state.get("critic_status"),
+        "needs_human_review_reason": state.get("needs_human_review_reason"),
+        "prev_blocking_finding_ids": state.get("prev_blocking_finding_ids"),
         "updated_at": datetime.now(UTC).isoformat(),
     }
     path = session.change_dir / "PLANNING_STATE.json"
@@ -295,7 +374,9 @@ def _needs_human_review_node(
     session: PlanningSession,
     state: PlanningGraphState,
 ) -> PlanningGraphState:
-    reason = state.get("parse_failure_reason") or "See PLANNING_STATE.json"
+    reason = (
+        state.get("needs_human_review_reason") or "See PLANNING_STATE.json"
+    )
     round_num = int(state.get("round", 1))
     _write_needs_human_review(session, reason, round_num)
     return {"state": "needs_human_review"}
@@ -368,8 +449,20 @@ def _write_needs_human_review(
 
 
 def read_planning_state(session: PlanningSession) -> PlanningGraphResult:
-    """Load the checkpoint and return current state without mutating."""
+    """Load state without mutating, honoring terminal-marker authority.
+
+    Terminal filesystem markers (APPROVED, ABANDONED.md,
+    NEEDS_HUMAN_REVIEW.md) trump the checkpoint for current state. If a
+    terminal marker is present, the reported state reflects it even if
+    the checkpoint has not been updated to match. Otherwise the
+    LangGraph checkpoint is read.
+    """
     checkpoint_path = checkpoint_path_for(session.feature)
+
+    terminal = reconcile_current_state(session)
+    if terminal is not None and not checkpoint_path.exists():
+        return _short_circuit_on_terminal(session, terminal, checkpoint_path)
+
     if not checkpoint_path.exists():
         raise PlanningError(
             f"no planning checkpoint found for {session.feature!r}. "
@@ -383,9 +476,15 @@ def read_planning_state(session: PlanningSession) -> PlanningGraphResult:
         config = {"configurable": {"thread_id": session.feature}}
         snapshot = graph.get_state(config)
 
+    state = dict(snapshot.values)
+    next_nodes = tuple(snapshot.next)
+    if terminal is not None and state.get("state") != terminal:
+        state["state"] = terminal
+        next_nodes = ()
+
     return PlanningGraphResult(
-        state=snapshot.values,
-        next_nodes=tuple(snapshot.next),
+        state=state,
+        next_nodes=next_nodes,
         checkpoint_path=checkpoint_path,
     )
 
