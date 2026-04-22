@@ -120,8 +120,16 @@ def run_planning(
 def _prepare_planning_session(
     feature: str,
     services: PlanningServices,
+    *,
+    require_fresh: bool = True,
 ) -> PlanningSession:
-    """Load config, roles, and validate the initial planning target."""
+    """Load config, roles, and validate the initial planning target.
+
+    When ``require_fresh`` is True (default, used by ``turma plan``), the
+    change directory must not already exist and the openspec CLI must be
+    on PATH. When False (used by the resume flow), the change directory
+    must already exist and the openspec CLI is not required.
+    """
     try:
         config = load_config()
     except ConfigError as exc:
@@ -131,14 +139,19 @@ def _prepare_planning_session(
     critic_model = config.planning.critic_model
 
     change_dir = Path.cwd() / "openspec" / "changes" / feature
-    if change_dir.exists():
+    if require_fresh and change_dir.exists():
         raise PlanningError(
             f"openspec/changes/{feature}/ already exists. "
             "Remove it or pick a different feature name."
         )
+    if not require_fresh and not change_dir.exists():
+        raise PlanningError(
+            f"openspec/changes/{feature}/ does not exist. "
+            "Run turma plan first before resuming."
+        )
 
     roles = _load_planning_roles()
-    if shutil.which("openspec") is None:
+    if require_fresh and shutil.which("openspec") is None:
         raise PlanningError(
             "openspec CLI not found. Install it: npm install -g @fission-ai/openspec"
         )
