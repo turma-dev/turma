@@ -635,6 +635,42 @@ def test_run_planning_short_circuits_on_existing_terminal_marker(
     assert "planning complete" in out
 
 
+def test_run_planning_reports_abandoned_for_abandoned_terminal_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An ABANDONED.md terminal marker must not be reported as completion.
+
+    Task 7's short-circuit branch only special-cased needs_human_review,
+    so abandoned plans fell through to "planning complete" — misleading.
+    The abandoned case needs its own branch.
+    """
+    from turma.planning import run_planning
+
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    change_dir = tmp_path / "openspec" / "changes" / "abandoned-feature"
+    change_dir.mkdir(parents=True)
+    (change_dir / "ABANDONED.md").write_text(
+        "# ABANDONED\n\n- reason: pivoted\n- round: 1\n- actor: human\n"
+    )
+
+    services = PlanningServices(
+        get_backend=lambda model: FakeBackend(lambda *_: "should not be called"),
+        run_openspec=_run_openspec,
+    )
+
+    run_planning("abandoned-feature", services)
+
+    out = capsys.readouterr().out
+    assert "planning abandoned" in out
+    assert "ABANDONED.md" in out
+    assert "planning complete" not in out
+
+
 def test_planning_state_json_is_not_authoritative_for_terminal_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
