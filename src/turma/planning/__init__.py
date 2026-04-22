@@ -17,6 +17,7 @@ from turma.authoring.gemini import GeminiAuthorBackend
 from turma.authoring.opencode import OpenCodeAuthorBackend
 from turma.config import ConfigError, load_config
 from turma.errors import PlanningError
+from turma.planning.critique_parser import ParseFailure, ParsedCritique, ParseResult, parse_critique
 
 ARTIFACT_ORDER = ["proposal", "design", "tasks"]
 QUESTION_PATTERNS = (
@@ -50,6 +51,7 @@ class PlanningRoles:
     """Role prompts used by planning agents."""
 
     author: str
+    critic: str
 
 
 @dataclass
@@ -67,7 +69,9 @@ class PlanningSession:
     feature: str
     change_dir: Path
     author_model: str
+    critic_model: str
     author_backend: AuthorBackend
+    critic_backend: AuthorBackend
     roles: PlanningRoles
     services: PlanningServices
 
@@ -98,7 +102,9 @@ def run_planning(
     print(f"creating change: {feature}")
 
     _scaffold_change(session)
-    _generate_initial_artifacts(session)
+    written_artifacts = _generate_initial_artifacts(session)
+    critique = _run_initial_critic_review(session, written_artifacts)
+    _print_critic_result(critique)
 
     print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
 
@@ -114,8 +120,8 @@ def _prepare_planning_session(
         raise PlanningError(str(exc)) from exc
 
     author_model = config.planning.author_model
+    critic_model = config.planning.critic_model
 
-    roles = _load_planning_roles()
     change_dir = Path.cwd() / "openspec" / "changes" / feature
     if change_dir.exists():
         raise PlanningError(
@@ -123,17 +129,25 @@ def _prepare_planning_session(
             "Remove it or pick a different feature name."
         )
 
+    roles = _load_planning_roles()
     if shutil.which("openspec") is None:
         raise PlanningError(
             "openspec CLI not found. Install it: npm install -g @fission-ai/openspec"
         )
+    if not critic_model:
+        raise PlanningError(
+            "planning.critic_model is required in turma.toml for critic review"
+        )
     author_backend = services.get_backend(author_model)
+    critic_backend = services.get_backend(critic_model)
 
     return PlanningSession(
         feature=feature,
         change_dir=change_dir,
         author_model=author_model,
+        critic_model=critic_model,
         author_backend=author_backend,
+        critic_backend=critic_backend,
         roles=roles,
         services=services,
     )
@@ -142,11 +156,19 @@ def _prepare_planning_session(
 def _load_planning_roles() -> PlanningRoles:
     """Load planning role prompts from the current repository."""
     author_path = Path.cwd() / ".agents" / "author.md"
+    critic_path = Path.cwd() / ".agents" / "critic.md"
     if not author_path.exists():
         raise PlanningError(
             ".agents/author.md not found. Create it before running turma plan."
         )
-    return PlanningRoles(author=author_path.read_text())
+    if not critic_path.exists():
+        raise PlanningError(
+            ".agents/critic.md not found. Create it before running turma plan."
+        )
+    return PlanningRoles(
+        author=author_path.read_text(),
+        critic=critic_path.read_text(),
+    )
 
 
 def _scaffold_change(session: PlanningSession) -> None:
@@ -191,6 +213,92 @@ def _generate_initial_artifacts(session: PlanningSession) -> dict[str, Path]:
         print("done")
 
     return written_artifacts
+
+
+def _run_initial_critic_review(
+    session: PlanningSession,
+    written_artifacts: dict[str, Path],
+) -> ParseResult:
+    """Run the first critic review and write critique_1.md."""
+    prompt = _build_critic_prompt(
+        critic_role=session.roles.critic,
+        feature=session.feature,
+        artifact_content=_read_artifact_set(written_artifacts),
+        repo_context=_build_repo_context(),
+    )
+    raw_output = session.critic_backend.generate(
+        prompt,
+        session.critic_model,
+        timeout=300,
+    )
+    critique_text = _normalize_generated_markdown(raw_output)
+    critique_path = session.change_dir / "critique_1.md"
+    _write_artifact(critique_path, critique_text)
+    return parse_critique(critique_text)
+
+
+def _print_critic_result(result: ParseResult) -> None:
+    """Print the first critic route without advancing state."""
+    if isinstance(result, ParsedCritique):
+        print(f"critic status: {result.status.value}")
+    else:
+        print(f"critic parse failure: {result.reason}")
+    print(f"critic route: {result.route.value}")
+
+
+def _read_artifact_set(written_artifacts: dict[str, Path]) -> str:
+    """Read generated planning artifacts for critic input."""
+    parts = []
+    for artifact_id in ARTIFACT_ORDER:
+        path = written_artifacts.get(artifact_id)
+        if path is None:
+            continue
+        parts.append(f"<{artifact_id}>\n{path.read_text()}\n</{artifact_id}>")
+    return "\n\n".join(parts)
+
+
+def _build_critic_prompt(
+    critic_role: str,
+    feature: str,
+    artifact_content: str,
+    repo_context: str = "",
+) -> str:
+    """Assemble the critic prompt for a completed author round."""
+    parts = [
+        f"You are a critic agent. Your role:\n\n<role>\n{critic_role}\n</role>",
+        f'Review the round 1 planning artifacts for change "{feature}".',
+    ]
+
+    if repo_context:
+        parts.append(f"<repo-context>\n{repo_context}\n</repo-context>")
+
+    parts.append(f"<artifacts>\n{artifact_content}\n</artifacts>")
+    parts.append(
+        "Write a strict machine-readable critique. Use exactly one status line: "
+        "## Status: blocking, ## Status: nits_only, or ## Status: approved."
+    )
+    parts.append(
+        "Under ## Findings, write finding lines in this exact form: "
+        "- [B001] [blocking] [design.md] Message. "
+        "Use B IDs for blocking issues, N IDs for nits, and Q IDs for questions."
+    )
+    parts.append(
+        "Status is authoritative for routing. Use blocking only when the author "
+        "must revise before human approval; use nits_only for non-blocking issues; "
+        "use approved only when no changes are needed."
+    )
+    parts.append(
+        "Output ONLY the critique markdown. No preamble, no commentary, no code fences."
+    )
+    return "\n\n".join(parts)
+
+
+def _normalize_generated_markdown(raw: str) -> str:
+    """Normalize generated markdown for file output."""
+    text = _strip_leading_preamble(_strip_wrapping_code_fence(raw.strip()))
+    if not text:
+        raise PlanningError("generating critique failed: critic returned empty output")
+    return text + "\n"
 
 
 def _write_artifact(path: Path, content: str) -> None:

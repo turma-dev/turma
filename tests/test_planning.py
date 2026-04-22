@@ -23,12 +23,19 @@ from turma.planning import (
 VALID_CONFIG_TEXT = """\
 [planning]
 author_model = "claude-opus-4-6"
+critic_model = "claude-sonnet-4-6"
 """
 
 AUTHOR_ROLE = """\
 # Author
 
 Purpose: draft and revise OpenSpec artifacts.
+"""
+
+CRITIC_ROLE = """\
+# Critic
+
+Purpose: review OpenSpec artifacts.
 """
 
 PROPOSAL_INSTRUCTIONS = {
@@ -71,6 +78,7 @@ def _setup_project(tmp_path: Path) -> None:
     (tmp_path / "turma.toml").write_text(VALID_CONFIG_TEXT)
     (tmp_path / ".agents").mkdir()
     (tmp_path / ".agents" / "author.md").write_text(AUTHOR_ROLE)
+    (tmp_path / ".agents" / "critic.md").write_text(CRITIC_ROLE)
     (tmp_path / "openspec" / "changes").mkdir(parents=True)
 
 
@@ -110,6 +118,8 @@ def _artifact_output_from_prompt(
         return "## Goals\nGoal\n\n## Non-goals\nNone\n"
     if 'creating the "tasks" artifact' in prompt:
         return "## Task 1\nDo thing\n"
+    if "Review the round 1 planning artifacts" in prompt:
+        return "## Status: approved\n\n## Findings\n"
     return "## Unknown\nText\n"
 
 
@@ -132,6 +142,38 @@ def test_fails_when_author_md_missing(
 
     with pytest.raises(PlanningError, match="author.md"):
         run_planning("some-feature")
+
+
+def test_fails_when_critic_md_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """turma plan fails when .agents/critic.md is missing."""
+    (tmp_path / "turma.toml").write_text(VALID_CONFIG_TEXT)
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents" / "author.md").write_text(AUTHOR_ROLE)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(PlanningError, match="critic.md"):
+        run_planning("some-feature")
+
+
+def test_fails_when_critic_model_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """turma plan fails clearly when planning.critic_model is missing."""
+    (tmp_path / "turma.toml").write_text("""\
+[planning]
+author_model = "claude-opus-4-6"
+""")
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents" / "author.md").write_text(AUTHOR_ROLE)
+    (tmp_path / ".agents" / "critic.md").write_text(CRITIC_ROLE)
+    (tmp_path / "openspec" / "changes").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    with patch("turma.planning.shutil.which", return_value="/usr/bin/mock"):
+        with pytest.raises(PlanningError, match="planning.critic_model"):
+            run_planning("some-feature")
 
 
 @patch("turma.planning.shutil.which", return_value=None)
@@ -255,6 +297,7 @@ def test_writes_artifacts_to_output_paths(
     assert (change_dir / PROPOSAL_INSTRUCTIONS["outputPath"]).exists()
     assert (change_dir / DESIGN_INSTRUCTIONS["outputPath"]).exists()
     assert (change_dir / TASKS_INSTRUCTIONS["outputPath"]).exists()
+    assert (change_dir / "critique_1.md").exists()
 
 
 @patch("turma.planning._get_backend")
