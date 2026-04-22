@@ -445,6 +445,74 @@ def test_type_inference_table(title, expected):
     assert result.sections[0].task_type is expected
 
 
+def test_unknown_marker_name_rejected():
+    result = parse_tasks_md(_dedent("""
+        ## Tasks
+
+        ### 1. [priority: 1] Do it
+        - [ ] a
+    """))
+
+    assert isinstance(result, TasksParseFailure)
+    assert "unknown or malformed marker" in result.reason
+    assert "priority: 1" in result.reason
+
+
+def test_malformed_type_marker_without_colon_rejected():
+    result = parse_tasks_md(_dedent("""
+        ## Tasks
+
+        ### 1. [type impl] Do it
+        - [ ] a
+    """))
+
+    assert isinstance(result, TasksParseFailure)
+    assert "unknown or malformed marker" in result.reason
+
+
+def test_malformed_blocked_by_marker_without_colon_rejected():
+    result = parse_tasks_md(_dedent("""
+        ## Tasks
+
+        ### 1. First
+        - [ ] a
+
+        ### 2. [blocked-by 1] Second
+        - [ ] b
+    """))
+
+    assert isinstance(result, TasksParseFailure)
+    assert "unknown or malformed marker" in result.reason
+
+
+def test_empty_bracket_marker_rejected():
+    result = parse_tasks_md(_dedent("""
+        ## Tasks
+
+        ### 1. [] Do it
+        - [ ] a
+    """))
+
+    assert isinstance(result, TasksParseFailure)
+    assert "empty bracket marker" in result.reason
+
+
+def test_markdown_link_in_title_is_not_a_marker():
+    """Brackets followed by `(` are markdown links, not markers."""
+    result = parse_tasks_md(_dedent("""
+        ## Tasks
+
+        ### 1. See [docs](https://example.com) for context
+        - [ ] a
+    """))
+
+    assert isinstance(result, ParsedTasks)
+    section = result.sections[0]
+    # Link text stays in the title verbatim.
+    assert "[docs](https://example.com)" in section.title
+    assert section.task_type is TaskType.DOCS  # "docs" keyword triggers inference
+
+
 def test_parsed_task_section_is_frozen():
     result = parse_tasks_md(_dedent("""
         ## Tasks

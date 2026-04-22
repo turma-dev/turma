@@ -100,9 +100,12 @@ Rules:
   actionable content).
 - Subtasks are preserved verbatim (including leading indentation of
   continuation lines) as the Beads task body.
-- Anything outside a section (stray prose, extra headings, markers on
-  their own line) is ignored for task creation but preserved in the
-  parser's trace for diagnostic messages.
+- Anything outside a section (stray prose, extra headings) is ignored
+  silently.
+- Any non-markdown-link bracket expression on a section heading is
+  treated as an intended marker. Unknown marker names (e.g.
+  `[priority: 1]`) or malformed variants missing the colon (e.g.
+  `[type impl]`) are parse errors — markers are a closed set.
 
 ### Explicit task markers
 

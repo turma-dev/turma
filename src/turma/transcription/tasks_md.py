@@ -82,6 +82,11 @@ _SECTION_HEADING = re.compile(
 _SUBTASK_BULLET = re.compile(r"^-\s+\[\s*\]\s*(?P<body>.*)$")
 _TYPE_MARKER = re.compile(r"\[type:\s*(?P<token>[^\]]*?)\s*\]")
 _BLOCKED_BY_MARKER = re.compile(r"\[blocked-by:\s*(?P<body>[^\]]*?)\s*\]")
+# Bracket expressions on the heading that are not immediately followed by
+# `(` — i.e. not markdown link syntax. Used to detect unknown markers.
+_HEADING_BRACKET = re.compile(r"\[(?P<body>[^\]]*)\](?!\()")
+_TYPE_MARKER_STRICT = re.compile(r"^type:(?P<token>.*)$")
+_BLOCKED_BY_MARKER_STRICT = re.compile(r"^blocked-by:(?P<body>.*)$")
 
 _TYPE_KEYWORD_PATTERNS: tuple[tuple[str, TaskType], ...] = (
     # Order matters: first match wins. Matches the precedence listed in
@@ -171,17 +176,27 @@ def _parse_section(
     body_lines: list[str],
     total_sections: int,
 ) -> ParsedTaskSection | TasksParseFailure:
-    explicit_type = _extract_type_marker(num, heading_rest)
-    if isinstance(explicit_type, TasksParseFailure):
-        return explicit_type
+    # Every non-markdown-link bracket expression on the heading is treated
+    # as an intended inline marker. Only `type:` and `blocked-by:` are
+    # valid; anything else is a parse failure, including malformed
+    # variants like `[type impl]` (missing colon) or unknown names like
+    # `[priority: 1]`.
+    explicit_type: TaskType | None = None
+    explicit_blocked_by: tuple[int, ...] | None = None
 
-    explicit_blocked_by = _extract_blocked_by_marker(
-        num=num,
-        heading_rest=heading_rest,
-        total_sections=total_sections,
-    )
-    if isinstance(explicit_blocked_by, TasksParseFailure):
-        return explicit_blocked_by
+    for bracket_body in _HEADING_BRACKET.findall(heading_rest):
+        classification = _classify_bracket_marker(
+            num=num,
+            bracket_body=bracket_body,
+            total_sections=total_sections,
+        )
+        if isinstance(classification, TasksParseFailure):
+            return classification
+        kind, value = classification
+        if kind == "type":
+            explicit_type = value  # type: ignore[assignment]
+        else:
+            explicit_blocked_by = value  # type: ignore[assignment]
 
     title = _strip_markers(heading_rest).strip()
     if not title:
@@ -214,33 +229,62 @@ def _parse_section(
     )
 
 
-def _extract_type_marker(
-    num: int,
-    heading_rest: str,
-) -> TaskType | None | TasksParseFailure:
-    match = _TYPE_MARKER.search(heading_rest)
-    if match is None:
-        return None
-    token = match.group("token").strip()
-    try:
-        return TaskType(token)
-    except ValueError:
-        return TasksParseFailure(
-            reason=f"section {num}: unknown type token {token!r}"
-        )
-
-
-def _extract_blocked_by_marker(
+def _classify_bracket_marker(
     *,
     num: int,
-    heading_rest: str,
+    bracket_body: str,
     total_sections: int,
-) -> tuple[int, ...] | None | TasksParseFailure:
-    match = _BLOCKED_BY_MARKER.search(heading_rest)
-    if match is None:
-        return None
+) -> tuple[str, object] | TasksParseFailure:
+    """Classify a single bracket expression as a type or blocked-by marker.
 
-    raw = match.group("body").strip()
+    Returns (kind, value) on success where kind is ``"type"`` or
+    ``"blocked-by"``. Unknown or malformed bracket content (including
+    known marker names without a colon, or entirely unknown names like
+    ``[priority: ...]``) returns a `TasksParseFailure`.
+    """
+    body = bracket_body.strip()
+
+    if not body:
+        return TasksParseFailure(
+            reason=f"section {num}: empty bracket marker `[]`"
+        )
+
+    type_match = _TYPE_MARKER_STRICT.match(body)
+    if type_match is not None:
+        token = type_match.group("token").strip()
+        try:
+            return ("type", TaskType(token))
+        except ValueError:
+            return TasksParseFailure(
+                reason=f"section {num}: unknown type token {token!r}"
+            )
+
+    blocked_match = _BLOCKED_BY_MARKER_STRICT.match(body)
+    if blocked_match is not None:
+        refs = _parse_blocked_by_refs(
+            num=num,
+            raw=blocked_match.group("body").strip(),
+            total_sections=total_sections,
+        )
+        if isinstance(refs, TasksParseFailure):
+            return refs
+        return ("blocked-by", refs)
+
+    return TasksParseFailure(
+        reason=(
+            f"section {num}: unknown or malformed marker `[{body}]`. "
+            "Valid markers: `[type: impl|test|docs|spec]`, "
+            "`[blocked-by: N]` or `[blocked-by: N, M]`."
+        )
+    )
+
+
+def _parse_blocked_by_refs(
+    *,
+    num: int,
+    raw: str,
+    total_sections: int,
+) -> tuple[int, ...] | TasksParseFailure:
     if not raw:
         return TasksParseFailure(
             reason=f"section {num}: empty blocked-by marker"
