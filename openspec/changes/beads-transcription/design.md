@@ -5,13 +5,14 @@ set in Beads for a single Turma feature. Ends when the Beads tasks
 exist and a `TRANSCRIBED.md` marker is written in the change directory.
 
 **Terminology note.** Beads has a native "epic" concept (hierarchical
-IDs like `bd-a3f8` / `bd-a3f8.1`), but its creation and
-task-to-epic association APIs are not documented in the current
-upstream README. v1 deliberately does NOT use native Beads epics;
-instead it records a feature association via the task body / description
-(or, as a fallback, a title prefix — see `BeadsAdapter` below).
-Migration to native epics is a deferred open item once the relevant
-`bd` commands are validated.
+IDs like `bd-a3f8` / `bd-a3f8.1`) and a first-class `--parent` flag on
+`bd create`. v1 deliberately does NOT use native Beads epics; instead
+it records a feature association via a comma-separated
+`feature:<name>` label on each Beads task (bd has first-class label
+support and filters with `bd list --label feature:<name>`). Migrating
+to native epics is a deferred open item — it would be a cleaner model,
+but labels are sufficient for v1's orphan-detection and teardown
+needs and require no pre-creation of a parent issue.
 
 Out of scope:
 
@@ -143,9 +144,15 @@ explicit `[type: impl]` marker.
 
 ## Priority assignment
 
-Section order is priority: section N has priority N. Beads treats lower
-numeric priority as higher importance, which matches the ordering
-convention in `tasks.md` (section 1 is done first).
+Parser priority is section order: the parser emits `priority = N` for
+section N.
+
+Beads priority is a 0-4 scale with 0 = highest. The transcription
+pipeline (Task 3) maps parser priority to bd priority as
+`min(N - 1, 4)`: section 1 → P0, section 2 → P1, … section 5 → P4,
+section 6+ collapse to P4. This preserves ordering signal up to five
+sections and degrades gracefully past that; dependency edges encode
+the actual "do-first" ordering regardless.
 
 No explicit priority marker in v1. A later iteration may add
 `[priority: P]` if priority needs to diverge from order.
@@ -177,86 +184,101 @@ Mirrors the existing authoring-backend pattern.
 class BeadsAdapter:
     def __init__(self) -> None: ...
         # validates shutil.which("bd") and raises PlanningError if
-        # missing with a pip-install hint.
+        # missing with a `brew install beads` hint (Beads ships as a
+        # Go binary via Homebrew; it is not a PyPI package).
 
     def create_task(
         self,
         *,
         title: str,
-        body: str,
-        task_type: str,          # "impl" | "test" | "docs" | "spec"
-        priority: int,           # 1-indexed, matches section order
-        blocked_by_ids: list[str],
-    ) -> str:                    # returns the new bd task id
+        description: str,           # full task body; multi-line OK
+        bd_type: str,               # bd-native type: bug|feature|task|
+                                    #   epic|chore|decision
+        priority: int,              # bd-native 0-4 (0 = highest)
+        feature: str,               # recorded as `feature:<name>` label
+        extra_labels: tuple[str, ...] = (),
+        blocker_ids: tuple[str, ...] = (),
+    ) -> str:                       # returns the new bd task id
         ...
 
     def close_task(self, task_id: str) -> None:
         ...
 
-    def list_feature_tasks(self, feature: str) -> list[dict]:
-        # lists tasks associated with this feature via the association
-        # mechanism chosen during Task 2 (see "Body-writing mechanism"
-        # below). Used for orphan preflight, --force teardown, and
-        # diagnostic commands.
+    def list_feature_tasks(
+        self, feature: str
+    ) -> tuple[BeadsTaskRef, ...]:
+        # lists OPEN tasks with label `feature:<name>`. Used for
+        # orphan preflight, --force teardown, and diagnostic commands.
+        # Returns `BeadsTaskRef(id, title, labels)` records.
         ...
 ```
 
-Invocations assemble the argv from the existing documented shape:
+Invocations (from the real `bd create --help` output as of Beads 1.0.2):
 
 ```
-bd create --type=<t> --priority=<p> <body-writing flag/stdin> <title>
-bd create --type=<t> --priority=<p> --blocked-by <id> <body-writing flag/stdin> <title>
+bd create --silent --type <T> --priority <0-4> \
+          --description <body> --labels feature:<name>[,extra,...] \
+          <title>
+bd dep add <new-id> <blocker-id>               # per blocker
 bd close <id>
-bd ls --json
+bd list --label feature:<name> --json --limit 0
 ```
 
-The adapter parses `bd`'s JSON output on success. Non-zero exit raises
-`PlanningError` with the `bd` stderr preserved.
+Non-zero exit raises `PlanningError` with `bd`'s stderr preserved
+verbatim (or stdout if stderr is empty).
 
-### Body-writing mechanism
+### Body-writing mechanism (settled)
 
-Each created Beads task MUST record two pieces of information beyond
-its title:
+Each Beads task records:
 
-1. Feature association: a first line of the form `feature: <name>`.
-2. The ordered subtask list from the tasks.md section, preserved
-   verbatim.
+1. Feature association via a `feature:<name>` **label** (bd has first-
+   class comma-separated labels; cleaner than a body-first-line tag
+   and filters trivially with `bd list --label feature:<name>`).
+2. The full description / subtask content via the inline
+   `-d` / `--description <text>` flag. `subprocess.run` with a list
+   argv handles multi-line text with no shell escaping.
 
-The `bd` README does not document how `bd create` accepts a multi-line
-body (as of the current upstream commit). Task 2 is responsible for
-determining the exact mechanism by running `bd create --help` and
-adopting one of these in order of preference:
+Task 2 validated these against `bd create --help` (Beads 1.0.2) and
+pinned the argv shape with unit tests so any future bd CLI drift
+surfaces as a failing adapter test. The title-prefix and per-feature-
+Markdown-file fallbacks originally enumerated here are not used.
 
-- `--description <text>` / `--body <text>` flag if present.
-- Stdin if `bd create` reads stdin for body content.
-- An editor-based flow invoked with `bd create --edit` (not usable by
-  the adapter).
+### Dependency direction (settled)
 
-If none of the above works — i.e. `bd create` truly accepts only a
-title — the adapter MUST fall back to the title-prefix convention:
+`bd create --deps` uses *inverted* semantics relative to the direction
+Turma's transcription pipeline produces: `--deps blocks:<id>` attaches
+the new task as a **blocker** of `<id>`, meaning `<id>` depends on the
+new task. Turma needs the opposite — the new task depends on the
+listed blockers. The adapter therefore:
 
-- Title becomes `[feature:<name>] <original title>`.
-- Subtask list is written to a per-feature Markdown file under
-  `.beads/<feature>-subtasks.md`, committed alongside the `.beads/`
-  state.
-- `list_feature_tasks(feature)` filters on the title prefix.
-
-Task 2 MUST document the chosen mechanism in the `BeadsAdapter` class
-docstring so downstream readers see the decision without needing to
-re-consult this design doc.
+1. Creates the task with no `--deps`.
+2. Runs `bd dep add <new-id> <blocker-id>` once per blocker. Per
+   `bd dep add`'s documented semantics, "`bd dep add <blocked>
+   <blocker>`" records that `<blocked>` depends on `<blocker>`, which
+   is what we want.
 
 ## Translation pipeline
 
 1. Load change directory and gate on `APPROVED`.
 2. Read and parse `tasks.md` into an ordered list of sections.
 3. For each section, in ascending order:
-   a. Compose the task title (remove markers from the heading).
-   b. Compose the task body: `feature: <name>` + blank line + the
-      verbatim subtask bullets of that section.
-   c. Resolve `blocked_by_ids`: for each referenced section number,
-      use the `bd` task id created earlier in this run.
-   d. Invoke `BeadsAdapter.create_task(...)` and record the returned
-      task id keyed by section number.
+   a. Compose the task title (markers stripped from the heading).
+   b. Compose the task description: the verbatim subtask bullets of
+      that section. Feature association is carried on the task's
+      `feature:<name>` label, not in the body.
+   c. Translate parser-type → bd-type (`impl`/`test` → `task`,
+      `docs` → `chore`, `spec` → `decision`). Include the original
+      parser type as an extra `turma-type:<t>` label for downstream
+      filtering.
+   d. Translate priority: bd priority = `min(section_number - 1, 4)`
+      (bd's scale is 0-4 with 0 = highest; section 1 → P0, sections
+      6+ collapse to P4).
+   e. Resolve `blocker_ids`: for each referenced section number, use
+      the `bd` task id created earlier in this run.
+   f. Invoke `BeadsAdapter.create_task(title=..., description=...,
+      bd_type=..., priority=..., feature=..., extra_labels=...,
+      blocker_ids=...)` and record the returned task id keyed by
+      section number.
 4. On the first adapter error mid-pipeline, abort. Already-created
    tasks are left in place as feature-tagged orphans (no
    `TRANSCRIBED.md` is written on failure). The command exits with a
@@ -348,7 +370,7 @@ existing CLI. Categories:
   or retry with --force."`
 - `tasks.md` missing: `"tasks.md not found in openspec/changes/<feature>/"`.
 - `tasks.md` parse failure: specific line-level reason.
-- `bd` missing: `"bd CLI not found. Install it: pip install beads"`.
+- `bd` missing: `"bd CLI not found. Install it with brew install beads (see https://github.com/steveyegge/beads for non-macOS paths)."`
 - `bd` non-zero exit: surfaces `bd` stderr verbatim.
 
 ## Open items deferred past v1
