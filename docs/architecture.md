@@ -77,17 +77,33 @@ back up the marker-based authority order but do not override it.
 
 ## Task Translation
 
-After approval, Turma turns spec tasks into an executable DAG.
+After approval, Turma turns spec tasks into an executable DAG via the
+`turma plan-to-beads` command. The implementation parses the approved
+`tasks.md`, gates on the `APPROVED` terminal marker, and creates one
+Beads task per numbered section with the section order expressed as
+Beads dependency edges.
 
 At a minimum, each task needs:
 
-- a type such as `impl`, `test`, `docs`, or `spec`
-- a priority
-- dependency information
-- acceptance criteria
+- a type — parsed as `impl`, `test`, `docs`, or `spec`, translated to
+  Beads-native types (`task`, `chore`, `decision`) at transcription
+  time; the parser type is also carried through as a `turma-type:<t>`
+  label for downstream filtering
+- a priority — derived from section order, clamped to Beads' 0-4 scale
+- dependency information — default is the previous section, optional
+  explicit `[blocked-by: N, M]` markers on the section heading
+- acceptance criteria — captured in the Beads task body as the
+  verbatim `- [ ]` subtask list
 
-The task graph is the execution contract. If task boundaries are wrong,
-parallel execution becomes unsafe.
+Feature association is recorded via a `feature:<name>` label on every
+created task, not via a native Beads epic — `bd` supports epics but
+their creation API is still evolving, and label-based grouping is
+sufficient for v1 orphan detection and `--force` teardown. Integration
+boundaries (`TRANSCRIBED.md` marker file, `bd list --label` orphan
+queries) live with the pipeline code.
+
+The task graph is the execution contract. If task boundaries are
+wrong, parallel execution becomes unsafe.
 
 ## Execution
 
