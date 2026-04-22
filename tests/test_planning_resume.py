@@ -181,10 +181,32 @@ def test_resume_revise_writes_human_reason_and_loops_to_round_two(
 
     Task 6 wired needs_revision → drafting, so --revise now loops through a
     round-2 author two-call revision and a fresh critic_review, halting at
-    the round-2 human gate.
+    the round-2 human gate. The human revision reason must be visible to
+    the author in both the response prompt and the revised-draft prompts —
+    otherwise the author can ignore the operator's intent entirely.
     """
-    services = _seed_project(tmp_path, monkeypatch, APPROVED_CRITIQUE)
-    change_dir = tmp_path / "openspec" / "changes" / "test-feature"
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    author_prompts: list[str] = []
+
+    def _tracked_author(prompt: str, model: str, timeout: int) -> str:
+        author_prompts.append(prompt)
+        return _author_output(prompt, model, timeout)
+
+    author_backend = FakeBackend(_tracked_author)
+    critic_backend = FakeBackend(lambda *_: APPROVED_CRITIQUE)
+    services = PlanningServices(
+        get_backend=lambda model: (
+            critic_backend if model == "claude-sonnet-4-6" else author_backend
+        ),
+        run_openspec=_run_openspec,
+    )
+
+    session = _prepare_planning_session("test-feature", services)
+    run_planning_state_machine(session)  # round 1 → awaiting_human_approval
+    prompts_before_revise = len(author_prompts)
 
     result = resume_plan(
         "test-feature",
@@ -192,6 +214,7 @@ def test_resume_revise_writes_human_reason_and_loops_to_round_two(
         ResumeRequest(action=ResumeAction.REVISE, reason="too vague"),
     )
 
+    change_dir = tmp_path / "openspec" / "changes" / "test-feature"
     assert result.state["state"] == "awaiting_human_approval"
     assert result.next_nodes == ("awaiting_human_approval",)
     assert int(result.state["round"]) == 2
@@ -203,6 +226,20 @@ def test_resume_revise_writes_human_reason_and_loops_to_round_two(
     state = json.loads((change_dir / "PLANNING_STATE.json").read_text())
     assert state["state"] == "awaiting_human_approval"
     assert state["round"] == 2
+
+    # The human reason MUST be visible to the author in every round-2 prompt
+    # or the author can ignore operator intent entirely.
+    round_two_prompts = author_prompts[prompts_before_revise:]
+    response_prompts = [
+        p for p in round_two_prompts
+        if "generating the per-finding response artifact" in p
+    ]
+    revision_prompts = [p for p in round_two_prompts if "revising the " in p]
+    assert len(response_prompts) == 1
+    assert len(revision_prompts) == 3
+    for p in response_prompts + revision_prompts:
+        assert "human-revision-reason" in p
+        assert "too vague" in p
 
 
 def test_resume_abandon_writes_marker_and_transitions_to_abandoned(

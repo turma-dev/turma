@@ -245,32 +245,97 @@ def test_state_machine_loops_blocking_round_1_to_approved_round_2(
     assert critic_callback.calls == 2
 
 
-def test_state_machine_round_two_drafting_reuses_existing_response_on_retry(
+def test_generate_round_revision_reuses_existing_response_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Partial-failure rule: a response file already on disk is reused.
+    """Partial-failure rule: a response_{N-1}.md already on disk is reused.
 
-    Simulates a crash between the two author calls in round 2 by pre-seeding
-    response_1.md. The retry should skip the response-generation call and
-    only invoke the author for revised drafts (plus the initial round-1
-    generation and the two critic calls).
+    This is a direct unit test of `_generate_round_revision` — the function
+    that implements the partial-failure guard. It does not go through the
+    LangGraph state machine or its checkpointing. End-to-end checkpoint
+    recovery across crashes is Task 7 scope; this test asserts only that
+    the reuse logic inside `_generate_round_revision` does the right
+    thing when called with a pre-existing response file.
     """
+    from turma.planning import _generate_round_revision
+
     _setup_project(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
 
-    author_call_prompts: list[str] = []
+    author_prompts: list[str] = []
 
-    def _tracked_author_output(prompt: str, model: str, timeout: int) -> str:
-        author_call_prompts.append(prompt)
+    def _tracked_author(prompt: str, model: str, timeout: int) -> str:
+        author_prompts.append(prompt)
         return _author_output(prompt, model, timeout)
 
-    author_backend = FakeBackend(_tracked_author_output)
-    critic_callback = _SequencedCriticCallback(
-        [BLOCKING_CRITIQUE, "## Status: approved\n\n## Findings\n"]
+    author_backend = FakeBackend(_tracked_author)
+    critic_backend = FakeBackend(lambda *_: "## Status: approved\n\n## Findings\n")
+    services = PlanningServices(
+        get_backend=lambda model: (
+            critic_backend if model == "claude-sonnet-4-6" else author_backend
+        ),
+        run_openspec=_run_openspec,
     )
-    critic_backend = FakeBackend(critic_callback)
+
+    # Build a session and pre-populate the change directory as if round 1
+    # had completed and a partial round 2 crashed after writing response_1.md.
+    session = _prepare_planning_session("test-feature", services)
+    change_dir = session.change_dir
+    change_dir.mkdir(parents=True, exist_ok=True)
+    (change_dir / "proposal.md").write_text("## Why\nNeed it\n\n## What Changes\nAdd it\n")
+    (change_dir / "design.md").write_text("## Goals\nGoal\n\n## Non-goals\nNone\n")
+    (change_dir / "tasks.md").write_text("## Task 1\nDo it\n")
+    (change_dir / "critique_1.md").write_text(BLOCKING_CRITIQUE)
+    preseeded = "# Response (preseeded from prior crashed attempt)\n"
+    (change_dir / "response_1.md").write_text(preseeded)
+
+    _generate_round_revision(session, round_num=2)
+
+    # Response file must be left untouched — no second write.
+    assert (change_dir / "response_1.md").read_text() == preseeded
+
+    # Author was only called for the three revised artifacts — no response
+    # prompt was ever sent.
+    response_prompts = [
+        p for p in author_prompts
+        if "generating the per-finding response artifact" in p
+    ]
+    assert response_prompts == [], (
+        "response artifact was regenerated despite response_1.md existing"
+    )
+
+    revision_prompts = [p for p in author_prompts if "revising the " in p]
+    assert len(revision_prompts) == 3  # proposal, design, tasks all revised
+
+
+def test_needs_revision_routes_to_human_review_when_max_rounds_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Temporary guard: blocking loop halts when max_rounds is exceeded.
+
+    Task 7 will implement full loop detection (repeated unresolved blocking
+    finding ID sets). Until then, `_needs_revision_node` caps the loop at
+    `session.max_rounds`: attempting to advance into round > max_rounds
+    routes to `needs_human_review` with a max_rounds reason and writes
+    NEEDS_HUMAN_REVIEW.md.
+    """
+    _setup_project(tmp_path)
+    # Override config to cap at 2 rounds, so round 1 blocking → round 2
+    # blocking → max_rounds guard halts before round 3.
+    (tmp_path / "turma.toml").write_text(
+        "[planning]\n"
+        'author_model = "claude-opus-4-6"\n'
+        'critic_model = "claude-sonnet-4-6"\n'
+        "max_rounds = 2\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    author_backend = FakeBackend(_author_output)
+    critic_backend = FakeBackend(lambda *_: BLOCKING_CRITIQUE)
     services = PlanningServices(
         get_backend=lambda model: (
             critic_backend if model == "claude-sonnet-4-6" else author_backend
@@ -279,28 +344,13 @@ def test_state_machine_round_two_drafting_reuses_existing_response_on_retry(
     )
 
     session = _prepare_planning_session("test-feature", services)
-    change_dir = session.change_dir
-    change_dir.mkdir(parents=True, exist_ok=True)
-    response_path = change_dir / "response_1.md"
-    response_path.write_text("# Response (preseeded from prior attempt)\n")
-    preseeded_content = response_path.read_text()
+    assert session.max_rounds == 2
 
     result = run_planning_state_machine(session)
 
-    # Response content preserved verbatim — response call was skipped.
-    assert response_path.read_text() == preseeded_content
-    assert result.state["state"] == "awaiting_human_approval"
-    assert int(result.state["round"]) == 2
-
-    response_prompts = [
-        p for p in author_call_prompts
-        if "generating the per-finding response artifact" in p
-    ]
-    assert response_prompts == [], (
-        "response artifact was regenerated despite response_1.md existing"
-    )
-
-    revision_prompts = [
-        p for p in author_call_prompts if "revising the " in p
-    ]
-    assert len(revision_prompts) == 3  # proposal, design, tasks all revised
+    change_dir = tmp_path / "openspec" / "changes" / "test-feature"
+    assert result.state["state"] == "needs_human_review"
+    assert result.next_nodes == ()
+    assert "max_rounds" in result.state.get("parse_failure_reason", "")
+    needs_review = (change_dir / "NEEDS_HUMAN_REVIEW.md").read_text()
+    assert "max_rounds" in needs_review
