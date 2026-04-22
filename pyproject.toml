@@ -24,7 +24,10 @@ classifiers = [
   "Topic :: Software Development",
   "Topic :: Software Development :: Build Tools",
 ]
-dependencies = []
+dependencies = [
+    "langgraph>=1.1.9",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+]
 
 [project.urls]
 Homepage = "https://turma.sh"

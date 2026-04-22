@@ -57,6 +57,7 @@ turma.toml
 
 # LangGraph and orchestration runtime state
 .langgraph/
+openspec/changes/*/PLANNING_STATE.json
 *.db
 .turma/state/
 *.task_complete
