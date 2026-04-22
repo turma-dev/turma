@@ -91,7 +91,7 @@ def run_planning(
     feature: str,
     services: PlanningServices | None = None,
 ) -> None:
-    """Run single-pass author planning for a feature."""
+    """Run planning through the critic-loop state machine."""
     session = _prepare_planning_session(
         feature,
         services or default_planning_services(),
@@ -101,12 +101,20 @@ def run_planning(
     print(f"author model: {session.author_model}")
     print(f"creating change: {feature}")
 
-    _scaffold_change(session)
-    written_artifacts = _generate_initial_artifacts(session)
-    critique = _run_initial_critic_review(session, written_artifacts)
-    _print_critic_result(critique)
+    from turma.planning.state_machine import run_planning_state_machine
 
-    print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
+    result = run_planning_state_machine(session)
+    if result.next_nodes:
+        print(f"planning suspended before: {', '.join(result.next_nodes)}")
+    print(f"checkpoint: {result.checkpoint_path}")
+
+    if result.next_nodes:
+        print(
+            f"\nplanning paused. review openspec/changes/{feature}/critique_1.md "
+            "before resuming."
+        )
+    else:
+        print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
 
 
 def _prepare_planning_session(

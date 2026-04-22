@@ -303,6 +303,33 @@ def test_writes_artifacts_to_output_paths(
 @patch("turma.planning._get_backend")
 @patch("turma.planning.shutil.which", return_value="/usr/bin/mock")
 @patch("turma.planning.subprocess.run")
+def test_run_planning_reports_pause_not_completion(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    mock_get_backend: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Suspended planning output should not claim completion."""
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mock_run.side_effect = _mock_openspec("test-feat")
+    backend = MagicMock()
+    backend.generate.side_effect = _artifact_output_from_prompt
+    mock_get_backend.return_value = backend
+
+    run_planning("test-feat")
+
+    out = capsys.readouterr().out
+    assert "planning suspended before: awaiting_human_approval" in out
+    assert "planning paused." in out
+    assert "planning complete" not in out
+
+
+@patch("turma.planning._get_backend")
+@patch("turma.planning.shutil.which", return_value="/usr/bin/mock")
+@patch("turma.planning.subprocess.run")
 def test_prompt_includes_author_role(
     mock_run: MagicMock,
     mock_which: MagicMock,
