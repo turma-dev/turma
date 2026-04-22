@@ -6,8 +6,9 @@ import json
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from turma.authoring.base import AuthorBackend
 from turma.authoring.claude import ClaudeAuthorBackend
@@ -44,9 +45,69 @@ OFF_TARGET_BACKEND_PATTERNS = (
 )
 
 
-def run_planning(feature: str) -> None:
+@dataclass
+class PlanningRoles:
+    """Role prompts used by planning agents."""
+
+    author: str
+
+
+@dataclass
+class PlanningServices:
+    """Injectable service boundary for planning orchestration."""
+
+    get_backend: Callable[[str], AuthorBackend]
+    run_openspec: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
+
+@dataclass
+class PlanningSession:
+    """Loaded planning context for a single feature."""
+
+    feature: str
+    change_dir: Path
+    author_model: str
+    author_backend: AuthorBackend
+    roles: PlanningRoles
+    services: PlanningServices
+
+
+def default_planning_services() -> PlanningServices:
+    """Return production planning services."""
+    return PlanningServices(
+        get_backend=_get_backend,
+        run_openspec=lambda cmd: _run_openspec(
+            cmd,
+            step=_openspec_step_name(cmd),
+        ),
+    )
+
+
+def run_planning(
+    feature: str,
+    services: PlanningServices | None = None,
+) -> None:
     """Run single-pass author planning for a feature."""
-    # Step 1: Load config
+    session = _prepare_planning_session(
+        feature,
+        services or default_planning_services(),
+    )
+
+    print("loading config from turma.toml")
+    print(f"author model: {session.author_model}")
+    print(f"creating change: {feature}")
+
+    _scaffold_change(session)
+    _generate_initial_artifacts(session)
+
+    print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
+
+
+def _prepare_planning_session(
+    feature: str,
+    services: PlanningServices,
+) -> PlanningSession:
+    """Load config, roles, and validate the initial planning target."""
     try:
         config = load_config()
     except ConfigError as exc:
@@ -54,22 +115,7 @@ def run_planning(feature: str) -> None:
 
     author_model = config.planning.author_model
 
-    # Step 2: Validate .agents/author.md
-    author_path = Path.cwd() / ".agents" / "author.md"
-    if not author_path.exists():
-        raise PlanningError(
-            ".agents/author.md not found. Create it before running turma plan."
-        )
-    author_role = author_path.read_text()
-
-    # Step 3: Check CLIs on PATH
-    if shutil.which("openspec") is None:
-        raise PlanningError(
-            "openspec CLI not found. Install it: npm install -g @fission-ai/openspec"
-        )
-    backend = _get_backend(author_model)
-
-    # Step 4: Fail if change already exists
+    roles = _load_planning_roles()
     change_dir = Path.cwd() / "openspec" / "changes" / feature
     if change_dir.exists():
         raise PlanningError(
@@ -77,56 +123,80 @@ def run_planning(feature: str) -> None:
             "Remove it or pick a different feature name."
         )
 
-    print("loading config from turma.toml")
-    print(f"author model: {author_model}")
-    print(f"creating change: {feature}")
+    if shutil.which("openspec") is None:
+        raise PlanningError(
+            "openspec CLI not found. Install it: npm install -g @fission-ai/openspec"
+        )
+    author_backend = services.get_backend(author_model)
 
-    # Step 5: Scaffold change
-    _run_openspec(
-        ["openspec", "new", "change", feature],
-        step=f"scaffolding change {feature}",
+    return PlanningSession(
+        feature=feature,
+        change_dir=change_dir,
+        author_model=author_model,
+        author_backend=author_backend,
+        roles=roles,
+        services=services,
     )
 
-    # Step 6: Generate artifacts in fixed order
+
+def _load_planning_roles() -> PlanningRoles:
+    """Load planning role prompts from the current repository."""
+    author_path = Path.cwd() / ".agents" / "author.md"
+    if not author_path.exists():
+        raise PlanningError(
+            ".agents/author.md not found. Create it before running turma plan."
+        )
+    return PlanningRoles(author=author_path.read_text())
+
+
+def _scaffold_change(session: PlanningSession) -> None:
+    """Create the OpenSpec change directory for a planning session."""
+    session.services.run_openspec(
+        ["openspec", "new", "change", session.feature],
+    )
+
+
+def _generate_initial_artifacts(session: PlanningSession) -> dict[str, Path]:
+    """Generate the initial proposal/design/tasks artifacts in order."""
     written_artifacts: dict[str, Path] = {}
 
     for artifact_id in ARTIFACT_ORDER:
         print(f"generating {artifact_id} (this may take 1-2 min) ...", end=" ", flush=True)
 
-        instructions = _get_instructions(artifact_id, feature)
-        output_path = change_dir / instructions["outputPath"]
-
-        # Read dependency content
+        instructions = _get_instructions(artifact_id, session)
+        output_path = session.change_dir / instructions["outputPath"]
         dep_content = _read_dependencies(instructions, written_artifacts)
-
-        # Assemble prompt
-        repo_context = _build_repo_context()
         prompt = _build_prompt(
-            author_role=author_role,
+            author_role=session.roles.author,
             instructions=instructions,
             dep_content=dep_content,
-            feature=feature,
-            repo_context=repo_context,
+            feature=session.feature,
+            repo_context=_build_repo_context(),
         )
 
-        # Run claude
-        raw_output = backend.generate(prompt, author_model, timeout=300)
-
-        # Write output
+        raw_output = session.author_backend.generate(
+            prompt,
+            session.author_model,
+            timeout=300,
+        )
         artifact_text = _validate_artifact_output(
             raw_output,
             artifact_id,
             instructions.get("template", ""),
-            feature,
+            session.feature,
         )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(artifact_text)
+        _write_artifact(output_path, artifact_text)
         written_artifacts[artifact_id] = output_path
 
         print("done")
 
-    # Step 7: Summary
-    print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
+    return written_artifacts
+
+
+def _write_artifact(path: Path, content: str) -> None:
+    """Write generated artifact content to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
 
 
 def _get_backend(model: str) -> AuthorBackend:
@@ -168,14 +238,22 @@ def _run_openspec(
     return result
 
 
-def _get_instructions(artifact_id: str, feature: str) -> dict:
+def _openspec_step_name(cmd: Sequence[str]) -> str:
+    """Return a human-readable step name for an OpenSpec command."""
+    if len(cmd) >= 4 and cmd[:3] == ["openspec", "new", "change"]:
+        return f"scaffolding change {cmd[3]}"
+    if len(cmd) >= 3 and cmd[:2] == ["openspec", "instructions"]:
+        return f"loading instructions for {cmd[2]}"
+    return "running openspec"
+
+
+def _get_instructions(artifact_id: str, session: PlanningSession) -> dict:
     """Get openspec instructions JSON for an artifact."""
-    result = _run_openspec(
+    result = session.services.run_openspec(
         [
             "openspec", "instructions", artifact_id,
-            "--change", feature, "--json",
-        ],
-        step=f"loading instructions for {artifact_id}",
+            "--change", session.feature, "--json",
+        ]
     )
 
     return _extract_instructions_json(result.stdout, artifact_id)
