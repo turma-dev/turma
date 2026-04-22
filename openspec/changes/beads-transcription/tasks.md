@@ -29,20 +29,31 @@
 - [ ] New module `src/turma/transcription/beads.py`.
 - [ ] `BeadsAdapter.__init__` validates `shutil.which("bd")` and raises
       `PlanningError` with a `pip install beads` hint on failure.
+- [ ] **Determine the body-writing mechanism first.** Run
+      `bd create --help` (and `bd --version` for the record) in a
+      scratch venv and pick the first mechanism the CLI supports:
+      `--description <text>` / `--body <text>` flag, stdin-based body
+      input, or the title-prefix fallback. Document the chosen
+      mechanism in the `BeadsAdapter` class docstring.
 - [ ] `create_task(title, body, task_type, priority, blocked_by_ids)`
-      returns the new `bd` task id. Builds argv as documented
-      (`bd create --type ... --priority ... [--blocked-by ...] title`).
-      Parses the id from `bd` stdout (JSON preferred if available,
-      otherwise text).
+      returns the new `bd` task id. Body is recorded via the mechanism
+      chosen above; the first body line is `feature: <name>`, followed
+      by the verbatim subtask list. If the title-prefix fallback is
+      used, prepend `[feature:<name>] ` to the title and also write
+      `.beads/<feature>-subtasks.md` once per feature.
+- [ ] Parse the returned `bd` task id from stdout (JSON preferred if
+      available, otherwise text).
 - [ ] `close_task(task_id)` runs `bd close <id>`, raises on non-zero.
-- [ ] `list_epic(feature)` runs `bd ls --json` and filters on the
-      `feature: <name>` first-line tag Turma writes into each task
-      body.
+- [ ] `list_feature_tasks(feature)` runs `bd ls --json` and filters on
+      the `feature: <name>` first-line body tag (or the
+      `[feature:<name>] ` title prefix, depending on the mechanism
+      chosen above).
 - [ ] All non-zero exits raise `PlanningError` with `bd` stderr
       preserved verbatim.
 - [ ] Unit tests in `tests/test_transcription_beads.py` using
       subprocess stubs covering create, close, list, missing-CLI, and
-      non-zero-exit paths.
+      non-zero-exit paths. Tests pin the chosen argv shape so a
+      subsequent `bd` CLI change surfaces as a failing test.
 
 ### 3. Wire the translation pipeline
 
@@ -51,18 +62,22 @@
       returns the created task IDs on success.
 - [ ] Gate on `reconcile_current_state(session) == "approved"` before
       any other work.
-- [ ] Gate on `TRANSCRIBED.md`: reject without `--force`; require it
-      with `--force`.
+- [ ] Preflight `TRANSCRIBED.md`: refuse without `--force` if present.
+- [ ] Preflight `list_feature_tasks(feature)` when `TRANSCRIBED.md` is
+      absent: if the adapter returns any orphans, refuse without
+      `--force` and surface the orphan IDs in the error message with
+      both manual and `--force` recovery paths.
 - [ ] Implement the pipeline: parse, iterate sections in order,
       resolve `blocked_by_ids` from prior create calls, invoke the
       adapter.
 - [ ] On full success, write `TRANSCRIBED.md` with feature name,
       timestamp, and the created task IDs in section order.
-- [ ] On `--force` with prior `TRANSCRIBED.md`: invoke teardown
-      (close recorded IDs in reverse order, delete `TRANSCRIBED.md`),
-      then run the pipeline.
+- [ ] `--force` teardown: if `TRANSCRIBED.md` is present, close the
+      recorded IDs in reverse order and delete the marker. Else if
+      `list_feature_tasks(feature)` returns orphans, close each orphan
+      id. Else no-op. Then run the pipeline from scratch.
 - [ ] Partial-failure behavior matches the design: no automated
-      rollback, clear error surfacing `bd` stderr.
+      rollback, clear error surfacing `bd` stderr and orphan IDs.
 - [ ] Integration tests in `tests/test_transcription_pipeline.py`
       using a stub `BeadsAdapter` and an approved fixture change dir.
 

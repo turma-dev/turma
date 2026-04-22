@@ -1,8 +1,17 @@
 ## Scope
 
-Covers translation of an approved `tasks.md` into a Beads epic for a single
-Turma feature. Ends when the Beads tasks exist and a `TRANSCRIBED.md`
-marker is written in the change directory.
+Covers translation of an approved `tasks.md` into a feature-tagged task
+set in Beads for a single Turma feature. Ends when the Beads tasks
+exist and a `TRANSCRIBED.md` marker is written in the change directory.
+
+**Terminology note.** Beads has a native "epic" concept (hierarchical
+IDs like `bd-a3f8` / `bd-a3f8.1`), but its creation and
+task-to-epic association APIs are not documented in the current
+upstream README. v1 deliberately does NOT use native Beads epics;
+instead it records a feature association via the task body / description
+(or, as a fallback, a title prefix — see `BeadsAdapter` below).
+Migration to native epics is a deferred open item once the relevant
+`bd` commands are validated.
 
 Out of scope:
 
@@ -19,11 +28,24 @@ run against a change that is not approved. The existing
 transcription command short-circuits unless that helper returns
 `"approved"`.
 
-Idempotency is human-supervised. A `TRANSCRIBED.md` marker written after
-successful transcription is the sole signal that this change has already
-been transcribed. A retry requires `--force` AND the prior marker; forcing
-without a prior marker is rejected (prevents silently recreating tasks for
-a change that was never transcribed on this machine).
+Idempotency is two-layer:
+
+1. `TRANSCRIBED.md` marker: written after a fully successful
+   transcription. Its presence is the successful-run signal.
+2. `BeadsAdapter.list_feature_tasks(feature)`: when `TRANSCRIBED.md` is
+   absent, this is the orphan detector. Non-empty result means a prior
+   attempt crashed mid-pipeline and left feature-tagged tasks in Beads
+   without writing the marker. The command refuses and surfaces the
+   orphan IDs so the operator can close them manually (or re-invoke
+   with `--force`; see below).
+
+`--force` handles both recovery paths:
+
+- If `TRANSCRIBED.md` exists, use its recorded IDs for teardown.
+- If `TRANSCRIBED.md` is absent but orphan feature-tagged tasks exist,
+  fall back to `list_feature_tasks(feature)` for teardown.
+- If neither is present, `--force` is a no-op on teardown and the
+  pipeline runs from scratch.
 
 ## Command surface
 
@@ -34,10 +56,19 @@ turma plan-to-beads --feature <name> --force
 
 Behavior:
 
-- Without `--force`: fails fast if `TRANSCRIBED.md` already exists.
-- With `--force`: requires `TRANSCRIBED.md` to exist; invokes a tear-down
-  pass that closes the previously-created Beads tasks (see "Teardown"
-  below) and then runs transcription from scratch.
+- Without `--force`:
+  - Fails fast if `TRANSCRIBED.md` already exists.
+  - Fails fast if `list_feature_tasks(feature)` returns any tasks
+    (orphans from a prior failed transcription). The error prints
+    the orphan IDs and the manual recovery command.
+- With `--force`:
+  - If `TRANSCRIBED.md` exists, close the IDs it recorded and delete
+    the marker, then re-run the pipeline.
+  - Else if `list_feature_tasks(feature)` returns orphans, close them
+    all, then re-run the pipeline.
+  - Else (no marker, no orphans), `--force` has nothing to clean up —
+    the pipeline runs from scratch and `--force` becomes equivalent
+    to a normal invocation.
 - Absent an `APPROVED` marker: fails fast with the exact human-readable
   reason, regardless of `--force`.
 - Absent `tasks.md` in the change dir: fails fast. The critic loop
@@ -159,17 +190,19 @@ class BeadsAdapter:
     def close_task(self, task_id: str) -> None:
         ...
 
-    def list_epic(self, feature: str) -> list[dict]:
-        # lists tasks associated with this feature; used for --force
-        # teardown and for diagnostic commands.
+    def list_feature_tasks(self, feature: str) -> list[dict]:
+        # lists tasks associated with this feature via the association
+        # mechanism chosen during Task 2 (see "Body-writing mechanism"
+        # below). Used for orphan preflight, --force teardown, and
+        # diagnostic commands.
         ...
 ```
 
 Invocations assemble the argv from the existing documented shape:
 
 ```
-bd create --type=<t> --priority=<p> <title>
-bd create --type=<t> --priority=<p> --blocked-by <id> <title>
+bd create --type=<t> --priority=<p> <body-writing flag/stdin> <title>
+bd create --type=<t> --priority=<p> --blocked-by <id> <body-writing flag/stdin> <title>
 bd close <id>
 bd ls --json
 ```
@@ -177,11 +210,37 @@ bd ls --json
 The adapter parses `bd`'s JSON output on success. Non-zero exit raises
 `PlanningError` with the `bd` stderr preserved.
 
-Feature-to-task association: Turma tags each created task with the
-feature name in the task body (first line: `feature: <name>`). The
-adapter's `list_epic` filters on this tag. Beads itself does not
-require a feature concept; this tagging is a Turma convention that
-allows `--force` to find prior tasks.
+### Body-writing mechanism
+
+Each created Beads task MUST record two pieces of information beyond
+its title:
+
+1. Feature association: a first line of the form `feature: <name>`.
+2. The ordered subtask list from the tasks.md section, preserved
+   verbatim.
+
+The `bd` README does not document how `bd create` accepts a multi-line
+body (as of the current upstream commit). Task 2 is responsible for
+determining the exact mechanism by running `bd create --help` and
+adopting one of these in order of preference:
+
+- `--description <text>` / `--body <text>` flag if present.
+- Stdin if `bd create` reads stdin for body content.
+- An editor-based flow invoked with `bd create --edit` (not usable by
+  the adapter).
+
+If none of the above works — i.e. `bd create` truly accepts only a
+title — the adapter MUST fall back to the title-prefix convention:
+
+- Title becomes `[feature:<name>] <original title>`.
+- Subtask list is written to a per-feature Markdown file under
+  `.beads/<feature>-subtasks.md`, committed alongside the `.beads/`
+  state.
+- `list_feature_tasks(feature)` filters on the title prefix.
+
+Task 2 MUST document the chosen mechanism in the `BeadsAdapter` class
+docstring so downstream readers see the decision without needing to
+re-consult this design doc.
 
 ## Translation pipeline
 
@@ -207,36 +266,52 @@ allows `--force` to find prior tasks.
 
 ## Partial-failure rule
 
-If step 3 fails mid-pipeline, `TRANSCRIBED.md` is NOT written.
-Re-invoking `turma plan-to-beads --feature X` without `--force` will
-fail at the idempotency check only if `TRANSCRIBED.md` exists; since
-it does not on partial failure, the retry without `--force` runs from
-scratch AND creates duplicates of the already-created tasks from the
-prior attempt. The documented workaround is:
+If the create loop fails mid-pipeline, `TRANSCRIBED.md` is NOT written
+and the already-created Beads tasks remain in place as feature-tagged
+orphans.
 
-```
-# Inspect any orphan tasks from the crashed attempt.
-bd ls --json | jq '.[] | select(.body | contains("feature: X"))'
+Re-invoking `turma plan-to-beads --feature X` without `--force`:
 
-# Manually close them.
-bd close <id>...
+- Detects the orphans via `list_feature_tasks(feature)` during the
+  preflight.
+- Fails fast with a message listing the orphan IDs and the two
+  recovery options below. It never silently duplicates.
 
-# Retry.
-turma plan-to-beads --feature X
-```
+Recovery options surfaced by the error:
 
-A fully automated partial-failure recovery is deferred; v1 prioritizes
-a clear, documented manual path over hidden rollback logic.
+1. Manual close, then retry fresh:
+   ```
+   bd close <id> <id> ...
+   turma plan-to-beads --feature X
+   ```
+2. Automated close via `--force`:
+   ```
+   turma plan-to-beads --feature X --force
+   ```
+   With no `TRANSCRIBED.md`, `--force` falls back to
+   `list_feature_tasks(feature)` to find and close the orphans before
+   re-running the pipeline.
+
+Automated full rollback that itself writes a partial-teardown marker
+on failure is deferred; v1 prioritizes a clear, documented recovery
+surface over hidden rollback logic.
 
 ## Teardown (used by `--force`)
 
-With `--force` and a `TRANSCRIBED.md` present:
+`--force` picks the teardown source based on what is on disk:
 
-1. Read `TRANSCRIBED.md` and extract the recorded Beads task IDs.
-2. Call `BeadsAdapter.close_task(id)` for each, in reverse dependency
-   order.
-3. Delete `TRANSCRIBED.md`.
-4. Fall through to the normal transcription pipeline.
+- With `TRANSCRIBED.md` present:
+  1. Read `TRANSCRIBED.md` and extract the recorded Beads task IDs.
+  2. Call `BeadsAdapter.close_task(id)` for each, in reverse
+     dependency order.
+  3. Delete `TRANSCRIBED.md`.
+- Without `TRANSCRIBED.md` but with orphans detected via
+  `list_feature_tasks(feature)`:
+  1. Close each orphan id in the order `list_feature_tasks` returns
+     (Beads is tolerant of arbitrary close order; reverse dependency
+     order is only relevant when the marker records it).
+- With neither marker nor orphans: no teardown; the pipeline runs
+  from scratch.
 
 If any teardown close fails, abort before restarting the pipeline.
 
@@ -263,7 +338,10 @@ existing CLI. Categories:
 
 - `APPROVED` missing: `"plan-to-beads requires the plan to be approved first"`.
 - `TRANSCRIBED.md` exists without `--force`: `"change already transcribed to Beads; use --force to re-create"`.
-- `--force` without `TRANSCRIBED.md`: `"--force requires TRANSCRIBED.md to exist"`.
+- Orphan feature-tagged tasks exist without `TRANSCRIBED.md` and without
+  `--force`: `"feature-tagged tasks already exist in Beads from a prior
+  failed transcription (ids: <ids>). Close them with 'bd close <ids>'
+  or retry with --force."`
 - `tasks.md` missing: `"tasks.md not found in openspec/changes/<feature>/"`.
 - `tasks.md` parse failure: specific line-level reason.
 - `bd` missing: `"bd CLI not found. Install it: pip install beads"`.
