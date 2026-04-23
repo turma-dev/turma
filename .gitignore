@@ -60,8 +60,10 @@ turma.toml
 openspec/changes/*/PLANNING_STATE.json
 *.db
 .turma/state/
+.worktrees/
 *.task_complete
 *.task_progress
+*.task_failed
 
 # Logs
 *.log
