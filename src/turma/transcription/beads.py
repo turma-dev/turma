@@ -201,6 +201,48 @@ class BeadsAdapter:
             if isinstance(rec, dict) and "id" in rec
         )
 
+    def list_in_progress_tasks(
+        self, feature: str
+    ) -> tuple[BeadsTaskRef, ...]:
+        """List IN_PROGRESS + feature-tagged tasks.
+
+        Used by the swarm reconciliation module at run-start to walk
+        tasks Beads believes are already claimed — the candidate set
+        for "prior run left state behind" classification.
+        """
+        argv = [
+            "bd", "list",
+            "--status", "in_progress",
+            "--label", f"feature:{feature}",
+            "--json",
+            "--limit", "0",
+        ]
+        result = self._run(argv, step="bd list (in_progress)")
+        payload = result.stdout.strip()
+        if not payload:
+            return ()
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "bd list (in_progress) returned non-JSON output: "
+                f"{exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(records, list):
+            raise PlanningError(
+                "bd list (in_progress) returned non-array JSON: "
+                f"{type(records).__name__}"
+            )
+        return tuple(
+            BeadsTaskRef(
+                id=str(rec["id"]),
+                title=str(rec.get("title", "")),
+                labels=tuple(str(label) for label in rec.get("labels", ())),
+            )
+            for rec in records
+            if isinstance(rec, dict) and "id" in rec
+        )
+
     def list_ready_tasks(
         self, feature: str
     ) -> tuple[BeadsTaskRef, ...]:

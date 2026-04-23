@@ -124,6 +124,43 @@ class WorktreeManager:
             if "not found" not in str(exc) and "does not exist" not in str(exc):
                 raise
 
+    def worktree_path_for(self, feature: str, task_id: str) -> Path:
+        """Resolved path where the worktree for (feature, task_id) lives.
+
+        Pure derivation — no git call, no filesystem touch. Exposed so
+        reconciliation can answer "is the worktree directory present?"
+        without round-tripping through `setup()` (which mutates).
+        """
+        return self._worktree_path(feature, task_id).resolve()
+
+    def branch_name_for(self, feature: str, task_id: str) -> str:
+        """Branch name this manager would use for (feature, task_id)."""
+        return self._branch_name(feature, task_id)
+
+    def list_task_branches(self, feature: str) -> tuple[str, ...]:
+        """List local branches matching `task/<feature>/*`.
+
+        Used by reconciliation to detect orphan branches — branches
+        with the swarm's task naming convention that no longer
+        correspond to an in_progress Beads task. Uses
+        `for-each-ref` rather than `branch --list` so the output is
+        clean (no `*` current-branch marker, no leading whitespace).
+        """
+        result = self._run(
+            [
+                "git", "-C", str(self._repo_root),
+                "for-each-ref",
+                "--format=%(refname:short)",
+                f"refs/heads/task/{feature}/",
+            ],
+            step="git for-each-ref",
+        )
+        return tuple(
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip()
+        )
+
     def _worktree_path(self, feature: str, task_id: str) -> Path:
         root = Path(self._worktree_root)
         if not root.is_absolute():
