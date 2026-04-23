@@ -2,10 +2,10 @@
 
 Task 6 of `openspec/changes/beads-transcription/` closes out the change
 set with an end-to-end validation against a real `bd` database. The
-unit and pipeline suites (`tests/test_transcription_*.py`, 56 tests in
-total) cover the parser, adapter argv shape, and pipeline routing with
-subprocess stubs. This document is the complementary manual smoke that
-exercises the real `bd` binary end-to-end.
+unit and pipeline suites (`tests/test_transcription_*.py`, 89 tests in
+total) cover the parser, adapter argv shape, pipeline routing, and CLI
+dispatch with subprocess stubs. This document is the complementary
+manual smoke that exercises the real `bd` binary end-to-end.
 
 ## Prerequisites
 
@@ -17,15 +17,25 @@ exercises the real `bd` binary end-to-end.
 
 ## Scratch setup
 
+Point `TURMA_REPO` at your Turma checkout and run everything from a
+scratch workdir so `bd` auto-discovers the scratch `.beads/` and
+`turma plan-to-beads` reads `openspec/changes/smoke-demo/` from the
+same cwd:
+
 ```bash
+export TURMA_REPO="$(cd ~/coding_projects/turma && pwd)"
+# Sanity-check that the repo venv has turma installed (expected
+# after `uv sync`).
+test -x "$TURMA_REPO/.venv/bin/turma" || (cd "$TURMA_REPO" && uv sync)
+
 WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 
 # Minimum Turma project layout: config + role prompts.
-cp "<turma-repo>/turma.example.toml" turma.toml
+cp "$TURMA_REPO/turma.example.toml" turma.toml
 mkdir -p .agents openspec/changes/smoke-demo
-cp "<turma-repo>/.agents/author.md" .agents/
-cp "<turma-repo>/.agents/critic.md" .agents/
+cp "$TURMA_REPO/.agents/author.md" .agents/
+cp "$TURMA_REPO/.agents/critic.md" .agents/
 
 # Beads database (non-interactive to skip bd init's wizard).
 BD_NON_INTERACTIVE=1 bd init --prefix smoke
@@ -56,9 +66,13 @@ the same path as the interactive flow.
 
 ## Step 1 — Happy path
 
+Invoke the Turma binary from the repo venv while staying in `$WORKDIR`
+so `turma` finds `openspec/changes/smoke-demo/` and `bd` auto-discovers
+`.beads/smoke.db`:
+
 ```bash
-cd "<turma-repo>" && uv run turma plan-to-beads --feature smoke-demo --db "$WORKDIR/.beads"
-# Or from WORKDIR with the turma entry on PATH.
+cd "$WORKDIR"
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-demo
 ```
 
 Expected stdout:
@@ -128,7 +142,8 @@ Expected shape:
 ## Step 2 — `--force` replay against `TRANSCRIBED.md`
 
 ```bash
-uv run turma plan-to-beads --feature smoke-demo --force
+cd "$WORKDIR"
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-demo --force
 ```
 
 Expected behavior:
@@ -144,13 +159,14 @@ Expected behavior:
 Simulate a crashed prior run:
 
 ```bash
+cd "$WORKDIR"
 rm openspec/changes/smoke-demo/TRANSCRIBED.md
 ```
 
 Run without `--force` — should refuse with the orphan ids:
 
 ```bash
-uv run turma plan-to-beads --feature smoke-demo
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-demo
 # error: feature-tagged tasks already exist in Beads from a prior
 # failed transcription (ids: bd-smoke-4, bd-smoke-5, bd-smoke-6).
 # Close them with `bd close bd-smoke-4 bd-smoke-5 bd-smoke-6` or retry with --force.
@@ -159,7 +175,7 @@ uv run turma plan-to-beads --feature smoke-demo
 Re-run with `--force`:
 
 ```bash
-uv run turma plan-to-beads --feature smoke-demo --force
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-demo --force
 ```
 
 Should close the feature-tagged orphans and create fresh tasks.
@@ -169,10 +185,11 @@ Should close the feature-tagged orphans and create fresh tasks.
 Corrupt the marker and re-run with `--force`:
 
 ```bash
+cd "$WORKDIR"
 printf '# TRANSCRIBED\n\n- task_ids:\n  (corrupted)\n' \
   > openspec/changes/smoke-demo/TRANSCRIBED.md
 
-uv run turma plan-to-beads --feature smoke-demo --force
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-demo --force
 # error: TRANSCRIBED.md at ... exists but no `- section N: <id>` lines
 # could be parsed. Cannot determine what to tear down. Inspect the
 # file, delete it manually, or close feature-tagged tasks with
