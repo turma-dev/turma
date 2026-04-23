@@ -22,11 +22,15 @@ execution path that the next iteration can harden and expand.
   work → PR loop for a single approved feature until no ready tasks
   remain, a budget is hit, or a task fails.
 - `BeadsAdapter` gains `list_ready_tasks(feature)`, `claim_task(id)`,
-  `fail_task(id, reason)`, and `close_task(id)` implementations
-  (`close_task` already exists from the transcription branch). "Ready"
-  means open, tagged `feature:<name>`, and with all blocker edges
-  satisfied. Claim is atomic — bd's state-transition semantics ensure
-  no two concurrent runs grab the same task.
+  `retries_so_far(id)`, and `fail_task(id, reason, *,
+  retries_so_far, max_retries)` implementations (`close_task` already
+  exists from the transcription branch). "Ready" means open, tagged
+  `feature:<name>`, unblocked, and NOT carrying the
+  `needs_human_review` label. Retry state is persisted via a
+  `turma-retries:<n>` label; budget exhaustion adds
+  `needs_human_review` and releases the claim so the exhausted task
+  stops appearing as ready. Claim is atomic — bd's state-transition
+  semantics ensure no two concurrent runs grab the same task.
 - New `WorktreeManager` that creates `./.worktrees/<feature>/<bd-id>/`
   on a dedicated `task/<feature>/<bd-id>` branch, reuses an existing
   worktree if one is found, and cleans up on success.
@@ -35,12 +39,22 @@ execution path that the next iteration can harden and expand.
   is assembled from the Beads task's title, description (the verbatim
   subtask list), and repo context; worker writes a `.task_complete`
   sentinel on success or `.task_failed` on failure.
+- New `GitAdapter` that owns the commit/push flow between worker
+  success and PR creation: dirty-tree detection, `git add -A` +
+  `git commit` with a pinned message template, and
+  `git push --set-upstream origin <branch>`. Auth relies on the
+  operator's existing credentials (ssh agent or `gh auth` git
+  helper). A clean tree after a worker's "success" sentinel is
+  treated as a worker failure.
 - New `PullRequestAdapter` that uses `gh pr create` to open a PR from
   the task branch into the configured base branch with a title/body
   derived from the Beads task fields.
-- Reconciliation on startup: scan Beads for feature tasks in
-  "in progress" state, cross-check against worktrees + PRs, and either
-  resume or mark failed based on the authoritative sources.
+- **Read-only reconciliation on startup:** scan Beads for feature
+  tasks in `in_progress` state, cross-check against worktrees + PRs,
+  and return a typed `ReconciliationReport`. The module never mutates
+  Beads, git, or GitHub; the orchestrator's main loop has an explicit
+  repair phase that consumes the report and applies `fail_task`,
+  `close_task`, commit/push/PR, or halts on ambiguous findings.
 - New `[swarm]` config keys in `turma.example.toml`:
   `worker_backend = "claude-code"`, `worker_timeout = 1800`,
   `max_retries = 1`, `worktree_root = ".worktrees"`,
@@ -65,12 +79,16 @@ execution path that the next iteration can harden and expand.
   coding-agent CLI inside a worktree and detecting completion.
 - `worktree-manager`: create/reuse/clean a per-task git worktree at a
   deterministic path on a deterministic branch.
+- `git-adapter`: subprocess wrapper for the commit/push flow between
+  worker success and PR creation. Mirrors `BeadsAdapter` shape
+  (argv pinned by tests, `PlanningError` on non-zero exit).
 - `pull-request-adapter`: `gh` CLI wrapper mirroring the
   `BeadsAdapter` shape (subprocess boundary, typed errors, argv
   pinned by unit tests).
-- `run-reconciliation`: startup-time recovery that compares Beads
-  state to worktrees and PRs and resolves ambiguity in a documented
-  authority order.
+- `run-reconciliation`: startup-time read-only inspector that
+  compares Beads state to worktrees and PRs and returns a typed
+  report. The orchestrator's main loop owns the repair phase that
+  consumes the report and mutates state explicitly.
 
 ### Modified Capabilities
 
@@ -88,10 +106,12 @@ execution path that the next iteration can harden and expand.
     cleanup.
   - `src/turma/swarm/worker.py` — `WorkerBackend` protocol plus
     `ClaudeCodeWorker` implementation.
+  - `src/turma/swarm/git.py` — `GitAdapter` for commit/push.
   - `src/turma/swarm/pull_request.py` — `PullRequestAdapter`
     subprocess wrapper for `gh pr create`.
-  - `src/turma/swarm/reconciliation.py` — startup recovery.
-  - `tests/test_swarm_*.py` — six test files, one per module.
+  - `src/turma/swarm/reconciliation.py` — read-only startup
+    inspector.
+  - `tests/test_swarm_*.py` — seven test files, one per module.
 - Modified:
   - `src/turma/transcription/beads.py` — extend `BeadsAdapter` with
     the ready/claim/fail methods and the pinned argv shapes for each.
