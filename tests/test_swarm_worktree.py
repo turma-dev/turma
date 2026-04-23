@@ -343,6 +343,75 @@ def test_branch_name_is_deterministic() -> None:
     )
 
 
+def test_worktree_path_for_resolves_under_repo_without_touching_disk(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager_with_run(
+        tmp_path, lambda argv, *, step: _completed(argv)
+    )
+    path = manager.worktree_path_for("oauth", "bd-smoke-1")
+    assert path == (
+        tmp_path / ".worktrees" / "oauth" / "bd-smoke-1"
+    ).resolve()
+    # Pure derivation: no directory actually created.
+    assert not path.exists()
+
+
+def test_branch_name_for_matches_private_helper(tmp_path: Path) -> None:
+    manager = _make_manager_with_run(
+        tmp_path, lambda argv, *, step: _completed(argv)
+    )
+    assert (
+        manager.branch_name_for("oauth", "bd-1")
+        == "task/oauth/bd-1"
+    )
+
+
+# -----------------------------------------------------------------------
+# list_task_branches
+# -----------------------------------------------------------------------
+
+
+def test_list_task_branches_pins_argv_and_parses_lines(tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv, *, step):
+        seen.append(argv)
+        return _completed(
+            argv,
+            stdout=(
+                "task/oauth/bd-1\n"
+                "task/oauth/bd-smoke-1\n"
+                "\n"
+                "task/oauth/bd-42\n"
+            ),
+        )
+
+    manager = _make_manager_with_run(tmp_path, run)
+    branches = manager.list_task_branches("oauth")
+
+    assert seen == [
+        [
+            "git", "-C", str(tmp_path.resolve()),
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/task/oauth/",
+        ]
+    ]
+    assert branches == (
+        "task/oauth/bd-1",
+        "task/oauth/bd-smoke-1",
+        "task/oauth/bd-42",
+    )
+
+
+def test_list_task_branches_returns_empty_on_empty_stdout(tmp_path: Path) -> None:
+    manager = _make_manager_with_run(
+        tmp_path, lambda argv, *, step: _completed(argv, stdout="")
+    )
+    assert manager.list_task_branches("oauth") == ()
+
+
 def test_worktree_list_porcelain_detection_ignores_unrelated_entries(
     tmp_path: Path,
 ) -> None:
