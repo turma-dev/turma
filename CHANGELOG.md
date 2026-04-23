@@ -6,14 +6,22 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-23
+
 ### Added
-- Added `turma plan-to-beads --feature <name> [--force]` that translates an approved plan's `tasks.md` into a feature-tagged Beads task set with parser-to-bd type translation, priority mapping, dependency edges, and a `TRANSCRIBED.md` marker.
-- Added the `BeadsAdapter` subprocess wrapper, the `tasks.md` parser, and the transcription pipeline modules under `src/turma/transcription/` with 89 new tests (parser, adapter argv pinning, pipeline routing, CLI dispatch, error mapping).
-- Added `docs/smoke-plan-to-beads.md` documenting the end-to-end manual smoke procedure against a real `bd` database, including happy path, both `--force` teardown paths, malformed-marker rejection, and failure-signature cheat sheet.
+- Added a full author/critic planning loop for `turma plan` with a strict `critique_N.md` format (`## Status: blocking | nits_only | approved`, `[B###]` / `[N###]` / `[Q###]` finding IDs), two-call revision path (per-finding `response_N.md` + revised artifacts), LangGraph state machine with SQLite checkpointing, and `max_rounds` + repeated-blocking-ID loop detection.
+- Added a resume CLI: `turma plan --feature <name> --resume` for read-only status, plus `--approve`, `--revise "<why>"`, `--abandon "<why>"`, and `--approve --override "<why>"` for advancing or halting from `awaiting_human_approval` / `needs_human_review`.
+- Added terminal-marker reconciliation so `APPROVED`, `ABANDONED.md`, `NEEDS_HUMAN_REVIEW.md`, and `OVERRIDE.md` are authoritative state; re-running `turma plan` on an already-terminal change is a read-only no-op.
+- Added `turma plan-to-beads --feature <name> [--force]` that translates an approved plan's `tasks.md` into a feature-tagged Beads task set with parser-to-bd type translation (`impl`/`test` → `task`, `docs` → `chore`, `spec` → `decision`), bd-native priority mapping, dependency edges, and a `TRANSCRIBED.md` marker. `--force` handles both marker-recorded teardown and orphan-only teardown.
+- Added the `BeadsAdapter` subprocess wrapper, the `tasks.md` parser, and the transcription pipeline under `src/turma/transcription/` with 89 new tests (parser, adapter argv pinning, pipeline routing, CLI dispatch, error mapping).
+- Added `docs/smoke-plan-to-beads.md` documenting the end-to-end manual smoke procedure against a real `bd` database (happy path, both `--force` teardown paths, malformed-marker rejection, failure-signature cheat sheet).
 
 ### Changed
-- Documented `bd` (Beads) and Dolt as external runtime prerequisites for `turma plan-to-beads` in `README.md`.
-- Extended `docs/architecture.md`'s Task Translation section to describe the section-level Beads model, parser-to-bd type mapping, and the label-based (not native-epic) feature association.
+- Replaced the single-pass `turma plan` flow with the graph-driven critic loop; config keys `critic_model`, `max_rounds`, and `interactive` are now behaviorally wired and documented in `turma.example.toml`.
+- Suspension output now prints the exact resume commands (`turma plan --feature <name> --resume --approve | --revise | --abandon | --approve --override`) and the correct round's critique path, with an `interactive = false` confirmation path that halts without auto-approving.
+- Documented `bd` (Beads) and Dolt as external runtime prerequisites for `turma plan-to-beads` in `README.md` with a "Plan-to-Beads" section covering prerequisites, behavior, `--force` semantics, and partial-failure recovery.
+- Rewrote `docs/architecture.md`'s Planning section around the committed v1 state machine and the Task Translation section around the section-level Beads model, parser-to-bd type mapping, and label-based (not native-epic) feature association.
+- New runtime dependencies: `langgraph>=1.1.9` and `langgraph-checkpoint-sqlite>=3.0.3` in `pyproject.toml`. `.langgraph/` and `openspec/changes/*/PLANNING_STATE.json` added to `.gitignore`.
 
 ## [0.1.7] - 2026-04-08
 
