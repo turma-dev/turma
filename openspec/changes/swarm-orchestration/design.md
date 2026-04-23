@@ -65,21 +65,26 @@ Behavior:
 
 ```
 preflight_check
-    └─▶ reconcile
-            └─▶ fetch_ready
-                    ├─[empty]─▶ END (success)
-                    └─[ready]─▶ claim_task
-                                    ├─[claim fail]─▶ fetch_ready   (next one)
-                                    └─[claim ok]──▶ ensure_worktree
-                                                         └─▶ run_worker
-                                                                 ├─[success marker]─▶ commit_branch
-                                                                 │                           └─▶ open_pr
-                                                                 │                                   └─▶ close_task
-                                                                 │                                           └─▶ fetch_ready
-                                                                 ├─[fail marker]──────▶ fail_task
-                                                                 │                           └─▶ fetch_ready OR END_fail
-                                                                 └─[timeout]─────────▶ fail_task
-                                                                                             └─▶ fetch_ready OR END_fail
+    └─▶ reconcile (read-only; produces a report)
+            └─▶ repair_phase (apply report findings)
+                    └─▶ fetch_ready
+                            ├─[empty]─▶ END (success)
+                            └─[ready]─▶ claim_task
+                                            ├─[claim fail]─▶ fetch_ready   (next one)
+                                            └─[claim ok]──▶ ensure_worktree
+                                                                 └─▶ run_worker
+                                                                         ├─[success marker]─▶ git_commit_push
+                                                                         │                           ├─[clean tree]──▶ fail_task ("worker reported success but left tree clean")
+                                                                         │                           │                        └─▶ fetch_ready OR END_fail
+                                                                         │                           ├─[push fail]───▶ fail_task (git stderr)
+                                                                         │                           │                        └─▶ fetch_ready OR END_fail
+                                                                         │                           └─[commit+push ok]──▶ open_pr
+                                                                         │                                                         └─▶ close_task
+                                                                         │                                                                 └─▶ fetch_ready
+                                                                         ├─[fail marker]──────▶ fail_task
+                                                                         │                           └─▶ fetch_ready OR END_fail
+                                                                         └─[timeout]─────────▶ fail_task
+                                                                                                     └─▶ fetch_ready OR END_fail
 ```
 
 Terminal conditions for the outer loop:
@@ -90,12 +95,38 @@ Terminal conditions for the outer loop:
 
 ### Retry budget
 
-Each task has at most `max_retries + 1` attempts. On the first
-failure, Beads records the failure, the worktree is torn down, and
-the outer loop continues so the task can be re-attempted if it comes
-up ready again (it will, since a failed task is reopened). On
-exhaustion, the task is left in a "failed" Beads state with
-`needs_human_review` label and the outer loop halts.
+bd's built-in status vocabulary is `open | in_progress | blocked |
+deferred | closed`. Turma does not invent a "failed" status. Retry
+state is persisted through bd labels and notes on top of the
+standard status flow:
+
+- `turma-retries:<n>` — integer label, incremented on each failed
+  attempt. Absent means zero prior attempts.
+- `needs_human_review` — label added after retry-budget exhaustion.
+  `list_ready_tasks` filters out tasks carrying this label so
+  exhausted tasks stop appearing as ready.
+- `bd note <id> "<reason>"` — records the failure reason in the
+  task's notes; `bd show <id>` surfaces the full history.
+
+On each failure:
+
+1. `bd note <id> "<reason>"` records the error.
+2. Read the current `turma-retries:<n>` label (0 if absent).
+3. If `n + 1 <= max_retries`: replace with `turma-retries:<n+1>` and
+   release the claim (status transitions back to `open`). The outer
+   loop continues — the task may be re-attempted if it comes up
+   ready again.
+4. Else (`n + 1 > max_retries`): remove the `turma-retries:*` label,
+   add `needs_human_review`, release the claim. The orchestrator
+   halts the whole run so the operator can triage via
+   `bd list --label needs_human_review`.
+
+`BeadsAdapter.fail_task(task_id, reason, *, retries_so_far,
+max_retries)` encapsulates the note + label dance in a single
+method; the orchestrator passes in the budget state it computed
+from `max_retries` and the current label value. The adapter chooses
+the bd argv for each primitive (note, label add/remove, status
+release); the orchestrator does not know those details.
 
 ## Beads operations
 
@@ -106,19 +137,38 @@ stubs; exact argv determined by Task 2's `bd --help` verification):
 class BeadsAdapter:
     ...
     def list_ready_tasks(self, feature: str) -> tuple[BeadsTaskRef, ...]:
-        # OPEN + feature:<name> + no unsatisfied blocker edges.
+        # OPEN + feature:<name> + no unsatisfied blocker edges +
+        # no `needs_human_review` label. Exhausted tasks are
+        # filtered out here; operators find them via
+        # `bd list --label needs_human_review`.
         ...
 
     def claim_task(self, task_id: str) -> None:
-        # Atomic transition to "in progress". Raises PlanningError
+        # Atomic transition to in_progress. Raises PlanningError
         # with `bd` stderr preserved if the task is not claimable
         # (already claimed, closed, or blocked).
         ...
 
-    def fail_task(self, task_id: str, reason: str) -> None:
-        # Records a failure event and reopens the task so a later
-        # run can retry within the budget. Attaches the reason as a
-        # note / event payload so `bd show` surfaces it.
+    def fail_task(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        retries_so_far: int,
+        max_retries: int,
+    ) -> None:
+        # Records the reason via `bd note`, updates the
+        # turma-retries:<n> label, and either releases the claim
+        # back to open (budget remaining) or adds
+        # needs_human_review + releases (budget exhausted).
+        # Idempotent; safe to retry on adapter-level failure.
+        ...
+
+    def retries_so_far(self, task_id: str) -> int:
+        # Reads the current turma-retries:<n> label off the task
+        # body/labels JSON; returns 0 if absent. The orchestrator
+        # calls this before invoking fail_task so it owns the
+        # budget accounting.
         ...
 ```
 
@@ -161,6 +211,79 @@ Operations:
 
 `.worktrees/` is gitignored in the orchestrator's repo (it's
 working-copy state, not history).
+
+## Git operations contract
+
+Mirrors the other subprocess boundaries (Beads, gh, Claude Code).
+`GitAdapter` lives in `src/turma/swarm/git.py` and owns the three git
+operations the success path needs between `run_worker` and
+`open_pr`.
+
+```python
+class GitAdapter:
+    def __init__(self, repo_root: Path) -> None: ...
+        # shutil.which("git") check + fail-fast if missing.
+
+    def status_is_dirty(self, worktree: Path) -> bool: ...
+        # `git -C <worktree> status --porcelain=v1`. True iff the
+        # output is non-empty after excluding ignored sentinels.
+
+    def commit_all(self, worktree: Path, message: str) -> str: ...
+        # `git -C <worktree> add -A`  →
+        # `git -C <worktree> commit -m <message>`  →
+        # returns the new commit SHA from rev-parse HEAD.
+        # Raises PlanningError with git stderr if the commit fails
+        # or there is nothing to commit (refuses empty commits).
+
+    def push_branch(
+        self, worktree: Path, branch: str, *, remote: str = "origin"
+    ) -> None: ...
+        # `git -C <worktree> push --set-upstream <remote> <branch>`.
+        # Non-zero exit raises PlanningError with git stderr
+        # (auth, non-fast-forward, network).
+```
+
+### Commit message template (pinned by tests)
+
+```
+[{turma_type}] {task_title}
+
+Closes bd-{task_id}.
+
+Generated by turma run for feature "{feature}".
+```
+
+The `{turma_type}` component is the parser-side label carried
+through transcription as `turma-type:<t>` (impl / test / docs /
+spec). The orchestrator reads it off the Beads task's labels.
+
+### Flow between `run_worker` and `open_pr`
+
+On a successful worker sentinel the orchestrator runs:
+
+1. `status_is_dirty(worktree)`.
+   - **False** → the worker claimed success without modifying the
+     tree. Treated as a worker failure with reason
+     `"worker reported success but left the tree clean"`. Task
+     enters the retry path, not the PR path.
+   - **True** → proceed to commit.
+2. `commit_all(worktree, rendered_template)`. A worker that
+   committed its own changes inside the session leaves the tree
+   clean; that case is handled by step 1 as a "clean tree" failure
+   in v1. Workers that commit on their own (common for Codex-style
+   sessions) are v2 concerns — v1 expects Claude Code's default
+   "edit files, leave commits to me" behavior.
+3. `push_branch(worktree, branch)` — push the task branch to
+   `origin`. Push failures (auth, non-fast-forward) abort the
+   task via the normal fail_task path; the worktree is left in
+   place for triage.
+
+### Credentials
+
+Git auth relies on the operator's existing credentials — ssh key
+loaded into the agent, or `gh auth`'s git credential helper.
+`GitAdapter` does not manage credentials and does not fall back to
+HTTPS-with-token.
 
 ## Worker backend protocol
 
@@ -258,33 +381,59 @@ nothing in the orchestrator consumes it yet.)
 
 ## Reconciliation
 
-Runs before every invocation (including `--dry-run`). Walks the
-authority model bottom-up:
+**Read-only.** The reconciliation module
+(`src/turma/swarm/reconciliation.py`) detects ambiguity between Beads
+state and the filesystem and returns a typed `ReconciliationReport`.
+It never mutates Beads, git, or GitHub state. The orchestrator's
+main loop consumes the report and runs an explicit repair phase
+before the first `fetch_ready`. Concentrating mutations in the main
+loop keeps reconciliation pure (trivially testable with pure
+fixtures) and gives the operator a single place to read what the
+orchestrator is about to change.
 
-1. Query Beads for tasks labelled `feature:<name>` and `in progress`.
-   These are the candidate "already claimed" tasks.
-2. For each, look at `./.worktrees/<feature>/<bd-id>/`:
-   - Missing → the worktree was deleted or never created.
-     Re-open the Beads task (fail back to "open") and surface the
-     discrepancy in stdout.
-   - Present + no sentinels → stale; check if a branch still exists
-     locally or remotely. If yes and a PR exists, advance Beads to
-     closed on the operator's next command (but NOT automatically —
-     v1 surfaces and halts rather than guessing).
-   - Present + `.task_complete` → finish the task: commit/push if
-     needed, open PR if none exists, close Beads task.
-   - Present + `.task_failed` → record the failure against Beads
-     (within retry budget) and clean up the worktree.
-3. Stale branches without corresponding Beads tasks are listed but
-   NOT auto-deleted; operator triage required.
+Runs before every invocation (including `--dry-run`; `--dry-run`
+prints the report and exits without entering the repair phase or
+the main loop). Walks the authority model:
 
-Reconciliation output is a short summary printed to stdout:
+1. Query Beads for tasks labelled `feature:<name>` in state
+   `in_progress`. These are the candidate "already claimed" tasks
+   from a prior run.
+2. For each, classify based on the worktree at
+   `./.worktrees/<feature>/<bd-id>/` and any associated branch / PR:
+
+   | Finding key | Trigger | Suggested repair (applied by main loop) |
+   | --- | --- | --- |
+   | `missing-worktree` | Beads says in_progress, worktree absent | release the claim (`in_progress → open`) so the task can be re-attempted |
+   | `completion-pending` | `.task_complete` present, no open PR | run the normal commit/push/open-pr tail and close the Beads task |
+   | `completion-pending-with-pr` | `.task_complete` present, PR already open | close the Beads task and remove the worktree |
+   | `failure-pending` | `.task_failed` present | pass to `fail_task` with the worker's reason, remove the worktree |
+   | `stale-no-sentinels` | worktree + branch exist, no sentinel, no PR | no auto-repair — surface and halt the run, operator decides |
+   | `orphan-branch` | branch or remote branch with no corresponding in_progress Beads task | surface only; operator triage |
+
+3. `ReconciliationReport.findings` is an ordered tuple of typed
+   dataclasses — one per finding above — so the orchestrator can
+   dispatch cleanly without re-parsing strings.
+
+The orchestrator's repair phase:
+
+- Applies every repair marked "applied by main loop" in the table,
+  in the order reconciliation surfaced them.
+- Halts before `fetch_ready` if any `stale-no-sentinels` finding is
+  present (v1 does not guess on ambiguous state).
+- Prints every repair action taken, in the same compact per-task
+  format used by the normal loop.
+
+Reconciliation stdout from the module itself is a short summary:
 
 ```
 reconcile: 0 in-progress tasks
-reconcile: 1 in-progress task resolved (bd-abc → closed via PR #42)
-reconcile: 1 in-progress task needs attention (bd-xyz → worktree missing)
+reconcile: 1 in-progress task needs repair (bd-abc → completion-pending)
+reconcile: 1 in-progress task needs attention (bd-xyz → stale-no-sentinels)
+reconcile: 1 orphan branch found (task/foo/bd-old)
 ```
+
+Repair mutations are printed by the main loop when it applies them,
+not by reconciliation itself.
 
 ## Filesystem markers
 
