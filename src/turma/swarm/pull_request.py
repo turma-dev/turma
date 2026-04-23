@@ -13,6 +13,7 @@ No retry on transient GitHub failures in v1.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 
@@ -71,6 +72,53 @@ class PullRequestAdapter:
                 f"{result.stdout}"
             )
         return url
+
+    def find_open_pr_url_for_branch(self, branch: str) -> str | None:
+        """Return the URL of an open PR whose head is `branch`, or None.
+
+        Used by the swarm reconciliation module to distinguish
+        `completion-pending` from `completion-pending-with-pr` when a
+        prior `turma run` was interrupted between `gh pr create` and
+        `bd close`. Uses `gh pr list` (rather than `gh pr view`) so
+        "no matching PR" is a clean empty-array signal instead of a
+        non-zero exit.
+        """
+        argv = [
+            "gh", "pr", "list",
+            "--head", branch,
+            "--state", "open",
+            "--json", "url",
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "unknown error"
+            )
+            raise PlanningError(
+                f"gh pr list failed: exit {result.returncode}\n{detail}"
+            )
+        payload = result.stdout.strip() or "[]"
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "gh pr list returned non-JSON output: "
+                f"{exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(records, list):
+            raise PlanningError(
+                "gh pr list returned non-array JSON: "
+                f"{type(records).__name__}"
+            )
+        if not records:
+            return None
+        first = records[0]
+        if not isinstance(first, dict):
+            return None
+        url = str(first.get("url", ""))
+        return url or None
 
     @staticmethod
     def _check_auth() -> None:

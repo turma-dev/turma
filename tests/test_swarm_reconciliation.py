@@ -100,6 +100,24 @@ class StubGitAdapter:
         self.calls.append(("push_branch", args, kwargs))
 
 
+@dataclass
+class StubPullRequestAdapter:
+    """Stub PR adapter. `urls_by_branch` maps branch → URL when a PR
+    is "open" for that branch; anything absent resolves to None."""
+
+    urls_by_branch: dict[str, str] = field(default_factory=dict)
+    calls: list[tuple] = field(default_factory=list)
+
+    def find_open_pr_url_for_branch(self, branch: str) -> str | None:
+        self.calls.append(("find_open_pr_url_for_branch", branch))
+        return self.urls_by_branch.get(branch)
+
+    # Mutation surface — never called by reconciliation.
+    def open_pr(self, *args, **kwargs) -> str:
+        self.calls.append(("open_pr", args, kwargs))
+        return ""
+
+
 def _ref(task_id: str, title: str = "") -> BeadsTaskRef:
     return BeadsTaskRef(id=task_id, title=title, labels=("feature:oauth",))
 
@@ -118,18 +136,27 @@ def _reconcile(
     *,
     in_progress: tuple[BeadsTaskRef, ...] = (),
     task_branches: tuple[str, ...] = (),
-) -> tuple[ReconciliationReport, StubBeadsAdapter, StubWorktreeManager, StubGitAdapter]:
+    pr_urls: dict[str, str] | None = None,
+) -> tuple[
+    ReconciliationReport,
+    StubBeadsAdapter,
+    StubWorktreeManager,
+    StubGitAdapter,
+    StubPullRequestAdapter,
+]:
     bd = StubBeadsAdapter(in_progress=in_progress)
     wt = StubWorktreeManager(repo_root=tmp_path, task_branches=task_branches)
     git = StubGitAdapter()
+    pr = StubPullRequestAdapter(urls_by_branch=pr_urls or {})
     report = reconcile_feature(
         "oauth",
         adapter=bd,
         worktree_manager=wt,
         git_adapter=git,
+        pr_adapter=pr,
         repo_root=tmp_path,
     )
-    return report, bd, wt, git
+    return report, bd, wt, git, pr
 
 
 # ---------------------------------------------------------------------
@@ -138,7 +165,7 @@ def _reconcile(
 
 
 def test_no_in_progress_tasks_produces_empty_report(tmp_path: Path) -> None:
-    report, bd, wt, git = _reconcile(tmp_path)
+    report, bd, wt, git, pr = _reconcile(tmp_path)
     assert report.findings == ()
     # Only the read methods were touched on any stub.
     assert bd.calls == [("list_in_progress_tasks", "oauth")]
@@ -159,7 +186,7 @@ def test_returns_report_dataclass(tmp_path: Path) -> None:
 
 def test_missing_worktree_finding(tmp_path: Path) -> None:
     """bd says in_progress, worktree directory absent."""
-    report, bd, wt, git = _reconcile(
+    report, bd, wt, git, pr = _reconcile(
         tmp_path, in_progress=(_ref("bd-1"),)
     )
     assert len(report.findings) == 1
@@ -186,7 +213,7 @@ def test_completion_pending_finding_on_task_complete_sentinel(
     worktree = _make_worktree(tmp_path, "oauth", "bd-2")
     (worktree / ".task_complete").write_text("DONE\n")
 
-    report, bd, wt, git = _reconcile(
+    report, bd, wt, git, pr = _reconcile(
         tmp_path, in_progress=(_ref("bd-2"),)
     )
     assert len(report.findings) == 1
@@ -227,7 +254,7 @@ def test_failure_pending_finding_surfaces_worker_reason(
         "could not resolve import turma.foo\n"
     )
 
-    report, bd, wt, git = _reconcile(
+    report, bd, wt, git, pr = _reconcile(
         tmp_path, in_progress=(_ref("bd-4"),)
     )
     assert len(report.findings) == 1
@@ -264,7 +291,7 @@ def test_stale_no_sentinels_when_worktree_present_but_empty(
 ) -> None:
     _make_worktree(tmp_path, "oauth", "bd-6")  # no sentinels written
 
-    report, bd, wt, git = _reconcile(
+    report, bd, wt, git, pr = _reconcile(
         tmp_path, in_progress=(_ref("bd-6"),)
     )
     assert len(report.findings) == 1
@@ -284,7 +311,7 @@ def test_stale_no_sentinels_when_worktree_present_but_empty(
 def test_orphan_branch_finding_when_branch_has_no_in_progress_task(
     tmp_path: Path,
 ) -> None:
-    report, bd, wt, git = _reconcile(
+    report, bd, wt, git, pr = _reconcile(
         tmp_path,
         in_progress=(),
         task_branches=("task/oauth/bd-old",),
@@ -363,7 +390,7 @@ def test_reconciliation_never_calls_any_mutation_surface(
     (tmp_path / ".worktrees" / "oauth" / "bd-fail" / ".task_failed").write_text("why\n")
     _make_worktree(tmp_path, "oauth", "bd-stale")  # no sentinels
 
-    _, bd, wt, git = _reconcile(
+    _, bd, wt, git, pr = _reconcile(
         tmp_path,
         in_progress=(
             _ref("bd-missing"),    # no worktree dir
@@ -379,35 +406,87 @@ def test_reconciliation_never_calls_any_mutation_surface(
     assert not any(c[0] in mutating_wt_methods for c in wt.calls)
     mutating_git_methods = {"commit_all", "push_branch"}
     assert not any(c[0] in mutating_git_methods for c in git.calls)
+    mutating_pr_methods = {"open_pr"}
+    assert not any(c[0] in mutating_pr_methods for c in pr.calls)
 
 
 # ---------------------------------------------------------------------
-# Deferred finding type — CompletionPendingWithPr
+# completion-pending-with-pr
 # ---------------------------------------------------------------------
 
 
-def test_completion_pending_with_pr_is_importable_but_not_emitted(
+def test_completion_pending_with_pr_emitted_when_open_pr_exists(
     tmp_path: Path,
 ) -> None:
-    """The dataclass exists for the repair phase (Task 7) to construct
-    after disambiguating PR state. reconcile_feature itself never
-    emits it in v1 — it has no PR adapter in its signature."""
+    """`.task_complete` + open PR for the task branch → CompletionPendingWithPr."""
     worktree = _make_worktree(tmp_path, "oauth", "bd-pr")
     (worktree / ".task_complete").write_text("DONE\n")
 
-    report, *_ = _reconcile(
-        tmp_path, in_progress=(_ref("bd-pr"),)
+    report, bd, wt, git, pr = _reconcile(
+        tmp_path,
+        in_progress=(_ref("bd-pr"),),
+        pr_urls={
+            "task/oauth/bd-pr": "https://github.com/turma-dev/turma/pull/42"
+        },
     )
-    assert not any(
-        isinstance(f, CompletionPendingWithPr) for f in report.findings
+    assert len(report.findings) == 1
+    finding = report.findings[0]
+    assert isinstance(finding, CompletionPendingWithPr)
+    assert finding.task_id == "bd-pr"
+    assert finding.pr_url == "https://github.com/turma-dev/turma/pull/42"
+    assert finding.suggested_repair
+    # PR lookup happened exactly once, for the completed task's branch.
+    assert pr.calls == [
+        ("find_open_pr_url_for_branch", "task/oauth/bd-pr")
+    ]
+
+
+def test_completion_pending_emitted_when_no_open_pr(
+    tmp_path: Path,
+) -> None:
+    """`.task_complete` + no open PR → plain CompletionPending."""
+    worktree = _make_worktree(tmp_path, "oauth", "bd-solo")
+    (worktree / ".task_complete").write_text("DONE\n")
+
+    report, bd, wt, git, pr = _reconcile(
+        tmp_path,
+        in_progress=(_ref("bd-solo"),),
+        pr_urls={},  # no PR for any branch
     )
-    # But the type is importable and constructible (for the repair phase).
+    assert len(report.findings) == 1
+    assert isinstance(report.findings[0], CompletionPending)
+    # Lookup still happened — that's how we learn "no PR".
+    assert pr.calls == [
+        ("find_open_pr_url_for_branch", "task/oauth/bd-solo")
+    ]
+
+
+def test_pr_lookup_only_runs_for_completed_tasks(tmp_path: Path) -> None:
+    """fail / stale / missing-worktree tasks must not trigger a PR query."""
+    _make_worktree(tmp_path, "oauth", "bd-fail")
+    (tmp_path / ".worktrees" / "oauth" / "bd-fail" / ".task_failed").write_text("x")
+    _make_worktree(tmp_path, "oauth", "bd-stale")
+
+    _, _, _, _, pr = _reconcile(
+        tmp_path,
+        in_progress=(
+            _ref("bd-missing"),
+            _ref("bd-fail"),
+            _ref("bd-stale"),
+        ),
+    )
+    # No PR lookups happened — none of those are completion-pending.
+    assert pr.calls == []
+
+
+def test_completion_pending_with_pr_is_importable() -> None:
+    """The dataclass is exported from the module and constructible."""
     finding = CompletionPendingWithPr(
         task_id="bd-pr",
         pr_url="https://github.com/example/repo/pull/1",
-        suggested_repair="close the Beads task; remove the worktree",
     )
     assert finding.pr_url.endswith("/1")
+    assert finding.suggested_repair  # has a default
 
 
 # ---------------------------------------------------------------------

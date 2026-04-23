@@ -158,7 +158,10 @@
 
 - [ ] New module `src/turma/swarm/reconciliation.py` with
       `reconcile_feature(feature, *, adapter, worktree_manager,
-      git_adapter, repo_root) -> ReconciliationReport`.
+      git_adapter, pr_adapter, repo_root) -> ReconciliationReport`.
+      `pr_adapter` is required so `completion-pending-with-pr` can be
+      emitted; the lookup is read-only (`gh pr list`) and is only
+      issued for tasks carrying `.task_complete`.
 - [ ] **Read-only.** The module detects ambiguity and returns a
       typed report; it never calls `fail_task`, `close_task`,
       `git commit`, `git push`, or `gh pr create`. Those mutations
@@ -172,10 +175,18 @@
 - [ ] Print a short summary to stdout (`reconcile: N ...`) on
       module entry; the orchestrator prints per-repair lines
       separately as it applies them.
+- [ ] Extend `PullRequestAdapter` with
+      `find_open_pr_url_for_branch(branch) -> str | None` so
+      reconciliation can disambiguate `completion-pending` from
+      `completion-pending-with-pr`. argv pinned:
+      `gh pr list --head <branch> --state open --json url`.
+      Empty array → None; one match → its URL.
 - [ ] Unit tests in `tests/test_swarm_reconciliation.py`: each
       finding category produces the expected typed entry and the
       module makes no mutation calls against any adapter (verified
-      by asserting zero close/fail/push/PR calls on the stubs).
+      by asserting zero close/fail/push/open_pr calls on the stubs).
+      Explicitly assert `find_open_pr_url_for_branch` is called only
+      for tasks carrying `.task_complete`.
 
 ### 7. Wire the swarm orchestrator
 

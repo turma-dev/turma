@@ -224,6 +224,97 @@ def test_open_pr_falls_back_to_stdout_when_stderr_empty_on_failure() -> None:
             )
 
 
+# ---------------------------------------------------------------------
+# find_open_pr_url_for_branch
+# ---------------------------------------------------------------------
+
+
+def test_find_open_pr_url_returns_url_when_one_match() -> None:
+    adapter = _make_adapter()
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_):
+        seen.append(argv)
+        return _completed(
+            argv,
+            stdout='[{"url":"https://github.com/turma-dev/turma/pull/7"}]\n',
+        )
+
+    with patch(
+        "turma.swarm.pull_request.subprocess.run", side_effect=fake_run
+    ):
+        url = adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+
+    assert url == "https://github.com/turma-dev/turma/pull/7"
+    assert seen == [
+        [
+            "gh", "pr", "list",
+            "--head", "task/oauth/bd-1",
+            "--state", "open",
+            "--json", "url",
+        ]
+    ]
+
+
+def test_find_open_pr_url_returns_none_on_empty_array() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout="[]\n"),
+    ):
+        assert (
+            adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+            is None
+        )
+
+
+def test_find_open_pr_url_returns_none_on_empty_stdout() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=""),
+    ):
+        assert (
+            adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+            is None
+        )
+
+
+def test_find_open_pr_url_surfaces_stderr_on_non_zero_exit() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=1,
+            stdout="",
+            stderr="no git remote named 'origin'",
+        ),
+    ):
+        with pytest.raises(PlanningError, match="no git remote"):
+            adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+
+
+def test_find_open_pr_url_rejects_non_json_output() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout="definitely not json"),
+    ):
+        with pytest.raises(PlanningError, match="non-JSON output"):
+            adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+
+
+def test_find_open_pr_url_rejects_non_array_json() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout='{"not": "array"}'),
+    ):
+        with pytest.raises(PlanningError, match="non-array JSON"):
+            adapter.find_open_pr_url_for_branch("task/oauth/bd-1")
+
+
 def test_open_pr_falls_back_to_unknown_error_when_both_empty() -> None:
     adapter = _make_adapter()
     with patch(

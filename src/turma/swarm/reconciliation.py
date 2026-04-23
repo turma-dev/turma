@@ -17,10 +17,9 @@ detection from mutation keeps this module trivially testable with
 pure fixtures and gives the operator a single place (the repair
 phase) to read what the orchestrator is about to change.
 
-### Finding types vs emission
+### Finding types
 
-Six finding dataclasses are defined to match the design doc's finding
-table:
+Six finding dataclasses, all emitted by `reconcile_feature`:
 
 - `MissingWorktree`
 - `CompletionPending`
@@ -29,13 +28,11 @@ table:
 - `StaleNoSentinels`
 - `OrphanBranch`
 
-`reconcile_feature` emits five of them. `CompletionPendingWithPr`
-requires querying GitHub PR state, which is outside this module's
-signature (`(adapter, worktree_manager, git_adapter, repo_root)` — no
-`pr_adapter`). The repair phase (Task 7) owns PR lookup and can
-promote a `CompletionPending` to `CompletionPendingWithPr` at repair
-time; the dataclass lives here so the downstream layer has one place
-to import it from.
+`completion-pending-with-pr` disambiguation requires querying GitHub
+for an open PR whose head is the task branch, so `reconcile_feature`
+takes a `pr_adapter` in addition to the Beads / worktree / git
+dependencies. The PR lookup is a read-only `gh pr list` call; no
+mutation adapter surface is ever invoked.
 """
 
 from __future__ import annotations
@@ -72,6 +69,10 @@ class _GitView(Protocol):
     but it is part of the signature per the design doc."""
 
 
+class _PullRequestView(Protocol):
+    def find_open_pr_url_for_branch(self, branch: str) -> str | None: ...
+
+
 # ---------------------------------------------------------------------
 # Finding dataclasses
 # ---------------------------------------------------------------------
@@ -95,10 +96,6 @@ class CompletionPending:
 
 @dataclass(frozen=True)
 class CompletionPendingWithPr:
-    """Emitted by the orchestrator's repair phase (Task 7), not by
-    `reconcile_feature`. Present here so downstream code imports all
-    six finding types from one module."""
-
     task_id: str
     pr_url: str
     suggested_repair: str = (
@@ -167,16 +164,20 @@ def reconcile_feature(
     adapter: _BeadsView,
     worktree_manager: _WorktreeView,
     git_adapter: _GitView,
+    pr_adapter: _PullRequestView,
     repo_root: Path,
 ) -> ReconciliationReport:
     """Classify prior-run state for `feature` and return the report.
 
-    Never calls mutation methods on any adapter. The `git_adapter` and
-    `repo_root` parameters are accepted for the stable signature the
-    orchestrator wires in Task 7; v1 reconciliation does not actually
-    consume them, but they are kept so the module interface does not
-    change when future classification logic (e.g. dirty-tree-based
-    disambiguation) lands.
+    Never calls mutation methods on any adapter. `git_adapter` and
+    `repo_root` are accepted for the stable signature the orchestrator
+    wires in Task 7; v1 reconciliation does not consume them, but
+    they stay so the interface is stable when future classification
+    logic (e.g. dirty-tree-based disambiguation) lands.
+    `pr_adapter.find_open_pr_url_for_branch` is called only for tasks
+    carrying a `.task_complete` sentinel — never for fail / stale /
+    missing-worktree tasks — so the cost is bounded by the number of
+    completed-but-not-closed tasks, typically 0-1 after an interrupt.
     """
     del git_adapter, repo_root  # reserved for future classification
 
@@ -185,10 +186,11 @@ def reconcile_feature(
 
     claimed_branches: set[str] = set()
     for task in in_progress:
-        claimed_branches.add(
-            worktree_manager.branch_name_for(feature, task.id)
+        branch = worktree_manager.branch_name_for(feature, task.id)
+        claimed_branches.add(branch)
+        findings.append(
+            _classify_task(feature, task, worktree_manager, pr_adapter, branch)
         )
-        findings.append(_classify_task(feature, task, worktree_manager))
 
     # Orphan branches: local task/<feature>/* branches with no
     # corresponding in_progress Beads task.
@@ -212,6 +214,8 @@ def _classify_task(
     feature: str,
     task: BeadsTaskRef,
     worktree_manager: _WorktreeView,
+    pr_adapter: _PullRequestView,
+    branch: str,
 ) -> Finding:
     worktree = worktree_manager.worktree_path_for(feature, task.id)
     if not worktree.exists():
@@ -223,6 +227,9 @@ def _classify_task(
     if complete.exists():
         # completion wins over failure if both exist — mirrors
         # ClaudeCodeWorker's _detect_sentinel_result precedence.
+        pr_url = pr_adapter.find_open_pr_url_for_branch(branch)
+        if pr_url:
+            return CompletionPendingWithPr(task_id=task.id, pr_url=pr_url)
         return CompletionPending(task_id=task.id)
     if failed.exists():
         return FailurePending(
