@@ -6,6 +6,15 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+- Added `turma plan-to-beads --feature <name> [--force]` that translates an approved plan's `tasks.md` into a feature-tagged Beads task set with parser-to-bd type translation, priority mapping, dependency edges, and a `TRANSCRIBED.md` marker.
+- Added the `BeadsAdapter` subprocess wrapper, the `tasks.md` parser, and the transcription pipeline modules under `src/turma/transcription/` with 56 new tests (parser, adapter argv pinning, pipeline routing, CLI dispatch, error mapping).
+- Added `docs/smoke-plan-to-beads.md` documenting the end-to-end manual smoke procedure against a real `bd` database, including happy path, both `--force` teardown paths, malformed-marker rejection, and failure-signature cheat sheet.
+
+### Changed
+- Documented `bd` (Beads) and Dolt as external runtime prerequisites for `turma plan-to-beads` in `README.md`.
+- Extended `docs/architecture.md`'s Task Translation section to describe the section-level Beads model, parser-to-bd type mapping, and the label-based (not native-epic) feature association.
+
 ## [0.1.7] - 2026-04-08
 
 ### Added
