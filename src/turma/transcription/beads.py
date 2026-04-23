@@ -28,6 +28,24 @@ Beads semantics captured here:
 - Priority: bd's scale is 0-4 (0=highest). The adapter receives
   bd-native priority; any translation from a section-number scale is
   the pipeline's job.
+
+Swarm-orchestration semantics (added for `turma run`):
+
+- Ready detection: `bd ready` is a first-class subcommand that uses
+  Beads' GetReadyWork API (open + no active blockers + not
+  in_progress / blocked / deferred). `list_ready_tasks` filters
+  further client-side to exclude any task carrying the
+  `needs_human_review` label, so retry-exhausted tasks stop showing
+  up as ready.
+- Atomic claim: `bd update <id> --claim` sets assignee and
+  status=in_progress in one call, idempotent if already claimed by
+  the same actor.
+- Retry state: `turma-retries:<n>` label tracks attempt count,
+  `needs_human_review` marks exhausted tasks, `bd note` captures the
+  failure reason. `fail_task` uses a single `bd update` invocation
+  to append the note, swap labels, and release status back to open
+  — whatever atomicity `bd update` provides covers the whole
+  transition.
 """
 
 from __future__ import annotations
@@ -57,6 +75,25 @@ VALID_BD_TYPES = frozenset({
     "chore",
     "decision",
 })
+
+# Label conventions used by the swarm orchestrator. Kept at module
+# scope so tests can pin them.
+RETRIES_LABEL_PREFIX = "turma-retries:"
+NEEDS_HUMAN_REVIEW_LABEL = "needs_human_review"
+
+
+def _parse_retries_from_labels(labels) -> int:
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        if not label.startswith(RETRIES_LABEL_PREFIX):
+            continue
+        raw = label[len(RETRIES_LABEL_PREFIX):]
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return 0
 
 
 @dataclass(frozen=True)
@@ -163,6 +200,139 @@ class BeadsAdapter:
             for rec in records
             if isinstance(rec, dict) and "id" in rec
         )
+
+    def list_ready_tasks(
+        self, feature: str
+    ) -> tuple[BeadsTaskRef, ...]:
+        """List OPEN + feature-tagged + unblocked tasks that are claimable.
+
+        Uses `bd ready` (Beads' GetReadyWork API — open, not
+        in_progress / blocked / deferred, with all blockers satisfied)
+        and filters client-side to exclude tasks carrying the
+        `needs_human_review` label so retry-exhausted tasks stop
+        appearing as ready work.
+        """
+        argv = [
+            "bd", "ready",
+            "--label", f"feature:{feature}",
+            "--json",
+            "--limit", "0",
+        ]
+        result = self._run(argv, step="bd ready")
+        payload = result.stdout.strip()
+        if not payload:
+            return ()
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                f"bd ready returned non-JSON output: {exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(records, list):
+            raise PlanningError(
+                f"bd ready returned non-array JSON: "
+                f"{type(records).__name__}"
+            )
+        return tuple(
+            BeadsTaskRef(
+                id=str(rec["id"]),
+                title=str(rec.get("title", "")),
+                labels=tuple(str(label) for label in rec.get("labels", ())),
+            )
+            for rec in records
+            if isinstance(rec, dict)
+            and "id" in rec
+            and NEEDS_HUMAN_REVIEW_LABEL
+            not in [str(label) for label in rec.get("labels", ())]
+        )
+
+    def claim_task(self, task_id: str) -> None:
+        """Atomically transition an open task to in_progress.
+
+        Uses `bd update <id> --claim`, which bd documents as atomic
+        (assignee + status=in_progress in one call, idempotent if the
+        task is already claimed by the same actor). Non-zero exit —
+        typically a claim race with another actor — raises
+        `PlanningError` with `bd` stderr preserved.
+        """
+        self._run(
+            ["bd", "update", task_id, "--claim"],
+            step="bd update --claim",
+        )
+
+    def retries_so_far(self, task_id: str) -> int:
+        """Return the integer encoded in a `turma-retries:<n>` label.
+
+        Returns 0 if no such label is present on the task. Used by the
+        orchestrator to compute the retry budget before calling
+        `fail_task`.
+        """
+        result = self._run(
+            ["bd", "show", task_id, "--json"],
+            step="bd show",
+        )
+        payload = result.stdout.strip()
+        if not payload:
+            return 0
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                f"bd show returned non-JSON output: {exc}\n{payload!r}"
+            ) from exc
+        if isinstance(data, list):
+            if not data:
+                return 0
+            data = data[0]
+        if not isinstance(data, dict):
+            raise PlanningError(
+                "bd show returned unexpected JSON shape: "
+                f"{type(data).__name__}"
+            )
+        return _parse_retries_from_labels(data.get("labels") or [])
+
+    def fail_task(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        retries_so_far: int,
+        max_retries: int,
+    ) -> None:
+        """Record a worker failure against a task.
+
+        Appends the reason as a note, swaps the `turma-retries:<n>`
+        label to reflect the new attempt count (or adds
+        `needs_human_review` on exhaustion), and releases the claim
+        back to `open` — all in a single `bd update` invocation so
+        whatever atomicity bd provides covers the whole transition.
+
+        NOT idempotent across its internal steps in the sense that a
+        partial-failure inside bd itself would require operator
+        triage via `bd show <task_id>`. The adapter surfaces the
+        failed step's argv and stderr in the raised PlanningError so
+        triage is concrete.
+        """
+        argv = ["bd", "update", task_id, "--append-notes", reason]
+
+        if retries_so_far > 0:
+            argv += [
+                "--remove-label",
+                f"{RETRIES_LABEL_PREFIX}{retries_so_far}",
+            ]
+
+        new_retries = retries_so_far + 1
+        if new_retries > max_retries:
+            argv += ["--add-label", NEEDS_HUMAN_REVIEW_LABEL]
+        else:
+            argv += [
+                "--add-label",
+                f"{RETRIES_LABEL_PREFIX}{new_retries}",
+            ]
+
+        argv += ["--status", "open"]
+
+        self._run(argv, step="bd update (fail_task)")
 
     def _add_dependency(self, *, blocked_id: str, blocker_id: str) -> None:
         # `bd dep add <blocked> <blocker>` — blocked depends on blocker.
