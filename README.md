@@ -202,8 +202,8 @@ uv run pytest
 Once a feature has been transcribed to Beads, `turma run` drives a
 single-feature sequential execution loop that claims ready Beads
 tasks, runs a worker agent inside a per-task git worktree, opens one
-PR per completed task against a configured base branch, and stops.
-Review, merge, and release are human-driven.
+PR per completed task against the default base branch (`main`), and
+stops. Review, merge, and release are human-driven.
 
 ```bash
 uv run turma run --feature <name>
@@ -211,6 +211,13 @@ uv run turma run --feature <name> --max-tasks 1       # smoke one task end-to-en
 uv run turma run --feature <name> --backend claude-code
 uv run turma run --feature <name> --dry-run           # preflight + reconcile only
 ```
+
+v1 note on config: the `[swarm]` block in `turma.example.toml`
+documents the intended defaults (`worker_backend`, `worker_timeout`,
+`max_retries`, `worktree_root`, `base_branch`), but `turma run` does
+not yet read `turma.toml` for any of them. These are applied as
+code-level defaults inside `default_swarm_services`
+(`src/turma/swarm/_orchestrator.py`). Loader wiring is a follow-up.
 
 ### Prerequisites
 
