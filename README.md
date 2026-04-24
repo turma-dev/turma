@@ -9,9 +9,10 @@ Early implementation phase. This repo has the Python package layout, OpenSpec
 workflow scaffolding, a working `turma init` command, a working `turma plan`
 command running a full author/critic loop with an explicit human approval
 gate and resume CLI, a working `turma plan-to-beads` command that
-transcribes approved plans into a feature-tagged Beads task set, baseline
-CI, and public architecture documentation. The execution orchestrator
-described in the architecture docs is not implemented yet.
+transcribes approved plans into a feature-tagged Beads task set, a working
+`turma run` single-feature sequential swarm orchestrator (preflight →
+reconcile → repair → main loop, one PR per Beads task), baseline CI, and
+public architecture documentation.
 
 ## What It Is
 
@@ -65,7 +66,9 @@ Current command status:
 - `turma plan-to-beads` transcribes an approved plan into a
   feature-tagged Beads task set (requires `bd` and Dolt; see
   Plan-to-Beads below)
-- `turma run` and `turma status` are still scaffolds
+- `turma run` drives a single-feature sequential swarm against the
+  transcribed Beads DAG (see Swarm Execution below)
+- `turma status` is still a scaffold
 
 `turma init` expects `turma.example.toml` to exist in the target directory. It
 creates `turma.toml` from that template and updates `.gitignore` with
@@ -194,6 +197,132 @@ uv run python -m turma --help
 uv run pytest
 ```
 
+## Swarm Execution
+
+Once a feature has been transcribed to Beads, `turma run` drives a
+single-feature sequential execution loop that claims ready Beads
+tasks, runs a worker agent inside a per-task git worktree, opens one
+PR per completed task against a configured base branch, and stops.
+Review, merge, and release are human-driven.
+
+```bash
+uv run turma run --feature <name>
+uv run turma run --feature <name> --max-tasks 1       # smoke one task end-to-end
+uv run turma run --feature <name> --backend claude-code
+uv run turma run --feature <name> --dry-run           # preflight + reconcile only
+```
+
+### Prerequisites
+
+- `bd` (Beads) on PATH (`brew install beads`; see Plan-to-Beads above)
+- `git` on PATH
+- `gh` (GitHub CLI) on PATH with an authenticated session
+  (`gh auth login` once; verified at startup via `gh auth status`)
+- `claude` (Claude Code CLI) on PATH for the default
+  `claude-code` worker backend. `--dry-run` does not require
+  `claude` because the worker is never invoked.
+- A transcribed feature: `openspec/changes/<name>/APPROVED` and
+  `openspec/changes/<name>/TRANSCRIBED.md` must both exist. Missing
+  either halts with a pointer back to `turma plan` or
+  `turma plan-to-beads`.
+
+### The one-feature loop
+
+For each ready Beads task, the orchestrator runs:
+
+```
+claim → setup_worktree → run_worker → (sentinel) → commit → push → open_pr → close_task
+```
+
+Failed steps enter the retry path via `fail_task` on the Beads task.
+A worker that claims success but leaves the worktree clean
+(`.task_complete` present but `git status --porcelain` empty) is
+treated as a failure with a canned reason so a non-editing worker
+cannot land an empty commit.
+
+The worker signals completion via filesystem sentinels inside the
+worktree:
+
+- `.task_complete` — worker believes the task is done; orchestrator
+  commits, pushes, opens a PR, and closes the Beads task.
+- `.task_failed` — worker hit an unresolvable blocker; contents are
+  the failure reason. Orchestrator calls `fail_task` and leaves the
+  worktree on disk for triage.
+- No sentinel after worker exit → failure with reason
+  `"worker exited without writing a completion marker"`.
+
+### Retry budget and halt conditions
+
+Retry state lives on the Beads task:
+
+- `turma-retries:<n>` label — attempt counter, absent means zero.
+- `needs_human_review` label — added on budget exhaustion so
+  `list_ready_tasks` filters the task out of future listings.
+
+On failure, the orchestrator reads `retries_so_far` and calls
+`fail_task(reason, retries_so_far, max_retries)`. Budget remaining
+→ the task returns to `open` for a future re-attempt. Budget
+exhausted → the orchestrator halts the whole run so the operator
+can triage via `bd list --label needs_human_review`.
+
+`max_tasks` caps the outer loop at N successfully-claimed tasks
+(claim races do not consume budget). Default is unbounded.
+
+### Reconciliation on resume
+
+Reconciliation always runs at startup — including `--dry-run` —
+before the main loop. It walks the Beads `in_progress` set and
+classifies each task into one of six finding types based on the
+worktree filesystem and GitHub PR state:
+
+| Finding | Cause | Repair |
+| --- | --- | --- |
+| `missing-worktree` | Beads says in_progress, worktree absent | release the claim (counts against the retry budget) |
+| `completion-pending` | `.task_complete` present, no open PR | commit + push + open_pr + close_task |
+| `completion-pending-with-pr` | `.task_complete` present, PR already open | close_task + remove worktree (no new PR) |
+| `failure-pending` | `.task_failed` present | fail_task with the worker's reason (worktree left for triage) |
+| `stale-no-sentinels` | worktree + branch exist, no sentinel | halt before the main loop; operator decides |
+| `orphan-branch` | `task/<feature>/*` branch with no in_progress task | log only; operator triage |
+
+Reconciliation itself is read-only: every mutation (`fail_task`,
+`close_task`, `commit`, `push`, `gh pr create`) is performed by the
+repair phase in the main loop, and `--dry-run` skips the repair
+phase entirely.
+
+### Failure modes (CLI)
+
+| `error: <msg>` starts with | Cause |
+| --- | --- |
+| `feature 'X' is not APPROVED` | no `APPROVED` marker; run `turma plan` |
+| `feature 'X' has not been transcribed` | no `TRANSCRIBED.md`; run `turma plan-to-beads` |
+| `bd CLI not found` | `bd` missing from PATH |
+| `gh CLI not found` | `gh` missing from PATH |
+| `gh session not authenticated` | run `gh auth login` |
+| `stale worktree for <id> has no sentinels` | reconcile caught ambiguous state; operator decides |
+| `retry budget exhausted on <id>` | task hit `max_retries`; triage with `bd list --label needs_human_review` |
+
+### Worked example
+
+Against a feature already transcribed to Beads (see Plan-to-Beads
+above):
+
+```bash
+# Smoke one task end-to-end. On success a PR appears on origin;
+# on failure the worktree stays at .worktrees/<feature>/<bd-id>/.
+uv run turma run --feature oauth-auth --max-tasks 1
+
+# Resume after an interrupted run — reconciliation surfaces any
+# leftover in_progress tasks and the main loop finishes them.
+uv run turma run --feature oauth-auth
+
+# Operator triage after budget exhaustion.
+bd list --label needs_human_review
+bd show <id>
+```
+
+A detailed end-to-end smoke procedure against real `bd` + `gh` +
+`claude` lives in [`docs/smoke-turma-run.md`](docs/smoke-turma-run.md).
+
 ## Core Docs
 
 - [Architecture](docs/architecture.md)
@@ -201,9 +330,11 @@ uv run pytest
 
 ## Next Implementation Steps
 
-- wire `turma run` to Beads plus worktree orchestration
-- persist reconciliation metadata for resumable task recovery
-- replace placeholder status output with task, PR, and CI state
+- parallel task execution + per-task backend routing (`worker-backend:<id>` labels)
+- Codex / OpenCode / Gemini worker implementations
+- replace placeholder `turma status` output with task, PR, and CI state
+- a `turma run --clean <feature>` flag to bulk-remove failed worktrees
+  and branches
 
 ## License
 

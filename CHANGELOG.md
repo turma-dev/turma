@@ -6,6 +6,22 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+- Added `turma run --feature <name> [--max-tasks N] [--backend <id>] [--dry-run]` — a single-feature sequential swarm orchestrator that drives one Beads task at a time from `ready` to `closed` (or `failed` with a retry-budget decision). Each iteration runs `fetch_ready → claim → setup_worktree → run_worker → (sentinel dispatch) → commit → push → open_pr → close_task` against per-task git worktrees under `.worktrees/<feature>/<bd-id>/`, opens one PR per task against a configured base branch, and stops. Review, merge, and release remain human-driven.
+- Added the swarm adapter stack under `src/turma/swarm/`: `BeadsAdapter` extensions (`list_ready_tasks`, `list_in_progress_tasks`, `claim_task`, `retries_so_far`, `fail_task`, `get_task_body`), `WorktreeManager` for per-task worktree lifecycle, `WorkerBackend` protocol + `ClaudeCodeWorker` + a named backend registry, `GitAdapter` for the commit/push boundary, and `PullRequestAdapter` for `gh pr create` (including a read-only `find_open_pr_url_for_branch` for reconciliation).
+- Added read-only reconciliation (`src/turma/swarm/reconciliation.py`) that walks Beads in-progress tasks, worktree sentinels, and open-PR state to classify prior-run state into six typed findings — `MissingWorktree`, `CompletionPending`, `CompletionPendingWithPr`, `FailurePending`, `StaleNoSentinels`, `OrphanBranch` — consumed by the orchestrator's repair phase before the main loop.
+- Added a retry-budget mechanism using Beads labels (`turma-retries:<n>`, `needs_human_review`): `fail_task` records the reason via `bd note`, rotates the retry label, and either releases the claim back to `open` or adds `needs_human_review` on exhaustion. Exhausted-budget failures — whether surfaced by the main loop or by the repair phase — halt the run so the operator can triage via `bd list --label needs_human_review`.
+- Added `[swarm]` configuration keys in `turma.example.toml`: `worker_backend`, `worker_timeout`, `max_retries`, `worktree_root`, `base_branch` with v1 defaults.
+- Added `docs/smoke-turma-run.md` documenting the end-to-end manual smoke procedure against real `bd` + `gh` + `claude` installs (prerequisites, dry-run, happy path, `completion-pending` reconcile resume, failure → budget-exhaustion path, failure-signature cheat sheet).
+- Added 100+ tests under `tests/test_swarm_*.py` covering adapter argv shape, reconciliation finding emission and the read-only invariant, repair-phase dispatch per finding type, main-loop state transitions, budget enforcement, claim-race handling, and CLI wiring.
+
+### Changed
+- Replaced the placeholder `turma run` CLI with the real dispatch; `--feature` is required, `--max-tasks`, `--backend`, and `--dry-run` are optional. Missing external CLI dependencies (`bd`, `git`, `gh`, `claude`) surface as `PlanningError` at services construction and land in the `error: <msg>` → exit 1 path used by `turma plan` and `turma plan-to-beads`.
+- Rewrote `docs/architecture.md`'s Execution section around the committed v1 state machine, authority model (Beads → git → GitHub PR → sentinels), retry-budget label scheme, and the read-only reconciliation contract.
+- Documented the Swarm Execution workflow in `README.md` (prerequisites, the one-feature loop, retry-budget and halt conditions, reconciliation-on-resume behavior with the six-category finding table, failure modes, and a worked example).
+- No new runtime dependencies in `pyproject.toml`. `gh` (GitHub CLI) and `claude` (Claude Code CLI) are documented external prerequisites. `.worktrees/`, `.task_complete`, `.task_failed`, and `.task_progress` are gitignored.
+
+
 ## [0.2.0] - 2026-04-23
 
 ### Added

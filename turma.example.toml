@@ -1,7 +1,26 @@
 [swarm]
-max_parallel = 4
-agent_timeout = 1800
-worktree_base = "~/.worktrees"
+# Swarm orchestration keys consumed by `turma run`. See
+# `docs/architecture.md#execution` for the v1 contract and
+# `docs/smoke-turma-run.md` for the live-validation runbook.
+
+# Which worker backend drives claimed tasks. v1 registers only
+# "claude-code"; Codex / OpenCode / Gemini backends are v2 concerns.
+worker_backend = "claude-code"
+
+# Seconds before a worker is considered timed-out.
+worker_timeout = 1800
+
+# Per-task retries before the orchestrator halts the run. 0 disables
+# retry. On exhaustion, the task is labelled `needs_human_review` in
+# Beads and the outer loop halts so the operator can triage.
+max_retries = 1
+
+# Where per-task worktrees are created. Paths are relative to the
+# repo root unless absolute. The directory is gitignored.
+worktree_root = ".worktrees"
+
+# Base branch for PRs opened by the orchestrator.
+base_branch = "main"
 
 [models]
 impl_complex = "claude-opus-4-6"
