@@ -12,8 +12,19 @@ from turma.errors import PlanningError
 from turma.swarm.pull_request import (
     GH_AUTH_HINT,
     GH_INSTALL_HINT,
+    PrSummary,
     PullRequestAdapter,
 )
+
+
+class _StubWorktreeManager:
+    """Minimal stub carrying only the `branch_name_for` method
+    `list_prs_for_feature` needs to derive the `task/<feature>/`
+    prefix. Matches the real `WorktreeManager.branch_name_for`
+    contract (feature + task_id → `task/<feature>/<task_id>`)."""
+
+    def branch_name_for(self, feature: str, task_id: str) -> str:
+        return f"task/{feature}/{task_id}"
 
 
 def _completed(
@@ -333,3 +344,164 @@ def test_open_pr_falls_back_to_unknown_error_when_both_empty() -> None:
                 title="t",
                 body="b",
             )
+
+
+# ---------------------------------------------------------------------
+# list_prs_for_feature — batched PR listing for `turma status`
+# ---------------------------------------------------------------------
+
+
+def test_list_prs_for_feature_pins_argv() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_):
+        seen.append(argv)
+        return _completed(argv, stdout="[]\n")
+
+    with patch(
+        "turma.swarm.pull_request.subprocess.run", side_effect=fake_run
+    ):
+        result = adapter.list_prs_for_feature("oauth", wt)
+
+    assert result == ()
+    assert seen == [
+        [
+            "gh", "pr", "list",
+            "--search", "head:task/oauth/",
+            "--state", "all",
+            "--json", "number,url,state,title,headRefName",
+            "--limit", "100",
+        ]
+    ]
+
+
+def test_list_prs_for_feature_parses_mixed_state_payload() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    payload = (
+        '[{"number":4,"state":"OPEN",'
+        '"title":"[impl] Append a line",'
+        '"url":"https://github.com/o/r/pull/4",'
+        '"headRefName":"task/oauth/bd-1"},'
+        '{"number":3,"state":"MERGED",'
+        '"title":"[impl] Wire config",'
+        '"url":"https://github.com/o/r/pull/3",'
+        '"headRefName":"task/oauth/bd-2"},'
+        '{"number":2,"state":"CLOSED",'
+        '"title":"[impl] Reverted",'
+        '"url":"https://github.com/o/r/pull/2",'
+        '"headRefName":"task/oauth/bd-3"}]'
+    )
+
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.list_prs_for_feature("oauth", wt)
+
+    assert result == (
+        PrSummary(
+            number=4,
+            url="https://github.com/o/r/pull/4",
+            state="OPEN",
+            title="[impl] Append a line",
+            head_branch="task/oauth/bd-1",
+        ),
+        PrSummary(
+            number=3,
+            url="https://github.com/o/r/pull/3",
+            state="MERGED",
+            title="[impl] Wire config",
+            head_branch="task/oauth/bd-2",
+        ),
+        PrSummary(
+            number=2,
+            url="https://github.com/o/r/pull/2",
+            state="CLOSED",
+            title="[impl] Reverted",
+            head_branch="task/oauth/bd-3",
+        ),
+    )
+
+
+def test_list_prs_for_feature_returns_empty_on_empty_array() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout="[]\n"),
+    ):
+        assert adapter.list_prs_for_feature("oauth", wt) == ()
+
+
+def test_list_prs_for_feature_returns_empty_on_empty_stdout() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=""),
+    ):
+        assert adapter.list_prs_for_feature("oauth", wt) == ()
+
+
+def test_list_prs_for_feature_surfaces_stderr_on_non_zero_exit() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=1,
+            stdout="",
+            stderr="could not resolve to a Repository with the name",
+        ),
+    ):
+        with pytest.raises(
+            PlanningError, match="could not resolve to a Repository"
+        ):
+            adapter.list_prs_for_feature("oauth", wt)
+
+
+def test_list_prs_for_feature_rejects_non_json_output() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout="definitely not json"),
+    ):
+        with pytest.raises(PlanningError, match="non-JSON output"):
+            adapter.list_prs_for_feature("oauth", wt)
+
+
+def test_list_prs_for_feature_rejects_non_array_json() -> None:
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout='{"not":"array"}'),
+    ):
+        with pytest.raises(PlanningError, match="non-array JSON"):
+            adapter.list_prs_for_feature("oauth", wt)
+
+
+def test_list_prs_for_feature_skips_non_dict_records() -> None:
+    """Defensive: if gh ever returns an element that isn't a dict
+    (shouldn't happen, but matches existing adapter tolerance),
+    skip rather than KeyError."""
+    adapter = _make_adapter()
+    wt = _StubWorktreeManager()
+    payload = (
+        '[{"number":1,"state":"OPEN","title":"ok",'
+        '"url":"https://github.com/o/r/pull/1",'
+        '"headRefName":"task/oauth/bd-1"},'
+        '"bare string that is not a PR record"]'
+    )
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.list_prs_for_feature("oauth", wt)
+    assert len(result) == 1
+    assert result[0].number == 1
