@@ -167,17 +167,30 @@ def _apply_repairs(
 ) -> None:
     """Apply the repair documented for each finding, in order.
 
-    Halts the run on `stale-no-sentinels` before reaching the main
-    loop — v1 never guesses on ambiguous state.
+    Halts before the main loop when:
+
+    - any `stale-no-sentinels` finding is present (v1 never guesses
+      on ambiguous state), or
+    - any finding that calls `fail_task` exhausts the retry budget
+      — repair-phase exhaustions must halt just like main-loop
+      exhaustions (tasks.md Task 7 budget rule).
+
+    Exhausted ids are collected across the whole repair phase so the
+    operator sees every repair the orchestrator attempted before the
+    halt fires, rather than halting on the first one and hiding the
+    rest.
     """
+    exhausted_ids: list[str] = []
+
     for finding in report.findings:
         match finding:
             case MissingWorktree(task_id=task_id):
-                _handle_failure(
+                if _handle_failure(
                     services,
                     task_id,
                     "reconcile: worktree missing; releasing claim",
-                )
+                ):
+                    exhausted_ids.append(task_id)
                 print(f"repair: {task_id} → release claim (missing-worktree)")
 
             case CompletionPending(task_id=task_id):
@@ -197,7 +210,10 @@ def _apply_repairs(
                 )
 
             case FailurePending(task_id=task_id, reason=reason):
-                _handle_failure(services, task_id, f"reconcile: {reason}")
+                if _handle_failure(
+                    services, task_id, f"reconcile: {reason}"
+                ):
+                    exhausted_ids.append(task_id)
                 print(f"repair: {task_id} → fail_task recorded ({reason})")
 
             case StaleNoSentinels(task_id=task_id):
@@ -211,6 +227,14 @@ def _apply_repairs(
 
             case OrphanBranch(branch=branch):
                 print(f"repair: orphan branch (operator triage): {branch}")
+
+    if exhausted_ids:
+        joined = ", ".join(exhausted_ids)
+        raise PlanningError(
+            f"retry budget exhausted on {joined} during repair phase; "
+            "halting run. Triage with `bd list --label "
+            "needs_human_review`."
+        )
 
 
 # ---------------------------------------------------------------------
