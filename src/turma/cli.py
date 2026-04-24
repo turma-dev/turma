@@ -10,7 +10,13 @@ from turma import __version__
 from turma.errors import PlanningError
 from turma.planning import default_planning_services, run_planning
 from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
-from turma.swarm import run_swarm, status_summary
+from turma.swarm import (
+    DEFAULT_WORKER_BACKEND,
+    default_swarm_services,
+    run_swarm,
+    status_summary,
+)
+from turma.swarm.worker import registered_worker_backends
 from turma.transcription import TranscriptionResult, transcribe_to_beads
 from turma.transcription.beads import BeadsAdapter
 
@@ -85,8 +91,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    run_parser = subparsers.add_parser("run", help="Run the implementation swarm scaffold.")
-    run_parser.add_argument("--feature", help="Feature name to run.")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run the swarm orchestrator for a feature.",
+    )
+    run_parser.add_argument(
+        "--feature", required=True, help="Feature name to run."
+    )
+    run_parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Cap outer-loop iterations. Default: unbounded.",
+    )
+    run_parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "Worker backend name. Registered: "
+            f"{', '.join(registered_worker_backends())}. "
+            f"Default: {DEFAULT_WORKER_BACKEND}."
+        ),
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run preflight + reconciliation only; no claims, no "
+            "commits, no PRs."
+        ),
+    )
 
     subparsers.add_parser("status", help="Show current swarm status scaffold.")
 
@@ -271,13 +305,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}")
             return 1
     if args.command == "run":
-        # `run_swarm` requires a `SwarmServices` instance; default
-        # construction is wired in Task 8 of
-        # `openspec/changes/swarm-orchestration/tasks.md`. Until then,
-        # invoking `turma run` surfaces the expected `PlanningError`
-        # cleanly rather than crashing with an unhandled exception.
+        backend = args.backend or DEFAULT_WORKER_BACKEND
         try:
-            run_swarm(args.feature)
+            services = default_swarm_services(
+                repo_root=Path.cwd(), backend=backend
+            )
+            run_swarm(
+                args.feature,
+                services=services,
+                max_tasks=args.max_tasks,
+                backend=backend,
+                dry_run=args.dry_run,
+            )
         except PlanningError as exc:
             print(f"error: {exc}")
             return 1

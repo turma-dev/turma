@@ -22,6 +22,8 @@ from typing import Callable
 from turma.errors import PlanningError
 from turma.swarm.git import COMMIT_MESSAGE_TEMPLATE, GitAdapter
 from turma.swarm.pull_request import PullRequestAdapter
+from turma.swarm.worker import get_worker_backend
+from turma.swarm.worktree import WorktreeManager, WorktreeRef
 from turma.swarm.reconciliation import (
     CompletionPending,
     CompletionPendingWithPr,
@@ -33,7 +35,6 @@ from turma.swarm.reconciliation import (
     reconcile_feature,
 )
 from turma.swarm.worker import WorkerBackend, WorkerInvocation
-from turma.swarm.worktree import WorktreeManager, WorktreeRef
 from turma.transcription.beads import BeadsAdapter, BeadsTaskRef
 
 
@@ -45,6 +46,9 @@ _DEFAULT_TURMA_TYPE = "impl"
 # ---------------------------------------------------------------------
 # SwarmServices — DI container
 # ---------------------------------------------------------------------
+
+
+DEFAULT_WORKER_BACKEND = "claude-code"
 
 
 @dataclass
@@ -64,6 +68,42 @@ class SwarmServices:
     base_branch: str = "main"
     max_retries: int = 1
     worker_timeout: int = 1800
+
+
+def default_swarm_services(
+    repo_root: Path,
+    *,
+    backend: str = DEFAULT_WORKER_BACKEND,
+    base_branch: str = "main",
+    max_retries: int = 1,
+    worker_timeout: int = 1800,
+) -> SwarmServices:
+    """Construct production `SwarmServices` rooted at `repo_root`.
+
+    Each adapter preflights its CLI dependency at construction — `bd`
+    for Beads, `git` for worktree + git operations, `gh` (plus an
+    authenticated session via `gh auth status`) for the PR adapter.
+    A missing or misconfigured dependency surfaces as a
+    `PlanningError` here so the CLI can exit 1 before any Beads
+    state is touched.
+
+    The worker backend is resolved lazily via
+    `get_worker_backend(backend)`: the `claude` CLI check only runs
+    when the orchestrator actually claims a task and instantiates a
+    worker, so `--dry-run` does not require Claude Code to be
+    installed.
+    """
+    return SwarmServices(
+        beads=BeadsAdapter(),
+        worktree=WorktreeManager(repo_root=repo_root),
+        git=GitAdapter(),
+        pr=PullRequestAdapter(),
+        worker_factory=lambda: get_worker_backend(backend),
+        repo_root=repo_root,
+        base_branch=base_branch,
+        max_retries=max_retries,
+        worker_timeout=worker_timeout,
+    )
 
 
 # ---------------------------------------------------------------------
