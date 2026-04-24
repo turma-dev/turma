@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from turma import __version__
-from turma.config import ConfigError, load_config
+from turma.config import ConfigError, load_swarm_config
 from turma.errors import PlanningError
 from turma.planning import default_planning_services, run_planning
 from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
@@ -307,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args.command == "run":
         try:
-            config = load_config()
+            config = load_swarm_config()
         except ConfigError as exc:
             print(f"error: {exc}")
             return 1
