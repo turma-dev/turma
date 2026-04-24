@@ -105,6 +105,30 @@ class BeadsTaskRef:
     labels: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class BeadsTaskSnapshot:
+    """Beads task ref plus its current status.
+
+    Returned by `list_feature_tasks_all_statuses`, which lists rows
+    across every status. Other listers (`list_feature_tasks`,
+    `list_in_progress_tasks`, `list_ready_tasks`) return
+    `BeadsTaskRef` because their query already constrains the
+    status — callers know `ready_tasks` are ready, so repeating
+    the status on each ref there would be redundant.
+
+    `status` is one of bd's standard values
+    (`open | in_progress | blocked | deferred | closed`), or an
+    empty string if the payload omitted the field entirely (which
+    bd 1.0.2 does not do in practice but is tolerated here for
+    robustness).
+    """
+
+    id: str
+    title: str
+    labels: tuple[str, ...]
+    status: str
+
+
 class BeadsAdapter:
     """Subprocess wrapper for the `bd` CLI."""
 
@@ -203,15 +227,23 @@ class BeadsAdapter:
 
     def list_feature_tasks_all_statuses(
         self, feature: str
-    ) -> tuple[BeadsTaskRef, ...]:
+    ) -> tuple[BeadsTaskSnapshot, ...]:
         """List every feature-tagged task regardless of status.
 
         Unlike `list_feature_tasks` (which defaults to `open` per
         bd's `list` semantics), this method returns closed and
         any-other-status rows too so `turma status` can populate a
-        complete counter block and surface cleanup residues — e.g.
-        a branch left on disk for a task whose `close_task` landed
-        but whose `WorktreeManager.cleanup` did not complete.
+        complete counter block (ready / in_progress /
+        blocked-or-deferred / closed / needs_human_review) and
+        surface cleanup residues — e.g. a branch left on disk for
+        a task whose `close_task` landed but whose
+        `WorktreeManager.cleanup` did not complete.
+
+        Returns `BeadsTaskSnapshot` rather than `BeadsTaskRef`
+        because the mixed-status payload requires status
+        disambiguation on each row; `turma status`'s counter block
+        buckets tasks by `snapshot.status`, which the narrower
+        `BeadsTaskRef` does not carry.
 
         argv pinned: `bd list --all --label feature:<name> --json
         --limit 0`. Verified against bd 1.0.2 in the
@@ -247,10 +279,11 @@ class BeadsAdapter:
                 f"{type(records).__name__}"
             )
         return tuple(
-            BeadsTaskRef(
+            BeadsTaskSnapshot(
                 id=str(rec["id"]),
                 title=str(rec.get("title", "")),
                 labels=tuple(str(label) for label in rec.get("labels", ())),
+                status=str(rec.get("status", "")),
             )
             for rec in records
             if isinstance(rec, dict) and "id" in rec
