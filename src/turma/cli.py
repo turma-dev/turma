@@ -15,7 +15,7 @@ from turma.swarm import (
     DEFAULT_WORKER_BACKEND,
     default_swarm_services,
     run_swarm,
-    status_summary,
+    status_readout,
 )
 from turma.swarm.worker import registered_worker_backends
 from turma.transcription import TranscriptionResult, transcribe_to_beads
@@ -123,7 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    subparsers.add_parser("status", help="Show current swarm status scaffold.")
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show a read-only status readout for a feature.",
+    )
+    status_parser.add_argument(
+        "--feature", required=True, help="Feature name to inspect."
+    )
 
     return parser
 
@@ -337,7 +343,29 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.command == "status":
-        print(status_summary())
+        try:
+            config = load_swarm_config()
+        except ConfigError as exc:
+            print(f"error: {exc}")
+            return 1
+        try:
+            services = default_swarm_services(
+                repo_root=Path.cwd(),
+                backend=config.swarm.worker_backend,
+                base_branch=config.swarm.base_branch,
+                max_retries=config.swarm.max_retries,
+                worker_timeout=config.swarm.worker_timeout,
+                worktree_root=config.swarm.worktree_root,
+            )
+            readout = status_readout(
+                args.feature,
+                services=services,
+                repo_root=Path.cwd(),
+            )
+        except PlanningError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(readout)
         return 0
 
     parser.error("unknown command")
