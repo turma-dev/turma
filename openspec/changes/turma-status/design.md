@@ -89,7 +89,7 @@ pull requests:
   (none)
 
 orphan branches:
-  task/<name>/<id>  (no active task)
+  task/<name>/<id>  (no in_progress task)
   (none)
 ```
 
@@ -128,10 +128,33 @@ give the operator the actionable detail.
   returns it so operator triage is concrete.
 - **orphan branches**: from
   `worktree_manager.list_task_branches(feature)` minus the branch
-  names corresponding to any task returned by the all-statuses
-  bd list. "No active task" here is the broadest definition —
-  including closed tasks — so a genuinely abandoned branch
-  surfaces even if the task eventually closed out elsewhere.
+  names corresponding to any task in the `in_progress` list.
+  **This matches `reconcile_feature`'s orphan-branch definition
+  exactly — the status readout does not redefine the v1
+  reconciliation finding contract.** Consequences operators
+  should expect:
+
+  - A branch belonging to a `ready` task will appear here until
+    the main loop re-claims it in the next `turma run`. This
+    mirrors what reconciliation itself surfaces at run-start;
+    `turma run` handles that case via the repair-phase log
+    suppression shipped with the Option B fix for the retry
+    scenario, but `turma status` does not apply that
+    suppression because its job is to show current state, not
+    to anticipate what the next main-loop iteration will do.
+  - A branch belonging to a `closed` task will appear here
+    until the operator cleans it up manually (`git branch -D
+    task/<feature>/<id>` plus any corresponding `git worktree
+    remove`). Expected to be rare — the main loop cleans its
+    own branches on success — but surfaces as an operator
+    signal when automatic cleanup did not complete (e.g.
+    orchestrator crashed between `close_task` and
+    `WorktreeManager.cleanup`).
+
+  If we later decide the contract should broaden to "no
+  corresponding active (in_progress or ready) task" (the
+  previously-deferred Option A decision), reconciliation.py and
+  this section change together — not one ahead of the other.
 
 ## Adapter surface additions
 
@@ -232,11 +255,19 @@ unit tests. Per-section tests assert:
    none).
 5. **Pull requests section** — open / closed / merged states all
    rendered; empty case shows `(none)`.
-6. **Orphan branches** — present / absent cases; branch name
-   matches a closed task in the all-statuses list → rendered as
-   orphan (matches the broad definition above); branch matches
-   an in-progress task → NOT rendered (operator already has the
-   in-progress section for that).
+6. **Orphan branches** — strict `in_progress`-only filter
+   (matches `reconcile_feature`'s classification):
+   - branch matches an in-progress task → NOT rendered (the
+     in-progress section above already surfaces it).
+   - branch matches a ready task (retry case) → rendered as
+     orphan. The status readout makes this visible rather than
+     suppressing it, because its job is to reflect current state
+     exactly as reconciliation would classify it at run-start.
+   - branch matches a closed task → rendered as orphan (cleanup
+     residue signal).
+   - branch with no corresponding task for the feature →
+     rendered as orphan.
+   - empty branch list → `(none)`.
 7. **Missing spec dir** — approved/transcribed render as `no`
    with the hint line.
 8. **CLI** — `turma status` subparser registered, `--feature`
