@@ -81,9 +81,11 @@
       with the tool's stderr. Partial readouts are forbidden.
 - [ ] Expose `status_readout` via `src/turma/swarm/__init__.py`
       re-export so the CLI can `from turma.swarm import
-      status_readout`. Drop the placeholder `status_summary`
-      from the public re-exports (the CLI's `turma status`
-      dispatch is the only caller).
+      status_readout`. Leave `status_summary` in place for now —
+      the placeholder is still imported by `src/turma/cli.py`
+      until Task 5 rewires the dispatch; dropping it earlier
+      would break the CLI's import line. Task 5 owns the
+      `status_summary` removal once the CLI stops referencing it.
 
 ### 4. Tests for status_readout
 

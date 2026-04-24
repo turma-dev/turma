@@ -13,12 +13,15 @@ from turma.swarm._orchestrator import (
     default_swarm_services,
     run_swarm,
 )
+from turma.swarm.status import status_readout
 
 
 def status_summary() -> str:
     """Return a placeholder status message.
 
-    Replaced by the real status summary in a later change set.
+    Preserved alongside `status_readout` until Task 5 rewires
+    `turma status` in the CLI and drops this placeholder from the
+    public re-exports. Do not add new callers.
     """
     return (
         "Status scaffold. Integrate Beads, PR state, and reconciliation "
@@ -31,5 +34,6 @@ __all__ = [
     "SwarmServices",
     "default_swarm_services",
     "run_swarm",
+    "status_readout",
     "status_summary",
 ]
