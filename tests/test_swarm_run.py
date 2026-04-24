@@ -889,3 +889,103 @@ def test_clear_sentinels_is_noop_on_fresh_worktree(
     assert beads.failed == []
     # Worker invoked exactly once; no error path entered.
     assert len(worker.invocations) == 1
+
+
+# ---------------------------------------------------------------------
+# Retry-path orphan-branch log suppression
+# ---------------------------------------------------------------------
+
+
+def test_repair_orphan_branch_log_suppressed_for_ready_task_retry(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Retry scenario: a failed-not-exhausted task is back in `ready`
+    state and its persisted worktree branch still exists.
+
+    Reconciliation correctly classifies it as `orphan-branch` per the
+    v1 contract ("no in_progress task for this branch") — that
+    classification is unchanged by this branch. But the orchestrator's
+    repair-phase log line "repair: orphan branch (operator triage):
+    ..." reads as misleading: the branch is about to be re-claimed by
+    the main loop in this same run. The repair phase must suppress
+    that specific log line when the branch matches a ready task id
+    for the feature.
+    """
+    _scratch_feature(tmp_path)
+    retry_task = _ref("bd-retry")
+    beads = StubBeads(ready_queue=[(retry_task,)])
+    services, wt, git, pr, worker = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+    # The branch for the ready-but-about-to-be-claimed task is still
+    # on disk from the prior failed attempt.
+    wt.list_task_branches = lambda feature: (  # type: ignore[assignment]
+        "task/oauth/bd-retry",
+    )
+
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    # Reconciliation itself still prints the classification line —
+    # reconciliation.py is untouched in this branch.
+    assert "task/oauth/bd-retry → orphan-branch" in captured.out
+    # But the misleading operator-facing repair log line is suppressed.
+    assert "orphan branch (operator triage)" not in captured.out
+    # Main loop proceeded to claim + close the task.
+    assert beads.closed == ["bd-retry"]
+
+
+def test_repair_orphan_branch_still_logs_for_genuinely_orphaned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A branch with no corresponding ready or in_progress task is
+    genuinely orphaned. The log must still fire so the operator sees
+    it — suppression only applies to retry-ready matches."""
+    _scratch_feature(tmp_path)
+    # No tasks ready for this feature; the branch below is a real
+    # orphan (leftover from a task that's closed or never existed).
+    beads = StubBeads(ready_queue=[()])
+    services, wt, git, pr, worker = _make_services(tmp_path, beads=beads)
+    wt.list_task_branches = lambda feature: (  # type: ignore[assignment]
+        "task/oauth/bd-genuinely-orphan",
+    )
+
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    assert (
+        "repair: orphan branch (operator triage): "
+        "task/oauth/bd-genuinely-orphan"
+    ) in captured.out
+
+
+def test_repair_orphan_branch_mixed_suppresses_only_retry_match(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two orphan-branch findings in one pass: one matches a ready
+    task (suppressed), one is genuinely orphaned (logged). Verifies
+    the suppression is applied per-finding, not all-or-nothing."""
+    _scratch_feature(tmp_path)
+    retry_task = _ref("bd-retry")
+    beads = StubBeads(ready_queue=[(retry_task,)])
+    services, wt, git, pr, worker = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+    wt.list_task_branches = lambda feature: (  # type: ignore[assignment]
+        "task/oauth/bd-retry",
+        "task/oauth/bd-genuinely-orphan",
+    )
+
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    # Genuine orphan still logs.
+    assert (
+        "repair: orphan branch (operator triage): "
+        "task/oauth/bd-genuinely-orphan"
+    ) in captured.out
+    # Retry-ready match is suppressed.
+    assert (
+        "repair: orphan branch (operator triage): "
+        "task/oauth/bd-retry"
+    ) not in captured.out

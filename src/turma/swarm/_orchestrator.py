@@ -229,6 +229,10 @@ def _apply_repairs(
     rest.
     """
     exhausted_ids: list[str] = []
+    # Lazy-loaded set of branch names for tasks currently in `ready`
+    # state. Populated on first `OrphanBranch` finding to avoid an
+    # extra `bd` call when reconciliation surfaces no orphan branches.
+    ready_branches: frozenset[str] | None = None
 
     for finding in report.findings:
         match finding:
@@ -274,6 +278,25 @@ def _apply_repairs(
                 )
 
             case OrphanBranch(branch=branch):
+                # Reconciliation's v1 contract defines orphan-branch
+                # as "no corresponding in_progress task"; a branch
+                # belonging to a `ready` task (i.e. a failed-not-
+                # exhausted retry about to be re-claimed by the main
+                # loop in this same run) still matches that
+                # definition, but the operator-facing "orphan branch
+                # (operator triage)" log line reads as misleading
+                # because the branch is not actually abandoned.
+                # Suppress the log for that retry case; the
+                # reconciliation summary's `→ orphan-branch` line
+                # printed upstream still appears, so telemetry /
+                # reports see the classification.
+                if ready_branches is None:
+                    ready_branches = frozenset(
+                        services.worktree.branch_name_for(feature, t.id)
+                        for t in services.beads.list_ready_tasks(feature)
+                    )
+                if branch in ready_branches:
+                    continue
                 print(f"repair: orphan branch (operator triage): {branch}")
 
     if exhausted_ids:
