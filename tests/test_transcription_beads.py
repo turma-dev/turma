@@ -14,6 +14,7 @@ from turma.transcription.beads import (
     BEADS_INSTALL_HINT,
     BeadsAdapter,
     BeadsTaskRef,
+    BeadsTaskSnapshot,
     VALID_BD_TYPES,
 )
 
@@ -484,7 +485,8 @@ def test_list_feature_tasks_all_statuses_pins_argv_and_parses_mixed_payload() ->
     """`bd list --all` returns every feature-tagged task regardless of
     status. Used by `turma status` to build the counter block +
     catch closed-task cleanup residues the single-status listers
-    miss."""
+    miss. Each row carries its `status` so downstream bucketing can
+    distinguish closed from in_progress from open etc."""
     seen: list[list[str]] = []
     payload = json.dumps(
         [
@@ -514,7 +516,7 @@ def test_list_feature_tasks_all_statuses_pins_argv_and_parses_mixed_payload() ->
         return _completed(argv, stdout=payload)
 
     adapter = _make_adapter_with_run(run)
-    refs = adapter.list_feature_tasks_all_statuses("oauth")
+    snapshots = adapter.list_feature_tasks_all_statuses("oauth")
 
     assert seen == [
         [
@@ -525,21 +527,65 @@ def test_list_feature_tasks_all_statuses_pins_argv_and_parses_mixed_payload() ->
             "--limit", "0",
         ]
     ]
-    assert refs == (
-        BeadsTaskRef(
+    assert snapshots == (
+        BeadsTaskSnapshot(
             id="bd-1",
             title="In flight",
             labels=("feature:oauth", "turma-retries:1"),
+            status="in_progress",
         ),
-        BeadsTaskRef(
+        BeadsTaskSnapshot(
             id="bd-2",
             title="Awaiting review",
             labels=("feature:oauth", "needs_human_review"),
+            status="open",
         ),
-        BeadsTaskRef(
+        BeadsTaskSnapshot(
             id="bd-3",
             title="Done",
             labels=("feature:oauth", "turma-type:impl"),
+            status="closed",
+        ),
+    )
+
+
+def test_list_feature_tasks_all_statuses_status_populated_across_bd_vocabulary() -> None:
+    """Explicit pin that every value in bd 1.0.2's documented status
+    vocabulary (`open | in_progress | blocked | deferred | closed`)
+    flows through unchanged onto `BeadsTaskSnapshot.status`. Future
+    bd drift adding a new status would pass through here too; the
+    test would still pass but the downstream counter block's
+    bucketing (Task 3) is what would need updating."""
+    payload = json.dumps(
+        [
+            {"id": "a", "title": "a", "labels": [], "status": "open"},
+            {"id": "b", "title": "b", "labels": [], "status": "in_progress"},
+            {"id": "c", "title": "c", "labels": [], "status": "blocked"},
+            {"id": "d", "title": "d", "labels": [], "status": "deferred"},
+            {"id": "e", "title": "e", "labels": [], "status": "closed"},
+        ]
+    )
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout=payload)
+    )
+    snapshots = adapter.list_feature_tasks_all_statuses("oauth")
+    assert [s.status for s in snapshots] == [
+        "open", "in_progress", "blocked", "deferred", "closed",
+    ]
+
+
+def test_list_feature_tasks_all_statuses_tolerates_missing_status_field() -> None:
+    """bd 1.0.2 always emits `status`, but if a payload ever omits
+    the field the adapter should default to `""` rather than
+    KeyError. Protects against bd schema drift in either direction."""
+    payload = json.dumps([{"id": "bd-1", "title": "no status", "labels": []}])
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout=payload)
+    )
+    snapshots = adapter.list_feature_tasks_all_statuses("oauth")
+    assert snapshots == (
+        BeadsTaskSnapshot(
+            id="bd-1", title="no status", labels=(), status=""
         ),
     )
 
