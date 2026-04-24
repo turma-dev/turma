@@ -68,7 +68,9 @@ Current command status:
   Plan-to-Beads below)
 - `turma run` drives a single-feature sequential swarm against the
   transcribed Beads DAG (see Swarm Execution below)
-- `turma status` is still a scaffold
+- `turma status --feature <name>` prints a read-only readout of a
+  feature's current Beads + PR + worktree state (see Feature
+  Status below)
 
 `turma init` expects `turma.example.toml` to exist in the target directory. It
 creates `turma.toml` from that template and updates `.gitignore` with
@@ -331,6 +333,50 @@ bd show <id>
 A detailed end-to-end smoke procedure against real `bd` + `gh` +
 `claude` lives in [`docs/smoke-turma-run.md`](docs/smoke-turma-run.md).
 
+### Feature status
+
+`turma status --feature <name>` prints a read-only readout of the
+feature's current Beads + GitHub PR + worktree state. The
+command never mutates anything — no `claim_task`, no
+`close_task`, no `fail_task`, no commits, no pushes, no
+`gh pr create`. Useful between `turma run` invocations to
+answer "where is this feature right now?"
+
+```bash
+uv run turma status --feature oauth-auth
+```
+
+The readout has six sections, in fixed order, each with a
+`(none)` placeholder when empty:
+
+- **feature header** — spec dir presence, `APPROVED` /
+  `TRANSCRIBED.md` flags, with next-step hints (e.g.
+  "run `turma plan --feature ...` first") inline when missing.
+  A missing spec dir does not raise; the readout still prints.
+- **task counters** — `ready` / `in_progress` /
+  `blocked / deferred` / `closed` / `needs_human_review`.
+  Buckets are mutually exclusive: a task with the
+  `needs_human_review` label is counted there regardless of
+  its bd status; `open` tasks not in `bd ready`'s view are
+  counted as dependency-blocked.
+- **ready tasks** — claimable right now.
+- **in-progress tasks** — per-task: `retries: <n> / <max>`,
+  worktree presence, sentinel state
+  (`complete | failed: "<reason>" | none`). The
+  `.task_failed` body is truncated to the first line in the
+  readout; the full file stays on disk for triage.
+- **pull requests** — every PR for `task/<feature>/*` head
+  branches across all states (`OPEN` / `MERGED` / `CLOSED` /
+  `DRAFT`).
+- **orphan branches** — local task branches whose Beads task
+  isn't `in_progress`. Matches `reconcile_feature`'s
+  classification exactly; ready-task retry branches will
+  appear here until the next `turma run` re-claims them.
+
+Adapter failures (`bd list` non-zero exit, `gh pr list`
+non-zero exit, etc.) raise `PlanningError` and exit 1 with
+`error: <msg>` on stdout — no partial readout printed.
+
 ## Core Docs
 
 - [Architecture](docs/architecture.md)
@@ -338,9 +384,10 @@ A detailed end-to-end smoke procedure against real `bd` + `gh` +
 
 ## Next Implementation Steps
 
+- post-merge advancement: detect when a `turma run`-opened PR has
+  been merged and unblock dependent Beads tasks automatically
 - parallel task execution + per-task backend routing (`worker-backend:<id>` labels)
 - Codex / OpenCode / Gemini worker implementations
-- replace placeholder `turma status` output with task, PR, and CI state
 - a `turma run --clean <feature>` flag to bulk-remove failed worktrees
   and branches
 
