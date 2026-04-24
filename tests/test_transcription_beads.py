@@ -475,6 +475,119 @@ def test_list_in_progress_tasks_rejects_non_array_json() -> None:
         adapter.list_in_progress_tasks("oauth")
 
 
+# -----------------------------------------------------------------------
+# list_feature_tasks_all_statuses
+# -----------------------------------------------------------------------
+
+
+def test_list_feature_tasks_all_statuses_pins_argv_and_parses_mixed_payload() -> None:
+    """`bd list --all` returns every feature-tagged task regardless of
+    status. Used by `turma status` to build the counter block +
+    catch closed-task cleanup residues the single-status listers
+    miss."""
+    seen: list[list[str]] = []
+    payload = json.dumps(
+        [
+            {
+                "id": "bd-1",
+                "title": "In flight",
+                "labels": ["feature:oauth", "turma-retries:1"],
+                "status": "in_progress",
+            },
+            {
+                "id": "bd-2",
+                "title": "Awaiting review",
+                "labels": ["feature:oauth", "needs_human_review"],
+                "status": "open",
+            },
+            {
+                "id": "bd-3",
+                "title": "Done",
+                "labels": ["feature:oauth", "turma-type:impl"],
+                "status": "closed",
+            },
+        ]
+    )
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(argv, stdout=payload)
+
+    adapter = _make_adapter_with_run(run)
+    refs = adapter.list_feature_tasks_all_statuses("oauth")
+
+    assert seen == [
+        [
+            "bd", "list",
+            "--all",
+            "--label", "feature:oauth",
+            "--json",
+            "--limit", "0",
+        ]
+    ]
+    assert refs == (
+        BeadsTaskRef(
+            id="bd-1",
+            title="In flight",
+            labels=("feature:oauth", "turma-retries:1"),
+        ),
+        BeadsTaskRef(
+            id="bd-2",
+            title="Awaiting review",
+            labels=("feature:oauth", "needs_human_review"),
+        ),
+        BeadsTaskRef(
+            id="bd-3",
+            title="Done",
+            labels=("feature:oauth", "turma-type:impl"),
+        ),
+    )
+
+
+def test_list_feature_tasks_all_statuses_returns_empty_on_empty_stdout() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout="")
+    )
+    assert adapter.list_feature_tasks_all_statuses("oauth") == ()
+
+
+def test_list_feature_tasks_all_statuses_returns_empty_on_empty_array() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout="[]")
+    )
+    assert adapter.list_feature_tasks_all_statuses("oauth") == ()
+
+
+def test_list_feature_tasks_all_statuses_rejects_non_json_output() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout="not json")
+    )
+    with pytest.raises(PlanningError, match="non-JSON output"):
+        adapter.list_feature_tasks_all_statuses("oauth")
+
+
+def test_list_feature_tasks_all_statuses_rejects_non_array_json() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout='{"not": "an array"}')
+    )
+    with pytest.raises(PlanningError, match="non-array JSON"):
+        adapter.list_feature_tasks_all_statuses("oauth")
+
+
+def test_list_feature_tasks_all_statuses_skips_records_missing_id() -> None:
+    payload = json.dumps(
+        [
+            {"id": "bd-1", "title": "kept", "labels": []},
+            {"title": "no id present", "status": "closed"},
+        ]
+    )
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout=payload)
+    )
+    refs = adapter.list_feature_tasks_all_statuses("oauth")
+    assert [r.id for r in refs] == ["bd-1"]
+
+
 def test_list_feature_tasks_skips_records_missing_id() -> None:
     payload = json.dumps(
         [

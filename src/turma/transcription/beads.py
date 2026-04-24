@@ -201,6 +201,61 @@ class BeadsAdapter:
             if isinstance(rec, dict) and "id" in rec
         )
 
+    def list_feature_tasks_all_statuses(
+        self, feature: str
+    ) -> tuple[BeadsTaskRef, ...]:
+        """List every feature-tagged task regardless of status.
+
+        Unlike `list_feature_tasks` (which defaults to `open` per
+        bd's `list` semantics), this method returns closed and
+        any-other-status rows too so `turma status` can populate a
+        complete counter block and surface cleanup residues — e.g.
+        a branch left on disk for a task whose `close_task` landed
+        but whose `WorktreeManager.cleanup` did not complete.
+
+        argv pinned: `bd list --all --label feature:<name> --json
+        --limit 0`. Verified against bd 1.0.2 in the
+        turma-status-beads-all-statuses branch: `--all` documents
+        as "Show all issues including closed (overrides default
+        filter)" and was observed to return the same set as the
+        explicit status enumeration `--status
+        open,in_progress,blocked,deferred,closed` on the live
+        smoke scratch. `--all` is preferred for forward-compat
+        with any future bd status vocabulary evolution.
+        """
+        argv = [
+            "bd", "list",
+            "--all",
+            "--label", f"feature:{feature}",
+            "--json",
+            "--limit", "0",
+        ]
+        result = self._run(argv, step="bd list (all statuses)")
+        payload = result.stdout.strip()
+        if not payload:
+            return ()
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "bd list (all statuses) returned non-JSON output: "
+                f"{exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(records, list):
+            raise PlanningError(
+                "bd list (all statuses) returned non-array JSON: "
+                f"{type(records).__name__}"
+            )
+        return tuple(
+            BeadsTaskRef(
+                id=str(rec["id"]),
+                title=str(rec.get("title", "")),
+                labels=tuple(str(label) for label in rec.get("labels", ())),
+            )
+            for rec in records
+            if isinstance(rec, dict) and "id" in rec
+        )
+
     def list_in_progress_tasks(
         self, feature: str
     ) -> tuple[BeadsTaskRef, ...]:
