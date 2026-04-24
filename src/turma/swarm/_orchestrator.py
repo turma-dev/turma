@@ -34,7 +34,12 @@ from turma.swarm.reconciliation import (
     StaleNoSentinels,
     reconcile_feature,
 )
-from turma.swarm.worker import WorkerBackend, WorkerInvocation
+from turma.swarm.worker import (
+    TASK_COMPLETE_SENTINEL,
+    TASK_FAILED_SENTINEL,
+    WorkerBackend,
+    WorkerInvocation,
+)
 from turma.transcription.beads import BeadsAdapter, BeadsTaskRef
 
 
@@ -346,6 +351,7 @@ def _run_single_task(
         task_id=task.id,
         base_branch=services.base_branch,
     )
+    _clear_sentinels(ref.path)
     description = services.beads.get_task_body(task.id)
     invocation = WorkerInvocation(
         task_id=task.id,
@@ -385,6 +391,40 @@ def _run_single_task(
     services.worktree.cleanup(ref)
     print(f"swarm: closed {task.id} (PR: {pr_url})")
     return False
+
+
+# ---------------------------------------------------------------------
+# Worker-run hygiene
+# ---------------------------------------------------------------------
+
+
+def _clear_sentinels(worktree: Path) -> None:
+    """Remove worker sentinels from `worktree` before invoking a worker.
+
+    The orchestrator reuses a kept worktree on retry after a
+    failed-not-exhausted attempt (failed worktrees stay on disk as
+    the primary triage artifact — see the design's Worktree
+    contract). A retry run whose worker exits without overwriting
+    its prior attempt's sentinel would otherwise re-read the stale
+    one via `worker._detect_sentinel_result`, contaminating the
+    retry's reported outcome.
+
+    Clearing here keeps the invariant "sentinels are fresh per
+    attempt." The stale content has already been captured into
+    Beads via `_handle_failure` on the failing attempt, so the
+    unlink is lossless — the diff + logs inside the worktree
+    remain as the primary triage artifact.
+
+    Swallows only `FileNotFoundError` (the expected "already
+    absent" case on fresh worktrees). `PermissionError` and other
+    `OSError` subclasses propagate so filesystem breakage surfaces
+    instead of being silently masked.
+    """
+    for sentinel in (TASK_COMPLETE_SENTINEL, TASK_FAILED_SENTINEL):
+        try:
+            (worktree / sentinel).unlink()
+        except FileNotFoundError:
+            pass
 
 
 # ---------------------------------------------------------------------
