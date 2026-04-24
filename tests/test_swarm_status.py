@@ -655,3 +655,18 @@ def test_adapter_planning_error_propagates_from_gh_list(
 
     with pytest.raises(PlanningError, match="gh pr list failed"):
         status_readout("oauth", services=services, repo_root=tmp_path)
+
+
+# ---------------------------------------------------------------------
+# Public-surface re-export
+# ---------------------------------------------------------------------
+
+
+def test_status_readout_is_reexported_from_turma_swarm() -> None:
+    """The CLI will import `from turma.swarm import status_readout`
+    in Task 5; pin the re-export now so a refactor of
+    `turma.swarm.__init__.py` doesn't silently break that import."""
+    from turma.swarm import status_readout as reexport_status_readout
+    from turma.swarm.status import status_readout as direct_status_readout
+
+    assert reexport_status_readout is direct_status_readout
