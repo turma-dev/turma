@@ -7,7 +7,12 @@ public surface so callers can keep doing `from turma.swarm import
 run_swarm, SwarmServices`.
 """
 
-from turma.swarm._orchestrator import SwarmServices, run_swarm
+from turma.swarm._orchestrator import (
+    DEFAULT_WORKER_BACKEND,
+    SwarmServices,
+    default_swarm_services,
+    run_swarm,
+)
 
 
 def status_summary() -> str:
@@ -21,4 +26,10 @@ def status_summary() -> str:
     )
 
 
-__all__ = ["SwarmServices", "run_swarm", "status_summary"]
+__all__ = [
+    "DEFAULT_WORKER_BACKEND",
+    "SwarmServices",
+    "default_swarm_services",
+    "run_swarm",
+    "status_summary",
+]
