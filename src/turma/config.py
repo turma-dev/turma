@@ -44,37 +44,82 @@ class TurmaConfig:
 
 
 def load_config() -> TurmaConfig:
-    """Load turma.toml from the current working directory."""
-    config_path = Path.cwd() / "turma.toml"
+    """Load turma.toml requiring a usable `[planning]` block.
 
+    Used by `turma plan` / `turma plan-to-beads`, which consume
+    `planning.author_model` / `planning.critic_model`. A missing
+    `author_model` raises `ConfigError`. The `[swarm]` block is
+    parsed the same way as `load_swarm_config`.
+    """
+    raw = _load_toml_dict()
+    planning = _build_planning(raw.get("planning", {}), required=True)
+    swarm = _parse_swarm(raw.get("swarm", {}))
+    return TurmaConfig(planning=planning, swarm=swarm, raw=raw)
+
+
+def load_swarm_config() -> TurmaConfig:
+    """Load turma.toml for `turma run`.
+
+    Does NOT require a `[planning]` block — the swarm orchestrator
+    does not consume `planning.author_model`. A repo with a valid
+    `[swarm]` block (or no config at all) but no planning section
+    can still run the orchestrator against an already-transcribed
+    feature. If `[planning]` is present but missing `author_model`,
+    the returned `PlanningConfig` has `author_model=""` — callers
+    that need planning config should use `load_config()` instead.
+    """
+    raw = _load_toml_dict()
+    planning = _build_planning(raw.get("planning", {}), required=False)
+    swarm = _parse_swarm(raw.get("swarm", {}))
+    return TurmaConfig(planning=planning, swarm=swarm, raw=raw)
+
+
+# ---------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------
+
+
+def _load_toml_dict() -> dict:
+    """Read and decode `./turma.toml` into a dict.
+
+    Shared by every entry point so the "missing" and "malformed"
+    error surfaces are identical regardless of which command loads.
+    """
+    config_path = Path.cwd() / "turma.toml"
     if not config_path.exists():
         raise ConfigError(
             "turma.toml not found. Run `turma init` first."
         )
-
     try:
         with open(config_path, "rb") as f:
-            raw = tomllib.load(f)
+            return tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"turma.toml is malformed: {exc}") from exc
 
-    planning_raw = raw.get("planning", {})
 
+def _build_planning(
+    planning_raw: dict, *, required: bool
+) -> PlanningConfig:
+    """Translate the `[planning]` mapping into a `PlanningConfig`.
+
+    With `required=True` (the `turma plan` / `turma plan-to-beads`
+    path), missing `author_model` raises `ConfigError`. With
+    `required=False` (the `turma run` path), a missing
+    `author_model` produces an empty `PlanningConfig(author_model="")`
+    so callers that don't consume planning config can proceed.
+    """
     if "author_model" not in planning_raw:
-        raise ConfigError(
-            "planning.author_model is required in turma.toml"
-        )
-
-    planning = PlanningConfig(
+        if required:
+            raise ConfigError(
+                "planning.author_model is required in turma.toml"
+            )
+        return PlanningConfig(author_model="")
+    return PlanningConfig(
         author_model=planning_raw["author_model"],
         critic_model=planning_raw.get("critic_model", ""),
         max_rounds=planning_raw.get("max_rounds", 4),
         interactive=planning_raw.get("interactive", True),
     )
-
-    swarm = _parse_swarm(raw.get("swarm", {}))
-
-    return TurmaConfig(planning=planning, swarm=swarm, raw=raw)
 
 
 def _parse_swarm(swarm_raw: dict) -> SwarmConfig:
