@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from turma import __version__
+from turma.config import ConfigError, load_config
 from turma.errors import PlanningError
 from turma.planning import default_planning_services, run_planning
 from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
@@ -305,10 +306,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}")
             return 1
     if args.command == "run":
-        backend = args.backend or DEFAULT_WORKER_BACKEND
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            print(f"error: {exc}")
+            return 1
+
+        # CLI flags take precedence over [swarm] in turma.toml; all
+        # other knobs (worker_timeout, max_retries, worktree_root,
+        # base_branch) come from config since they have no flag.
+        backend = args.backend or config.swarm.worker_backend
         try:
             services = default_swarm_services(
-                repo_root=Path.cwd(), backend=backend
+                repo_root=Path.cwd(),
+                backend=backend,
+                base_branch=config.swarm.base_branch,
+                max_retries=config.swarm.max_retries,
+                worker_timeout=config.swarm.worker_timeout,
+                worktree_root=config.swarm.worktree_root,
             )
             run_swarm(
                 args.feature,

@@ -1,16 +1,14 @@
 [swarm]
-# Documented v1 swarm-orchestration defaults. See
+# Swarm orchestration keys consumed by `turma run`. See
 # `docs/architecture.md#execution` for the contract and
 # `docs/smoke-turma-run.md` for live validation.
 #
-# NOTE: `turma run` does NOT yet read these keys from turma.toml.
-# v1 applies them as code-level defaults inside
-# `default_swarm_services` (src/turma/swarm/_orchestrator.py). The
-# orchestrator accepts `--max-tasks`, `--backend`, and `--dry-run` on
-# the CLI; wiring the remaining keys (worker_timeout, max_retries,
-# worktree_root, base_branch) through from turma.toml is a follow-up.
-# The block is tracked here so the config surface stays stable as the
-# loader lands.
+# CLI flags take precedence over config:
+# - `--backend` overrides `worker_backend`
+# - `--max-tasks` caps the outer loop (no config equivalent;
+#   always a per-invocation override)
+# Missing or partial [swarm] blocks fall back to the documented
+# defaults below.
 
 # Which worker backend drives claimed tasks. v1 registers only
 # "claude-code"; Codex / OpenCode / Gemini backends are v2 concerns.

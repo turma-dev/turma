@@ -5,12 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from turma.config import ConfigError, load_config
+from turma.config import ConfigError, SwarmConfig, load_config
 
 
 VALID_CONFIG = """\
 [swarm]
-max_parallel = 4
+worker_backend = "claude-code"
+worker_timeout = 1800
+max_retries = 1
+worktree_root = ".worktrees"
+base_branch = "main"
 
 [planning]
 author_model = "claude-opus-4-6"
@@ -93,3 +97,106 @@ def test_ignores_unknown_sections(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     config = load_config()
 
     assert config.planning.author_model == "claude-opus-4-6"
+
+
+# ---------------------------------------------------------------------
+# [swarm] block
+# ---------------------------------------------------------------------
+
+
+def test_loads_explicit_swarm_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """load_config returns the explicit [swarm] values."""
+    (tmp_path / "turma.toml").write_text(VALID_CONFIG)
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config()
+
+    assert config.swarm.worker_backend == "claude-code"
+    assert config.swarm.worker_timeout == 1800
+    assert config.swarm.max_retries == 1
+    assert config.swarm.worktree_root == ".worktrees"
+    assert config.swarm.base_branch == "main"
+
+
+def test_swarm_defaults_when_block_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turma.toml without a [swarm] block yields SwarmConfig defaults."""
+    (tmp_path / "turma.toml").write_text(MINIMAL_CONFIG)
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config()
+
+    assert config.swarm == SwarmConfig()
+    assert config.swarm.worker_backend == "claude-code"
+    assert config.swarm.worker_timeout == 1800
+    assert config.swarm.max_retries == 1
+    assert config.swarm.worktree_root == ".worktrees"
+    assert config.swarm.base_branch == "main"
+
+
+def test_swarm_partial_block_fills_remaining_with_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A [swarm] block with only some keys defaults the rest."""
+    text = (
+        MINIMAL_CONFIG
+        + '\n[swarm]\nmax_retries = 3\nbase_branch = "trunk"\n'
+    )
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config()
+
+    assert config.swarm.max_retries == 3
+    assert config.swarm.base_branch == "trunk"
+    # Untouched keys stay at their defaults.
+    assert config.swarm.worker_backend == "claude-code"
+    assert config.swarm.worker_timeout == 1800
+    assert config.swarm.worktree_root == ".worktrees"
+
+
+def test_swarm_rejects_negative_max_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = MINIMAL_CONFIG + "\n[swarm]\nmax_retries = -1\n"
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="max_retries"):
+        load_config()
+
+
+def test_swarm_rejects_non_positive_worker_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = MINIMAL_CONFIG + "\n[swarm]\nworker_timeout = 0\n"
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="worker_timeout"):
+        load_config()
+
+
+def test_swarm_rejects_empty_worktree_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = MINIMAL_CONFIG + '\n[swarm]\nworktree_root = ""\n'
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="worktree_root"):
+        load_config()
+
+
+def test_swarm_rejects_non_string_worker_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = MINIMAL_CONFIG + "\n[swarm]\nworker_backend = 42\n"
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="worker_backend"):
+        load_config()
