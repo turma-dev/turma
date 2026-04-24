@@ -20,6 +20,7 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 - Rewrote `docs/architecture.md`'s Execution section around the committed v1 state machine, authority model (Beads → git → GitHub PR → sentinels), retry-budget label scheme, and the read-only reconciliation contract.
 - Documented the Swarm Execution workflow in `README.md` (prerequisites, the one-feature loop, retry-budget and halt conditions, reconciliation-on-resume behavior with the six-category finding table, failure modes, and a worked example).
 - No new runtime dependencies in `pyproject.toml`. `gh` (GitHub CLI) and `claude` (Claude Code CLI) are documented external prerequisites. `.worktrees/`, `.task_complete`, `.task_failed`, and `.task_progress` are gitignored.
+- Updated `docs/smoke-turma-run.md` for compatibility with `bd 1.0.2` on macOS: documented the `coreutils` / `timeout` prerequisite needed to avoid a `bd init` deadlock against its own pre-commit hook, and replaced the `grep -oE 'bd-smoke-[0-9]+'` id capture with a `bd list … | jq -er '.[0].id'` pipeline so it works with bd 1.0.2's `<prefix>-<hash>` id format and fails loudly on an empty list.
 
 
 ## [0.2.0] - 2026-04-23

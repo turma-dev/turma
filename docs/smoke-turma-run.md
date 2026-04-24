@@ -13,6 +13,18 @@ that exercises the real toolchain.
 
 - `bd` 1.0.2+ on PATH (`brew install beads` pulls Dolt as a
   dependency).
+- **macOS only: GNU `timeout` on PATH.** `bd 1.0.2`'s git
+  pre-commit hook calls `timeout 300 bd hooks run pre-commit`.
+  macOS's BSD userland ships no `timeout` binary, so the hook
+  blocks forever against bd init's own lock and `bd init` hangs
+  indefinitely. Install coreutils and expose `gtimeout` as
+  `timeout`:
+  ```bash
+  brew install coreutils
+  ln -sf "$(which gtimeout)" /opt/homebrew/bin/timeout
+  ```
+  Skip this step on Linux — `coreutils`'s `timeout` is already the
+  system binary.
 - `git` on PATH.
 - `gh` on PATH with an authenticated session
   (`gh auth status` returns 0). The GitHub CLI credential helper
@@ -94,7 +106,17 @@ git push
 ```
 
 `openspec/changes/smoke-run/TRANSCRIBED.md` now records the Beads
-id (e.g. `bd-smoke-1`). Confirm with:
+id. bd 1.0.2 uses `<prefix>-<hash>` ids, so you'll see something
+like `smoke-vl1` rather than the older `bd-smoke-1` shape.
+Capture it for reuse in later steps:
+
+```bash
+TASK_ID=$(bd list --label feature:smoke-run --status open --json --limit 0 \
+            | jq -er '.[0].id')
+echo "TASK_ID=$TASK_ID"
+```
+
+Confirm the task's labels and status with:
 
 ```bash
 bd list --label feature:smoke-run --json --limit 0 \
@@ -129,28 +151,29 @@ cd "$WORKDIR"
 "$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
 ```
 
-Expected stdout shape (ids depend on bd's prefix):
+Expected stdout shape (ids depend on bd's prefix; `<id>` below is
+whatever `TASK_ID` holds from the capture above, e.g. `smoke-vl1`):
 
 ```
 reconcile: 0 in-progress tasks
-swarm: claimed bd-smoke-1 — Append a line to SMOKE.txt
-swarm: closed bd-smoke-1 (PR: https://github.com/<you>/turma-run-smoke/pull/1)
+swarm: claimed <id> — Append a line to SMOKE.txt
+swarm: closed <id> (PR: https://github.com/<you>/turma-run-smoke/pull/1)
 swarm: no ready tasks remain; done
 ```
 
-Claude Code runs inside `.worktrees/smoke-run/bd-smoke-1/`,
+Claude Code runs inside `.worktrees/smoke-run/<id>/`,
 creates `SMOKE.txt`, writes `.task_complete`. The orchestrator
-commits on branch `task/smoke-run/bd-smoke-1`, pushes, opens a PR
+commits on branch `task/smoke-run/<id>`, pushes, opens a PR
 against `main`, and closes the Beads task.
 
 Verify:
 
 ```bash
-bd show bd-smoke-1           # status: closed
-gh pr list --head task/smoke-run/bd-smoke-1 --state open \
-  --json url,number          # one entry
+bd show "$TASK_ID"                        # status: closed
+gh pr list --head "task/smoke-run/$TASK_ID" --state open \
+  --json url,number                        # one entry
 git branch -a | grep smoke-run
-git worktree list            # the per-task worktree should be gone
+git worktree list                          # the per-task worktree should be gone
 ```
 
 ## Step 3 — Reconciliation on resume (`completion-pending`)
@@ -172,10 +195,13 @@ cd "$WORKDIR"
 
 # Re-transcribe to get a fresh open task. --force closes the task
 # that Step 2 completed and creates a new one; capture the new id
-# from TRANSCRIBED.md.
+# from bd directly rather than regex-parsing TRANSCRIBED.md, since
+# bd 1.0.2 uses `<prefix>-<hash>` ids (e.g. smoke-vl1), not the
+# older `bd-smoke-N` shape. `jq -e` fails loudly if the list is
+# unexpectedly empty instead of silently returning `null`.
 "$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
-NEW_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md \
-         | head -n1)
+NEW_ID=$(bd list --label feature:smoke-run --status open --json --limit 0 \
+          | jq -er '.[0].id')
 
 # Beads thinks a worker already claimed this task.
 bd update "$NEW_ID" --claim
@@ -207,8 +233,8 @@ loop finds nothing ready and exits.
 
 ```
 reconcile: 1 in-progress task
-reconcile:   bd-smoke-<N> → completion-pending
-repair: bd-smoke-<N> → committed, pushed, PR opened (...), closed
+reconcile:   <NEW_ID> → completion-pending
+repair: <NEW_ID> → committed, pushed, PR opened (...), closed
 swarm: no ready tasks remain; done
 ```
 
@@ -240,7 +266,8 @@ git commit -m "smoke: fail-path task"
 git push
 
 "$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
-FAIL_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md | head -n1)
+FAIL_ID=$(bd list --label feature:smoke-run --status open --json --limit 0 \
+           | jq -er '.[0].id')
 ```
 
 Run — the worker prompt tells Claude Code how to signal failure,
