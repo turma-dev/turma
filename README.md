@@ -373,6 +373,53 @@ The readout has six sections, in fixed order, each with a
   classification exactly; ready-task retry branches will
   appear here until the next `turma run` re-claims them.
 
+Worked example against a feature mid-flight (synthetic; absolute
+paths and PR URLs depend on your repo):
+
+```text
+$ uv run turma status --feature oauth-auth
+feature: oauth-auth
+  spec: openspec/changes/oauth-auth/
+  approved: yes
+  transcribed: yes
+
+tasks:
+  ready:              2
+  in_progress:        1
+  blocked / deferred: 1
+  closed:             3
+  needs_human_review: 0
+
+ready tasks:
+  bd-oauth-4 — Wire token refresh
+  bd-oauth-5 — Add session expiry tests
+
+in-progress tasks:
+  bd-oauth-3 — Persist sessions in Redis
+    retries: 0 / 1
+    worktree: <repo>/.worktrees/oauth-auth/bd-oauth-3/ (present)
+    sentinel: failed: "redis client connection refused"
+
+pull requests:
+  #14 OPEN — [impl] Token issuance endpoint
+    head: task/oauth-auth/bd-oauth-1
+    url:  https://github.com/your-org/your-repo/pull/14
+  #13 MERGED — [impl] Add OAuth provider config
+    head: task/oauth-auth/bd-oauth-2
+    url:  https://github.com/your-org/your-repo/pull/13
+
+orphan branches:
+  (none)
+```
+
+Reading it: 3 closed (PR #13 already merged) + 1 in-progress
+(`bd-oauth-3`'s worker wrote `.task_failed` with the first-line
+reason rendered inline; the full body is still on disk under the
+worktree for triage) + 2 ready + 1 dependency-blocked (counted in
+`blocked / deferred`). One PR is still open against the
+in-flight task; no branches without a corresponding active task,
+so orphan branches is `(none)`.
+
 Adapter failures (`bd list` non-zero exit, `gh pr list`
 non-zero exit, etc.) raise `PlanningError` and exit 1 with
 `error: <msg>` on stdout — no partial readout printed.
