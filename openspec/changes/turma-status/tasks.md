@@ -109,10 +109,19 @@
         / none).
       - Pull requests section: open / closed / merged states all
         rendered; empty case `(none)`.
-      - Orphan branches section: branch matches closed task →
-        rendered; branch matches in-progress task → NOT rendered
-        (the in-progress section already surfaces it); empty case
-        `(none)`.
+      - Orphan branches section — strict in_progress-only
+        filter matching `reconcile_feature`'s classification
+        (the status readout does not redefine the reconciliation
+        contract):
+        - branch matches an in-progress task → NOT rendered.
+        - branch matches a ready task → rendered as orphan (the
+          retry case; reconciliation would classify it the same
+          way at run-start).
+        - branch matches a closed task → rendered as orphan
+          (cleanup-residue signal).
+        - branch with no corresponding task → rendered as
+          orphan.
+        - empty case `(none)`.
 - [ ] Missing spec dir / APPROVED / TRANSCRIBED.md render as
       `no` with the hint line; command still returns a readout
       (does not raise).
