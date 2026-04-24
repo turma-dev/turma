@@ -755,3 +755,137 @@ def test_repair_orphan_branch_logs_only(
     captured = capsys.readouterr()
     assert "bd-orphan" in captured.out
     assert not any(c[0] == "cleanup" for c in wt.calls)
+
+
+# ---------------------------------------------------------------------
+# Stale-sentinel clearing before worker invocation
+# ---------------------------------------------------------------------
+
+
+class _AssertSentinelsCleanWorker:
+    """Worker stub that asserts both sentinels are absent at the moment
+    `run()` is invoked. On success path it writes `.task_complete`
+    afresh so the rest of the orchestrator continues normally.
+
+    Used to pin the invariant that `_orchestrator._clear_sentinels` is
+    applied after `worktree.setup` and before `worker.run`, not just
+    before a ClaudeCodeWorker subprocess would have fired.
+    """
+
+    name = "stub-assert-clean"
+
+    def __init__(self) -> None:
+        self.invocations: list[WorkerInvocation] = []
+        self.sentinels_present_at_run: list[str] = []
+
+    def run(self, invocation: WorkerInvocation) -> WorkerResult:
+        self.invocations.append(invocation)
+        for sentinel in (".task_complete", ".task_failed"):
+            if (invocation.worktree / sentinel).exists():
+                self.sentinels_present_at_run.append(sentinel)
+        (invocation.worktree / ".task_complete").write_text("DONE\n")
+        return WorkerResult(
+            status="success", reason="", stdout="", stderr=""
+        )
+
+
+def _services_with_worker(
+    tmp_path: Path,
+    beads: StubBeads,
+    worker,
+) -> tuple[SwarmServices, StubWorktree, StubGit, StubPr]:
+    """Build services bound to a caller-provided worker instance.
+
+    The shared `_make_services` helper always builds a `StubWorker`;
+    the sentinel-clearing tests need a custom worker whose `run()`
+    reads the worktree filesystem.
+    """
+    wt = StubWorktree(repo_root=tmp_path)
+    git = StubGit()
+    pr = StubPr()
+    services = SwarmServices(
+        beads=beads,  # type: ignore[arg-type]
+        worktree=wt,  # type: ignore[arg-type]
+        git=git,  # type: ignore[arg-type]
+        pr=pr,  # type: ignore[arg-type]
+        worker_factory=lambda: worker,  # type: ignore[return-value]
+        repo_root=tmp_path,
+    )
+    return services, wt, git, pr
+
+
+def test_clear_sentinels_removes_stale_both_before_worker_invocation(
+    tmp_path: Path,
+) -> None:
+    """Retry against a kept worktree: both stale sentinels must be
+    gone before the worker runs, and the orchestrator follows the
+    happy path without re-reading them."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1")
+    beads = StubBeads(ready_queue=[(task,)])
+
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-1"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_complete").write_text("old success\n")
+    (worktree / ".task_failed").write_text("old failure reason\n")
+
+    worker = _AssertSentinelsCleanWorker()
+    services, _wt, _git, _pr = _services_with_worker(
+        tmp_path, beads, worker
+    )
+
+    run_swarm("oauth", services=services)
+
+    # Neither sentinel was visible at the moment worker.run() fired.
+    assert worker.sentinels_present_at_run == []
+    # Happy path: task closed, no fail_task contamination from the
+    # stale .task_failed reason.
+    assert beads.closed == ["bd-1"]
+    assert beads.failed == []
+
+
+def test_clear_sentinels_stale_failed_only_does_not_leak_into_fail_task(
+    tmp_path: Path,
+) -> None:
+    """`.task_failed` left over from a prior attempt must not make
+    the orchestrator re-report the failure when the worker itself
+    succeeds this time."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1")
+    beads = StubBeads(ready_queue=[(task,)])
+
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-1"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_failed").write_text("lingering reason\n")
+
+    worker = _AssertSentinelsCleanWorker()
+    services, _wt, _git, _pr = _services_with_worker(
+        tmp_path, beads, worker
+    )
+
+    run_swarm("oauth", services=services)
+
+    assert worker.sentinels_present_at_run == []
+    assert beads.closed == ["bd-1"]
+    assert beads.failed == []
+
+
+def test_clear_sentinels_is_noop_on_fresh_worktree(
+    tmp_path: Path,
+) -> None:
+    """First-attempt path: no sentinels present, `_clear_sentinels`
+    must be a silent no-op (no FileNotFoundError bubbling up)."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1")
+    beads = StubBeads(ready_queue=[(task,)])
+    services, _wt, _git, _pr, worker = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+
+    # No sentinels, no worktree dir; StubWorktree.setup will mkdir.
+    run_swarm("oauth", services=services)
+
+    assert beads.closed == ["bd-1"]
+    assert beads.failed == []
+    # Worker invoked exactly once; no error path entered.
+    assert len(worker.invocations) == 1
