@@ -1,0 +1,307 @@
+# `turma run` Smoke Procedure
+
+Task 9 of `openspec/changes/swarm-orchestration/` closes out the
+change set with an end-to-end validation against real `bd` + `gh` +
+`claude` installs. Unit and integration suites under
+`tests/test_swarm_*.py` (100+ tests) cover the adapter argv shape,
+reconciliation classification, repair-phase dispatch, main-loop
+state transitions, budget enforcement, and CLI wiring — all with
+subprocess stubs. This document is the complementary manual smoke
+that exercises the real toolchain.
+
+## Prerequisites
+
+- `bd` 1.0.2+ on PATH (`brew install beads` pulls Dolt as a
+  dependency).
+- `git` on PATH.
+- `gh` on PATH with an authenticated session
+  (`gh auth status` returns 0). The GitHub CLI credential helper
+  handles HTTPS pushes; ssh-agent is the other supported path.
+- `claude` (Claude Code CLI) on PATH for the default worker
+  backend. `--dry-run` does not require `claude`.
+- A GitHub repo where the operator can push a branch and open a
+  PR. The smoke uses a throwaway repo; do not run it against a
+  repo under an active release freeze.
+- A checked-out Turma repo with `uv sync` completed so
+  `uv run turma` works.
+- `jq` available for the verification commands below.
+
+## Scratch setup
+
+Point `TURMA_REPO` at your Turma checkout and run everything from
+a scratch clone of a disposable GitHub repo so `bd`, `gh`, and
+`turma run` all operate in one place:
+
+```bash
+export TURMA_REPO="$(cd ~/coding_projects/turma && pwd)"
+test -x "$TURMA_REPO/.venv/bin/turma" || (cd "$TURMA_REPO" && uv sync)
+
+# Replace with a disposable repo you control.
+export SMOKE_REPO_URL="git@github.com:<you>/turma-run-smoke.git"
+
+WORKDIR=$(mktemp -d)
+cd "$WORKDIR"
+git clone "$SMOKE_REPO_URL" .
+git checkout -b main
+git push -u origin main || true   # ensure `main` exists on origin
+
+# Minimum Turma project layout: config + role prompts.
+cp "$TURMA_REPO/turma.example.toml" turma.toml
+mkdir -p .agents openspec/changes/smoke-run
+cp "$TURMA_REPO/.agents/author.md" .agents/
+cp "$TURMA_REPO/.agents/critic.md" .agents/
+
+# Beads database (non-interactive skips bd init's wizard).
+BD_NON_INTERACTIVE=1 bd init --prefix smoke
+
+# Gitignore entries the orchestrator expects.
+cat >> .gitignore <<'EOF'
+.beads/*.db
+.worktrees/
+.task_complete
+.task_failed
+.task_progress
+EOF
+git add .gitignore turma.toml
+git commit -m "smoke: turma project layout"
+git push
+```
+
+## Pre-populate a transcribed feature
+
+Pre-stage an approved + transcribed feature with one trivially
+completable task. The smoke focuses on the orchestrator, not on
+LLM-driven planning.
+
+```bash
+cat > openspec/changes/smoke-run/tasks.md <<'EOF'
+## Tasks
+
+### 1. Append a line to SMOKE.txt
+- [ ] Create or append to SMOKE.txt with a single line of text.
+EOF
+printf '## Why\nStub.\n'   > openspec/changes/smoke-run/proposal.md
+printf '## Goals\nStub.\n' > openspec/changes/smoke-run/design.md
+touch openspec/changes/smoke-run/APPROVED
+git add openspec/changes/smoke-run
+git commit -m "smoke: approved spec"
+git push
+
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run
+git add openspec/changes/smoke-run/TRANSCRIBED.md
+git commit -m "smoke: transcribed to Beads"
+git push
+```
+
+`openspec/changes/smoke-run/TRANSCRIBED.md` now records the Beads
+id (e.g. `bd-smoke-1`). Confirm with:
+
+```bash
+bd list --label feature:smoke-run --json --limit 0 \
+  | jq '[.[] | {id, title, status}]'
+```
+
+## Step 1 — `--dry-run` surfaces reconciliation only
+
+```bash
+cd "$WORKDIR"
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --dry-run
+```
+
+Expected stdout:
+
+```
+reconcile: 0 in-progress tasks
+```
+
+No Beads mutation, no worktree, no `gh pr create`. Verify with:
+
+```bash
+bd list --label feature:smoke-run --json --limit 0 \
+  | jq '.[] | {id, status}'          # every task still `open`
+git worktree list                     # only the main working copy
+```
+
+## Step 2 — Happy path, one task end-to-end
+
+```bash
+cd "$WORKDIR"
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
+```
+
+Expected stdout shape (ids depend on bd's prefix):
+
+```
+reconcile: 0 in-progress tasks
+swarm: claimed bd-smoke-1 — Append a line to SMOKE.txt
+swarm: closed bd-smoke-1 (PR: https://github.com/<you>/turma-run-smoke/pull/1)
+swarm: no ready tasks remain; done
+```
+
+Claude Code runs inside `.worktrees/smoke-run/bd-smoke-1/`,
+creates `SMOKE.txt`, writes `.task_complete`. The orchestrator
+commits on branch `task/smoke-run/bd-smoke-1`, pushes, opens a PR
+against `main`, and closes the Beads task.
+
+Verify:
+
+```bash
+bd show bd-smoke-1           # status: closed
+gh pr list --head task/smoke-run/bd-smoke-1 --state open \
+  --json url,number          # one entry
+git branch -a | grep smoke-run
+git worktree list            # the per-task worktree should be gone
+```
+
+## Step 3 — Reconciliation on resume (`completion-pending`)
+
+Simulate a crash between `run_worker` success and
+`commit`. Manually re-create the scenario:
+
+```bash
+cd "$WORKDIR"
+# Re-open the Beads task so the next run has something to reconcile.
+# (Typical cause in production: orchestrator SIGKILL after the worker
+# wrote .task_complete but before the commit.)
+bd update bd-smoke-1 --status open
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
+# `--force` re-creates the task; capture the new id from
+# TRANSCRIBED.md (e.g. bd-smoke-2).
+NEW_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md | head -n1)
+
+# Manually set up the "interrupted" state: worktree exists with
+# .task_complete, bd task is in_progress, no PR yet.
+mkdir -p ".worktrees/smoke-run/$NEW_ID"
+(cd ".worktrees/smoke-run/$NEW_ID" && \
+   git init -q && git checkout -b "task/smoke-run/$NEW_ID" && \
+   printf 'recovered\n' > SMOKE.txt && \
+   touch .task_complete)
+bd update "$NEW_ID" --claim
+```
+
+Run again:
+
+```bash
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
+```
+
+Expected: reconciliation emits `completion-pending` for `$NEW_ID`,
+the repair phase commits + pushes + opens a PR + closes the task,
+then the main loop finds nothing ready and exits.
+
+```
+reconcile: 1 in-progress task
+reconcile:   bd-smoke-2 → completion-pending
+repair: bd-smoke-2 → committed, pushed, PR opened (...), closed
+swarm: no ready tasks remain; done
+```
+
+## Step 4 — Failure path surfaces on `fail_task`
+
+Pre-populate another task that the worker will deliberately mark
+as failed:
+
+```bash
+cd "$WORKDIR"
+cat > openspec/changes/smoke-run/tasks.md <<'EOF'
+## Tasks
+
+### 1. Fail on purpose
+- [ ] Write the reason to .task_failed and stop.
+EOF
+git add openspec/changes/smoke-run/tasks.md
+git commit -m "smoke: fail-path task"
+git push
+
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
+FAIL_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md | head -n1)
+```
+
+Run — the worker prompt tells Claude Code how to signal failure,
+so the failure path fires naturally. With `max_retries = 1` (the
+default) and no prior retries, the task goes back to `open` rather
+than being labelled `needs_human_review`; a second failed run
+exhausts the budget.
+
+```bash
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
+# swarm: claimed $FAIL_ID — Fail on purpose
+# swarm: $FAIL_ID failed (attempt 1/2): <reason>
+# swarm: no ready tasks remain; done
+
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
+# swarm: claimed $FAIL_ID — Fail on purpose
+# swarm: $FAIL_ID failed (budget exhausted after 2 attempts): <reason>
+# error: retry budget exhausted on $FAIL_ID; halting run. Triage
+# with `bd show $FAIL_ID` and `bd list --label needs_human_review`.
+```
+
+Exit status is 1 on the second run. Confirm the labels:
+
+```bash
+bd list --label needs_human_review --json --limit 0 \
+  | jq '.[] | {id, title, labels}'
+ls ".worktrees/smoke-run/$FAIL_ID"   # worktree is preserved for triage
+```
+
+## Cleanup
+
+```bash
+# Close the smoke's feature-tagged tasks and remove the worktrees.
+bd list --label feature:smoke-run --json --limit 0 \
+  | jq -r '.[].id' | xargs -r bd close
+
+for wt in .worktrees/smoke-run/*/; do
+  branch=$(basename "$wt")
+  git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+  git branch -D "task/smoke-run/$branch" 2>/dev/null || true
+done
+
+rm -rf "$WORKDIR"
+```
+
+On GitHub, close or delete the smoke PRs and delete the
+`task/smoke-run/*` remote branches if the repo's settings did not
+auto-delete them on close.
+
+## Failure-signature cheat sheet
+
+- `error: feature 'X' is not APPROVED` — no `APPROVED` marker;
+  run `turma plan` first.
+- `error: feature 'X' has not been transcribed to Beads` — no
+  `TRANSCRIBED.md`; run `turma plan-to-beads --feature X`.
+- `error: bd CLI not found. Install it with \`brew install beads\`` —
+  `bd` missing from PATH in the shell that invoked Turma.
+- `error: gh CLI not found` — `gh` missing from PATH.
+- `error: gh session not authenticated. Run \`gh auth login\` and retry.` —
+  run `gh auth login` once; the adapter runs `gh auth status` at
+  construction.
+- `error: claude CLI not found` — `claude` missing from PATH;
+  only fires when a task is actually claimed, not during
+  `--dry-run`.
+- `error: stale worktree for <id> has no sentinels` — reconcile
+  caught ambiguous state; inspect
+  `.worktrees/<feature>/<id>/` and decide. The orchestrator
+  never guesses.
+- `error: retry budget exhausted on <id>` — task hit
+  `max_retries`; triage with
+  `bd list --label needs_human_review`. The failed worktree
+  stays on disk as the primary diagnostic artifact.
+- `error: gh pr create failed: ... Resource not accessible by
+  personal access token` — the authenticated `gh` session lacks
+  `pull_requests:write` scope. Fix under Settings → Personal
+  access tokens for the repo owner.
+
+## Notes for future work
+
+- `--max-tasks` counts successfully-claimed tasks, not claim
+  attempts. Claim races do not consume budget.
+- Reconciliation is read-only and runs every invocation,
+  including `--dry-run`. The only network call it issues is a
+  `gh pr list` per task with `.task_complete`, to disambiguate
+  `completion-pending` from `completion-pending-with-pr`.
+- Failed worktrees are never auto-removed in v1. Manual cleanup:
+  `git worktree remove --force <path>` + `git branch -D
+  task/<feature>/<id>`. A `turma run --clean <feature>` flag is
+  deferred past v1 (see Open items in `openspec/changes/
+  swarm-orchestration/design.md`).
