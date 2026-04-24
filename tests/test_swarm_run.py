@@ -667,6 +667,81 @@ def test_repair_stale_no_sentinels_halts(tmp_path: Path) -> None:
         run_swarm("oauth", services=services)
 
 
+def test_repair_missing_worktree_exhausted_budget_halts_before_main_loop(
+    tmp_path: Path,
+) -> None:
+    """A reconcile-detected exhausted failure must halt before fetch_ready."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-gone")
+    # Pre-existing retry count at the budget ceiling → this fail
+    # exhausts the budget.
+    beads = StubBeads(
+        in_progress=(task,),
+        ready_queue=[(_ref("bd-next"),)],  # would be consumed if loop ran
+        retries={"bd-gone": 1},
+    )
+    services, *_ = _make_services(tmp_path, beads=beads, max_retries=1)
+
+    with pytest.raises(PlanningError, match="budget exhausted.*repair"):
+        run_swarm("oauth", services=services)
+
+    # Main loop never ran — no list_ready_tasks call, no claim, no
+    # close.
+    assert not any(c[0] == "list_ready_tasks" for c in beads.calls)
+    assert not any(c[0] == "claim_task" for c in beads.calls)
+    assert beads.closed == []
+    # The failure was recorded before the halt fired.
+    assert [e[0] for e in beads.failed] == ["bd-gone"]
+
+
+def test_repair_failure_pending_exhausted_budget_halts_before_main_loop(
+    tmp_path: Path,
+) -> None:
+    _scratch_feature(tmp_path)
+    task = _ref("bd-bad")
+    beads = StubBeads(
+        in_progress=(task,),
+        ready_queue=[(_ref("bd-next"),)],
+        retries={"bd-bad": 1},
+    )
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-bad"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_failed").write_text("fatal compile error\n")
+
+    services, *_ = _make_services(tmp_path, beads=beads, max_retries=1)
+
+    with pytest.raises(PlanningError, match="budget exhausted.*repair"):
+        run_swarm("oauth", services=services)
+
+    assert not any(c[0] == "list_ready_tasks" for c in beads.calls)
+    assert beads.closed == []
+    # The reconcile reason was prefixed and passed through to fail_task.
+    assert "fatal compile error" in beads.failed[0][1]
+
+
+def test_repair_collects_all_exhaustions_before_raising(
+    tmp_path: Path,
+) -> None:
+    """Multiple repair-phase failures should all record before the halt."""
+    _scratch_feature(tmp_path)
+    missing, failing = _ref("bd-gone"), _ref("bd-bad")
+    beads = StubBeads(
+        in_progress=(missing, failing),
+        ready_queue=[()],
+        retries={"bd-gone": 1, "bd-bad": 1},
+    )
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-bad"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_failed").write_text("reason\n")
+    services, *_ = _make_services(tmp_path, beads=beads, max_retries=1)
+
+    with pytest.raises(PlanningError, match="bd-gone.*bd-bad"):
+        run_swarm("oauth", services=services)
+
+    recorded_ids = [e[0] for e in beads.failed]
+    assert recorded_ids == ["bd-gone", "bd-bad"]
+
+
 def test_repair_orphan_branch_logs_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
