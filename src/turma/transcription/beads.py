@@ -302,6 +302,43 @@ class BeadsAdapter:
             step="bd update --claim",
         )
 
+    def get_task_body(self, task_id: str) -> str:
+        """Return the description body of a Beads task.
+
+        The swarm orchestrator passes this through to the worker as
+        `WorkerInvocation.description` — the authoritative subtask
+        list the worker executes. Missing / empty descriptions surface
+        as an empty string; callers decide whether that is an error.
+        """
+        result = self._run(
+            ["bd", "show", task_id, "--json"],
+            step="bd show (body)",
+        )
+        payload = result.stdout.strip()
+        if not payload:
+            return ""
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "bd show returned non-JSON output: "
+                f"{exc}\n{payload!r}"
+            ) from exc
+        if isinstance(data, list):
+            if not data:
+                return ""
+            data = data[0]
+        if not isinstance(data, dict):
+            raise PlanningError(
+                "bd show returned unexpected JSON shape: "
+                f"{type(data).__name__}"
+            )
+        for key in ("description", "body"):
+            value = data.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
+
     def retries_so_far(self, task_id: str) -> int:
         """Return the integer encoded in a `turma-retries:<n>` label.
 

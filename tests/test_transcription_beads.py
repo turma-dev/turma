@@ -354,6 +354,63 @@ def test_list_feature_tasks_rejects_non_array_json() -> None:
 
 
 # -----------------------------------------------------------------------
+# get_task_body
+# -----------------------------------------------------------------------
+
+
+def test_get_task_body_pins_argv_and_returns_description() -> None:
+    seen: list[list[str]] = []
+    payload = json.dumps(
+        {
+            "id": "bd-1",
+            "title": "t",
+            "description": "line 1\nline 2\n",
+        }
+    )
+
+    def run(argv, *, step):
+        seen.append(argv)
+        return _completed(argv, stdout=payload)
+
+    adapter = _make_adapter_with_run(run)
+    body = adapter.get_task_body("bd-1")
+
+    assert body == "line 1\nline 2\n"
+    assert seen == [["bd", "show", "bd-1", "--json"]]
+
+
+def test_get_task_body_unwraps_single_element_list() -> None:
+    payload = json.dumps([{"id": "bd-1", "description": "hello"}])
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout=payload)
+    )
+    assert adapter.get_task_body("bd-1") == "hello"
+
+
+def test_get_task_body_returns_empty_when_stdout_blank() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout="")
+    )
+    assert adapter.get_task_body("bd-1") == ""
+
+
+def test_get_task_body_falls_back_to_body_field() -> None:
+    payload = json.dumps({"id": "bd-1", "body": "from body"})
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout=payload)
+    )
+    assert adapter.get_task_body("bd-1") == "from body"
+
+
+def test_get_task_body_rejects_non_json() -> None:
+    adapter = _make_adapter_with_run(
+        lambda argv, *, step: _completed(argv, stdout="not json")
+    )
+    with pytest.raises(PlanningError, match="non-JSON output"):
+        adapter.get_task_body("bd-1")
+
+
+# -----------------------------------------------------------------------
 # list_in_progress_tasks
 # -----------------------------------------------------------------------
 

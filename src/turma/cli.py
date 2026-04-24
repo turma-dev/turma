@@ -271,7 +271,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}")
             return 1
     if args.command == "run":
-        print(run_swarm(args.feature))
+        # `run_swarm` requires a `SwarmServices` instance; default
+        # construction is wired in Task 8 of
+        # `openspec/changes/swarm-orchestration/tasks.md`. Until then,
+        # invoking `turma run` surfaces the expected `PlanningError`
+        # cleanly rather than crashing with an unhandled exception.
+        try:
+            run_swarm(args.feature)
+        except PlanningError as exc:
+            print(f"error: {exc}")
+            return 1
         return 0
     if args.command == "status":
         print(status_summary())
