@@ -1,4 +1,4 @@
-"""Tests for the `turma run` CLI subcommand."""
+"""Tests for the `turma run` and `turma status` CLI subcommands."""
 
 from __future__ import annotations
 
@@ -334,3 +334,156 @@ def test_main_run_works_against_turma_toml_without_planning_section(
     assert kwargs["max_retries"] == 2
     # Planning config was never required.
     mock_run_swarm.assert_called_once()
+
+
+# ---------------------------------------------------------------------
+# `turma status` subcommand
+# ---------------------------------------------------------------------
+
+
+# Argparse surface --------------------------------------------------
+
+
+def test_status_subparser_registered() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["status", "--feature", "oauth"])
+    assert args.command == "status"
+    assert args.feature == "oauth"
+
+
+def test_status_requires_feature(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["status"])
+    err = capsys.readouterr().err
+    assert "--feature" in err
+
+
+def test_status_rejects_unknown_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["status", "--feature", "oauth", "--nope"])
+    err = capsys.readouterr().err
+    assert "--nope" in err or "unrecognized" in err
+
+
+# Dispatch behavior -------------------------------------------------
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_happy_path_prints_readout(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Happy path: main calls load_swarm_config, default_swarm_services,
+    and status_readout with the parsed args, prints the rendered
+    block, exits 0."""
+    mock_load_swarm_config.return_value = _stub_config()
+    mock_services = MagicMock(name="SwarmServices")
+    mock_services_factory.return_value = mock_services
+    mock_status_readout.return_value = (
+        "feature: oauth\n  approved: yes\n"
+    )
+
+    exit_code = main(["status", "--feature", "oauth"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "feature: oauth" in out
+    assert "  approved: yes" in out
+
+    mock_load_swarm_config.assert_called_once()
+    mock_services_factory.assert_called_once()
+    mock_status_readout.assert_called_once()
+    call = mock_status_readout.call_args
+    assert call.args == ("oauth",)
+    assert call.kwargs["services"] is mock_services
+    # repo_root passed for spec-dir / marker checks; whatever the
+    # CLI passes (Path.cwd()) lands here.
+    assert "repo_root" in call.kwargs
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_config_error_exits_1(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing / malformed turma.toml surfaces as exit 1 before
+    the services factory is touched."""
+    mock_load_swarm_config.side_effect = ConfigError(
+        "turma.toml not found. Run `turma init` first."
+    )
+
+    exit_code = main(["status", "--feature", "oauth"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert out.startswith("error: ")
+    assert "turma.toml not found" in out
+    mock_services_factory.assert_not_called()
+    mock_status_readout.assert_not_called()
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_planning_error_from_factory_exits_1(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing external CLI surfaces as a PlanningError at services
+    construction and must exit 1 before status_readout is reached."""
+    mock_load_swarm_config.return_value = _stub_config()
+    mock_services_factory.side_effect = PlanningError(
+        "bd CLI not found. Install it with `brew install beads`."
+    )
+
+    exit_code = main(["status", "--feature", "oauth"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert out.startswith("error: ")
+    assert "bd CLI not found" in out
+    mock_status_readout.assert_not_called()
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_planning_error_from_readout_exits_1(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A PlanningError raised mid-readout (e.g. bd list / gh pr list
+    failure) must exit 1 with `error: <msg>` on stdout. No partial
+    readout printed."""
+    mock_load_swarm_config.return_value = _stub_config()
+    mock_services_factory.return_value = MagicMock()
+    mock_status_readout.side_effect = PlanningError(
+        "bd list (all statuses) failed: exit 1\nboom"
+    )
+
+    exit_code = main(["status", "--feature", "oauth"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert out.startswith("error: ")
+    assert "bd list" in out
+    # No partial readout printed before the error.
+    assert "feature: oauth" not in out
