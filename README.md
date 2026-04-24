@@ -212,12 +212,13 @@ uv run turma run --feature <name> --backend claude-code
 uv run turma run --feature <name> --dry-run           # preflight + reconcile only
 ```
 
-v1 note on config: the `[swarm]` block in `turma.example.toml`
-documents the intended defaults (`worker_backend`, `worker_timeout`,
-`max_retries`, `worktree_root`, `base_branch`), but `turma run` does
-not yet read `turma.toml` for any of them. These are applied as
-code-level defaults inside `default_swarm_services`
-(`src/turma/swarm/_orchestrator.py`). Loader wiring is a follow-up.
+Config: `turma run` reads the `[swarm]` block from `turma.toml`
+for `worker_backend`, `worker_timeout`, `max_retries`,
+`worktree_root`, and `base_branch`. CLI flags take precedence —
+`--backend` overrides `worker_backend`, and `--max-tasks` is a
+per-invocation cap with no config equivalent. Missing or partial
+`[swarm]` blocks fall back to the defaults in
+`turma.example.toml`.
 
 ### Prerequisites
 

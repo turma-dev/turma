@@ -77,6 +77,7 @@ def default_swarm_services(
     base_branch: str = "main",
     max_retries: int = 1,
     worker_timeout: int = 1800,
+    worktree_root: str = ".worktrees",
 ) -> SwarmServices:
     """Construct production `SwarmServices` rooted at `repo_root`.
 
@@ -95,7 +96,9 @@ def default_swarm_services(
     """
     return SwarmServices(
         beads=BeadsAdapter(),
-        worktree=WorktreeManager(repo_root=repo_root),
+        worktree=WorktreeManager(
+            repo_root=repo_root, worktree_root=worktree_root
+        ),
         git=GitAdapter(),
         pr=PullRequestAdapter(),
         worker_factory=lambda: get_worker_backend(backend),
