@@ -155,45 +155,71 @@ git worktree list            # the per-task worktree should be gone
 
 ## Step 3 — Reconciliation on resume (`completion-pending`)
 
-Simulate a crash between `run_worker` success and
-`commit`. Manually re-create the scenario:
+Simulate a crash between `run_worker` success and `commit`: the
+worker wrote `.task_complete` into a per-task worktree but the
+orchestrator never got to commit, push, or close the Beads task.
+
+The critical detail: the orchestrator runs every git command as
+`git -C <worktree> …` against a **registered** git worktree of the
+parent repo. Reproducing the interrupted state therefore requires
+`git worktree add -b …`, not `git init` inside the worktree path
+(a nested standalone repo would let the orchestrator's commit step
+succeed but `push` / `cleanup` would fail because the parent repo
+has no record of it).
 
 ```bash
 cd "$WORKDIR"
-# Re-open the Beads task so the next run has something to reconcile.
-# (Typical cause in production: orchestrator SIGKILL after the worker
-# wrote .task_complete but before the commit.)
-bd update bd-smoke-1 --status open
-"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
-# `--force` re-creates the task; capture the new id from
-# TRANSCRIBED.md (e.g. bd-smoke-2).
-NEW_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md | head -n1)
 
-# Manually set up the "interrupted" state: worktree exists with
-# .task_complete, bd task is in_progress, no PR yet.
-mkdir -p ".worktrees/smoke-run/$NEW_ID"
+# Re-transcribe to get a fresh open task. --force closes the task
+# that Step 2 completed and creates a new one; capture the new id
+# from TRANSCRIBED.md.
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
+NEW_ID=$(grep -oE 'bd-smoke-[0-9]+' openspec/changes/smoke-run/TRANSCRIBED.md \
+         | head -n1)
+
+# Beads thinks a worker already claimed this task.
+bd update "$NEW_ID" --claim
+
+# Real registered worktree of the parent repo on a new task branch.
+# Paths must match what WorktreeManager.worktree_path_for /
+# branch_name_for return for (feature, task_id).
+git worktree add -b "task/smoke-run/$NEW_ID" \
+    ".worktrees/smoke-run/$NEW_ID" main
+
+# Worker outputs — an edit git will pick up on `add -A`, plus the
+# success sentinel the orchestrator's reconciliation walks for.
 (cd ".worktrees/smoke-run/$NEW_ID" && \
-   git init -q && git checkout -b "task/smoke-run/$NEW_ID" && \
    printf 'recovered\n' > SMOKE.txt && \
    touch .task_complete)
-bd update "$NEW_ID" --claim
 ```
 
-Run again:
+Run the orchestrator:
 
 ```bash
 "$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1
 ```
 
-Expected: reconciliation emits `completion-pending` for `$NEW_ID`,
-the repair phase commits + pushes + opens a PR + closes the task,
-then the main loop finds nothing ready and exits.
+Expected: reconciliation classifies `$NEW_ID` as
+`completion-pending` (`.task_complete` present, no open PR yet),
+the repair phase runs the normal commit + push + open_pr +
+close_task tail against the registered worktree, then the main
+loop finds nothing ready and exits.
 
 ```
 reconcile: 1 in-progress task
-reconcile:   bd-smoke-2 → completion-pending
-repair: bd-smoke-2 → committed, pushed, PR opened (...), closed
+reconcile:   bd-smoke-<N> → completion-pending
+repair: bd-smoke-<N> → committed, pushed, PR opened (...), closed
 swarm: no ready tasks remain; done
+```
+
+Verify:
+
+```bash
+bd show "$NEW_ID" | head                         # status: closed
+gh pr list --head "task/smoke-run/$NEW_ID" \
+  --state open --json url,number                  # one entry
+git worktree list                                 # the per-task worktree is gone
+git branch --list "task/smoke-run/$NEW_ID"        # empty — branch deleted on cleanup
 ```
 
 ## Step 4 — Failure path surfaces on `fail_task`
