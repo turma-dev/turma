@@ -46,9 +46,11 @@
 - [x] Non-JSON / non-dict payloads raise `PlanningError`.
 - [x] Tests in `tests/test_swarm_pull_request.py`:
       argv shape; happy-path parses a single payload across
-      each of the four states; 404 path produces the typed
-      "PR <N> not found" error; non-zero non-404 exit
-      surfaces stderr verbatim; non-JSON / non-dict
+      each of the three `gh --json state` values
+      (`OPEN` / `MERGED` / `CLOSED`; drafts surface as `OPEN`
+      and are not a separate state in v1); 404 path produces
+      the typed "PR <N> not found" error; non-zero non-404
+      exit surfaces stderr verbatim; non-JSON / non-dict
       rejection.
 
 ### 3. Switch the success path to label-and-leave-in-progress
