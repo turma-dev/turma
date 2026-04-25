@@ -241,8 +241,16 @@ per-invocation cap with no config equivalent. Missing or partial
 For each ready Beads task, the orchestrator runs:
 
 ```
-claim → setup_worktree → run_worker → (sentinel) → commit → push → open_pr → close_task
+claim → setup_worktree → run_worker → (sentinel) → commit → push → open_pr → mark_pr_open
 ```
+
+`mark_pr_open` records the PR number on the Beads task via a
+`turma-pr:<N>` label and leaves the task in `in_progress` with
+its worktree on disk. The matching `close_task` +
+`cleanup_worktree` defer to the next `turma run`'s merge
+advancement sweep (see below), which fires only after GitHub
+reports the PR as merged. This is what keeps dependents from
+being claimed against an unmerged base.
 
 Failed steps enter the retry path via `fail_task` on the Beads task.
 A worker that claims success but leaves the worktree clean
@@ -254,7 +262,8 @@ The worker signals completion via filesystem sentinels inside the
 worktree:
 
 - `.task_complete` — worker believes the task is done; orchestrator
-  commits, pushes, opens a PR, and closes the Beads task.
+  commits, pushes, opens a PR, and labels the Beads task with
+  `turma-pr:<N>`. Close + cleanup defer to merge advancement.
 - `.task_failed` — worker hit an unresolvable blocker; contents are
   the failure reason. Orchestrator calls `fail_task` and leaves the
   worktree on disk for triage.
@@ -288,8 +297,8 @@ worktree filesystem and GitHub PR state:
 | Finding | Cause | Repair |
 | --- | --- | --- |
 | `missing-worktree` | Beads says in_progress, worktree absent | release the claim (counts against the retry budget) |
-| `completion-pending` | `.task_complete` present, no open PR | commit + push + open_pr + close_task |
-| `completion-pending-with-pr` | `.task_complete` present, PR already open | close_task + remove worktree (no new PR) |
+| `completion-pending` | `.task_complete` present, no open PR | commit + push + open_pr + mark_pr_open |
+| `completion-pending-with-pr` | `.task_complete` present, PR already open | mark_pr_open (no new PR; close + cleanup defer to merge advancement) |
 | `failure-pending` | `.task_failed` present | fail_task with the worker's reason (worktree left for triage) |
 | `stale-no-sentinels` | worktree + branch exist, no sentinel | halt before the main loop; operator decides |
 | `orphan-branch` | `task/<feature>/*` branch with no in_progress task | log only; operator triage |
@@ -298,6 +307,29 @@ Reconciliation itself is read-only: every mutation (`fail_task`,
 `close_task`, `commit`, `push`, `gh pr create`) is performed by the
 repair phase in the main loop, and `--dry-run` skips the repair
 phase entirely.
+
+### Merge advancement
+
+Between the repair phase and the main loop, `turma run` sweeps
+every `in_progress` task that carries a `turma-pr:<N>` label and
+queries the PR's GitHub state via `gh pr view <N> --json state`.
+The dispatch is read-only-then-mutate — one `gh` read per
+labelled task, then exactly one of:
+
+| `gh` returns | Action |
+| --- | --- |
+| `MERGED` | `unmark_pr_open` + `close_task` + `cleanup_worktree` — dependents become claimable on the same `turma run` |
+| `OPEN` | leave alone (drafts return `OPEN` from `--json state` and fall through this branch unchanged) |
+| `CLOSED` without merge | `fail_task` with reason `"PR #<N> closed without merge"` so the retry budget applies |
+| PR not found / 404 | halt with `PlanningError`; the label is stale and the operator triages |
+
+Tasks without a `turma-pr:<N>` label are skipped (no `gh` call),
+matching the label-gated dispatch. `--dry-run` performs the
+PR-state reads but no mutations.
+
+The sweep prints one line per processed task, prefixed with
+`merge-advancement:` so the source is unambiguous in the run
+log.
 
 ### Failure modes (CLI)
 
@@ -317,12 +349,20 @@ Against a feature already transcribed to Beads (see Plan-to-Beads
 above):
 
 ```bash
-# Smoke one task end-to-end. On success a PR appears on origin;
-# on failure the worktree stays at .worktrees/<feature>/<bd-id>/.
+# First run — opens a PR for task 1. The Beads task stays
+# in_progress with a `turma-pr:<N>` label; the worktree at
+# .worktrees/oauth-auth/<bd-id>/ stays on disk awaiting merge.
+# A dependent task is NOT yet claimable.
 uv run turma run --feature oauth-auth --max-tasks 1
 
-# Resume after an interrupted run — reconciliation surfaces any
-# leftover in_progress tasks and the main loop finishes them.
+# Reviewer merges the PR on GitHub (or via `gh pr merge <N>`).
+# Nothing local needs to change — the merge is the only signal
+# the orchestrator depends on.
+
+# Second run — the merge advancement sweep observes MERGED,
+# unmarks the label, closes the task, and removes the
+# worktree. The dependent task is now ready and gets claimed
+# in the same invocation.
 uv run turma run --feature oauth-auth
 
 # Operator triage after budget exhaustion.
@@ -364,7 +404,13 @@ The readout has six sections, in fixed order, each with a
   worktree presence, sentinel state
   (`complete | failed: "<reason>" | none`). The
   `.task_failed` body is truncated to the first line in the
-  readout; the full file stays on disk for triage.
+  readout; the full file stays on disk for triage. When the
+  task carries a `turma-pr:<N>` label (recorded by the
+  success path / repair phase), an extra
+  `pr: #<N> (<state>) <url>` line is added below the
+  sentinel — state and URL come from a live `gh pr view`,
+  not the cached label, so MERGED PRs awaiting the next
+  `turma run` sweep are visible here.
 - **pull requests** — every PR for `task/<feature>/*` head
   branches across all states (`OPEN` / `MERGED` / `CLOSED` /
   `DRAFT`).

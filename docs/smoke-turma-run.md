@@ -157,26 +157,81 @@ whatever `TASK_ID` holds from the capture above, e.g. `smoke-vl1`):
 ```
 reconcile: 0 in-progress tasks
 swarm: claimed <id> — Append a line to SMOKE.txt
-swarm: closed <id> (PR: https://github.com/<you>/turma-run-smoke/pull/1)
+swarm: opened <id> (PR: https://github.com/<you>/turma-run-smoke/pull/1; awaiting merge)
 swarm: no ready tasks remain; done
 ```
 
 Claude Code runs inside `.worktrees/smoke-run/<id>/`,
 creates `SMOKE.txt`, writes `.task_complete`. The orchestrator
 commits on branch `task/smoke-run/<id>`, pushes, opens a PR
-against `main`, and closes the Beads task.
+against `main`, and labels the Beads task with `turma-pr:<N>`.
+The task stays `in_progress` and the worktree stays on disk
+until a future `turma run` observes the PR as merged
+(see Step 3).
 
 Verify:
 
 ```bash
-bd show "$TASK_ID"                        # status: closed
+bd show "$TASK_ID"                            # status: in_progress
+                                              # labels include turma-pr:<N>
 gh pr list --head "task/smoke-run/$TASK_ID" --state open \
-  --json url,number                        # one entry
+  --json url,number                           # one entry
 git branch -a | grep smoke-run
-git worktree list                          # the per-task worktree should be gone
+git worktree list                             # the per-task worktree should still be present
 ```
 
-## Step 3 — Reconciliation on resume (`completion-pending`)
+## Step 3 — Merge advancement closes the task on the next run
+
+This step exercises the merge-advancement phase: when a `turma
+run`-opened PR has been merged on GitHub, the next invocation
+observes the merge, closes the Beads task, and removes the
+worktree without the operator having to touch bd or the
+worktree directly.
+
+Merge the PR opened in Step 2:
+
+```bash
+PR_NUMBER=$(gh pr list --head "task/smoke-run/$TASK_ID" \
+              --state open --json number --jq '.[0].number')
+gh pr merge "$PR_NUMBER" --squash --delete-branch
+```
+
+Re-run the orchestrator:
+
+```bash
+cd "$WORKDIR"
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run
+```
+
+Expected: the merge-advancement phase fires before
+`fetch_ready`, sees the PR as MERGED via
+`gh pr view <N> --json state`, removes the `turma-pr:<N>`
+label, closes the bd task, and cleans up the worktree.
+With no further ready tasks (the smoke spec has only one
+task), the main loop exits immediately.
+
+```
+reconcile: 0 in-progress tasks
+merge-advancement: <id> → MERGED, closed
+swarm: no ready tasks remain; done
+```
+
+Verify:
+
+```bash
+bd show "$TASK_ID"                            # status: closed
+                                              # turma-pr:<N> label gone
+git worktree list                             # the per-task worktree is gone
+git branch --list "task/smoke-run/$TASK_ID"   # empty — branch was deleted on cleanup
+```
+
+If the smoke feature had a dependent task chained off this
+one, that dependent would have become ready on this same
+run and the main loop would claim it. The single-task smoke
+exits early; an end-to-end test against a chain is the
+quickest way to feel the dependency unblock in motion.
+
+## Step 4 — Reconciliation on resume (`completion-pending`)
 
 Simulate a crash between `run_worker` success and `commit`: the
 worker wrote `.task_complete` into a per-task worktree but the
@@ -194,10 +249,11 @@ has no record of it).
 cd "$WORKDIR"
 
 # Re-transcribe to get a fresh open task. --force closes the task
-# that Step 2 completed and creates a new one; capture the new id
-# from bd directly rather than regex-parsing TRANSCRIBED.md, since
-# bd 1.0.2 uses `<prefix>-<hash>` ids (e.g. smoke-vl1), not the
-# older `bd-smoke-N` shape. `jq -e` fails loudly if the list is
+# that the merge-advancement sweep in Step 3 closed and creates a
+# new one; capture the new id from bd directly rather than
+# regex-parsing TRANSCRIBED.md, since bd 1.0.2 uses
+# `<prefix>-<hash>` ids (e.g. smoke-vl1), not the older
+# `bd-smoke-N` shape. `jq -e` fails loudly if the list is
 # unexpectedly empty instead of silently returning `null`.
 "$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-run --force
 NEW_ID=$(bd list --label feature:smoke-run --status open --json --limit 0 \
@@ -226,29 +282,34 @@ Run the orchestrator:
 ```
 
 Expected: reconciliation classifies `$NEW_ID` as
-`completion-pending` (`.task_complete` present, no open PR yet),
-the repair phase runs the normal commit + push + open_pr +
-close_task tail against the registered worktree, then the main
-loop finds nothing ready and exits.
+`completion-pending` (`.task_complete` present, no open PR
+yet), the repair phase runs `commit + push + open_pr +
+mark_pr_open` against the registered worktree (close + cleanup
+defer to merge advancement), then the main loop finds nothing
+ready and exits.
 
 ```
 reconcile: 1 in-progress task
 reconcile:   <NEW_ID> → completion-pending
-repair: <NEW_ID> → committed, pushed, PR opened (...), closed
+repair: <NEW_ID> → committed, pushed, PR opened (...; awaiting merge), labelled
 swarm: no ready tasks remain; done
 ```
 
 Verify:
 
 ```bash
-bd show "$NEW_ID" | head                         # status: closed
+bd show "$NEW_ID" | head                         # status: in_progress
+                                                 # labels include turma-pr:<N>
 gh pr list --head "task/smoke-run/$NEW_ID" \
   --state open --json url,number                  # one entry
-git worktree list                                 # the per-task worktree is gone
-git branch --list "task/smoke-run/$NEW_ID"        # empty — branch deleted on cleanup
+git worktree list                                 # per-task worktree still present
+git branch --list "task/smoke-run/$NEW_ID"        # branch still present
 ```
 
-## Step 4 — Failure path surfaces on `fail_task`
+(Merging this PR + re-running `turma run` would advance the
+task through merge-advancement just like Step 3.)
+
+## Step 5 — Failure path surfaces on `fail_task`
 
 Pre-populate another task that the worker will deliberately mark
 as failed:

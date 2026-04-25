@@ -115,17 +115,44 @@ implemented by the `turma run` orchestrator.
 ### State machine
 
 ```
-preflight → reconcile (read-only) → repair_phase → main_loop
+preflight → reconcile (read-only) → repair_phase
+  → merge_advancement_phase → main_loop
 ```
+
+`merge_advancement_phase` is the post-merge advancement sweep
+(see `openspec/changes/swarm-post-merge-advancement/`): for
+every `in_progress` task carrying a `turma-pr:<N>` label it
+queries `gh pr view <N> --json state` and dispatches:
+
+- `MERGED` → `unmark_pr_open` + `close_task` + `cleanup_worktree`.
+- `OPEN` → leave alone (drafts return `OPEN` from `gh`'s
+  `--json state` and fall through this branch unchanged).
+- `CLOSED` without merge → `fail_task` with reason
+  `"PR #<N> closed without merge"` so the retry budget
+  applies; worktree stays on disk for triage.
+- `gh` reports the PR as not found → halt with
+  `PlanningError`; the label is stale and the operator
+  triages.
+
+The sweep is read-only-then-mutate (one `get_pr_state_by_number`
+per labelled task, then the dispatch above); skipped under
+`--dry-run` apart from the PR-state read so dry-runs surface
+the same advancement signals without writing.
 
 `main_loop` runs, per task:
 
 ```
 fetch_ready → claim → setup_worktree → run_worker → (sentinel dispatch)
-  → commit → push → open_pr → close_task        (success path)
+  → commit → push → open_pr → mark_pr_open      (success path)
   OR
   → fail_task                                    (failure / timeout / clean-tree)
 ```
+
+`mark_pr_open` records the PR number on the Beads task via a
+`turma-pr:<N>` label and leaves the task in_progress. The
+matching `close_task` + `cleanup_worktree` only fires once
+the PR has been observed as MERGED by the next run's
+`merge_advancement_phase`.
 
 ### Authority model
 
