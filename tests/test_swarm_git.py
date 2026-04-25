@@ -317,3 +317,157 @@ def test_commit_all_surfaces_commit_subprocess_failure(
     adapter = _make_adapter_with_run(run)
     with pytest.raises(PlanningError, match="pre-commit: tests failed"):
         adapter.commit_all(tmp_path, "message")
+
+
+# ---------------------------------------------------------------------
+# fetch_and_ff_base (swarm-merge-advancement-stabilization Task 3)
+# ---------------------------------------------------------------------
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_pins_argv_shape(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Single-call colon-form fetch:
+    `git -C <repo_root> fetch origin <base>:<base>`.
+
+    The colon-form refspec fetches `origin/<base>` and fast-forwards
+    local `<base>` to match in one operation. No separate
+    `git merge --ff-only` step.
+    """
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    adapter = GitAdapter()
+    adapter.fetch_and_ff_base(tmp_path, "main")
+
+    mock_run.assert_called_once()
+    actual_argv = mock_run.call_args.args[0]
+    assert actual_argv == [
+        "git", "-C", str(tmp_path),
+        "fetch", "origin", "main:main",
+    ]
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_happy_path_returns_none(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Zero exit → method returns None (no payload). The colon-form
+    is silent on success; reading the up-to-date / advanced state
+    from stdout/stderr is cosmetic and not part of the contract."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout="",
+        stderr="From github.com:turma-dev/turma\n   abc..def  main → main\n",
+    )
+    adapter = GitAdapter()
+    assert adapter.fetch_and_ff_base(tmp_path, "main") is None
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_typed_error_on_non_fast_forward(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Local `<base>` has diverged from origin → typed PlanningError
+    naming the branch and pointing the operator at the two
+    `git log` commands needed to compare divergence directions.
+    Pin the substring `non-fast-forward` triggers this branch."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="",
+        stderr=(
+            "From github.com:turma-dev/turma\n"
+            " ! [rejected]        main -> main (non-fast-forward)\n"
+        ),
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+    msg = str(exc.value)
+    assert "main" in msg
+    assert "diverged" in msg.lower()
+    # Both triage directions named so the operator can compare.
+    assert "main..origin/main" in msg
+    assert "origin/main..main" in msg
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_typed_error_on_rejected_substring(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Some divergence-rejection messages from older git versions
+    use `! [rejected]` without the explicit `non-fast-forward`
+    parenthetical. Pin that the typed-error branch fires on
+    `[rejected]` too."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="",
+        stderr=(
+            "From github.com:turma-dev/turma\n"
+            " ! [rejected]        main -> main\n"
+        ),
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+    msg = str(exc.value)
+    assert "diverged" in msg.lower()
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_generic_error_preserves_stderr(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Network / auth failures (anything that isn't a
+    non-fast-forward / rejected signal) surface as PlanningError
+    with stderr preserved verbatim and a `git fetch failed:`
+    prefix so the operator can grep the run log."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=128,
+        stdout="",
+        stderr=(
+            "fatal: Could not read from remote repository.\n"
+            "Please make sure you have the correct access rights\n"
+            "and the repository exists.\n"
+        ),
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+    msg = str(exc.value)
+    assert "git fetch failed" in msg
+    assert "Could not read from remote" in msg
+    # Should NOT mention the diverged-triage hint for a non-divergence
+    # failure.
+    assert "main..origin/main" not in msg
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_branch_name_interpolated_into_typed_error(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """The typed error uses the supplied `base_branch` parameter,
+    not a hard-coded `main`. Operators with a non-default base
+    branch (e.g. `develop`) get useful triage commands."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="",
+        stderr=(
+            "From github.com:owner/repo\n"
+            " ! [rejected]        develop -> develop (non-fast-forward)\n"
+        ),
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "develop")
+    msg = str(exc.value)
+    assert "develop..origin/develop" in msg
+    assert "origin/develop..develop" in msg
+    assert "main" not in msg.replace("develop", "")  # no leaked default
