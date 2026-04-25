@@ -26,6 +26,7 @@ import pytest
 from turma.errors import PlanningError
 from turma.swarm import SwarmServices, run_swarm
 from turma.swarm._orchestrator import _pr_number_from_url
+from turma.swarm.pull_request import PrState
 from turma.swarm.worker import WorkerInvocation, WorkerResult
 from turma.swarm.worktree import WorktreeRef
 from turma.transcription.beads import BeadsTaskRef
@@ -192,6 +193,11 @@ class StubPr:
     url: str = "https://github.com/example/repo/pull/1"
     open_raises: PlanningError | None = None
     find_raises: PlanningError | None = None
+    # Per-PR-number response table for `get_pr_state_by_number`.
+    # `None` value means raise `PlanningError("...not found via gh...")`
+    # (the typed 404 path the merge-advancement sweep recognizes).
+    pr_states: dict[int, PrState | None] = field(default_factory=dict)
+    state_raises: PlanningError | None = None
     calls: list[tuple] = field(default_factory=list)
 
     def open_pr(
@@ -207,6 +213,29 @@ class StubPr:
         if self.find_raises is not None:
             raise self.find_raises
         return None
+
+    def get_pr_state_by_number(self, pr_number: int) -> PrState:
+        self.calls.append(("get_pr_state_by_number", pr_number))
+        if self.state_raises is not None:
+            raise self.state_raises
+        configured = self.pr_states.get(pr_number)
+        if configured is None and pr_number in self.pr_states:
+            # Explicit None → simulate the 404 typed error.
+            raise PlanningError(
+                f"PR #{pr_number} not found via gh; the "
+                f"`turma-pr:{pr_number}` label is stale. Triage with "
+                "`bd show <task_id>` and `gh pr list --search "
+                "'head:task/<feature>/'`."
+            )
+        if configured is None:
+            # Unconfigured number defaults to OPEN — convenient for
+            # tests that don't care about the state.
+            return PrState(
+                number=pr_number,
+                state="OPEN",
+                url=f"https://example/pull/{pr_number}",
+            )
+        return configured
 
 
 class StubWorker:
@@ -615,9 +644,18 @@ def test_repair_missing_worktree_path(tmp_path: Path) -> None:
     )
 
 
-def test_repair_completion_pending_runs_commit_push_pr_close(
+def test_repair_completion_pending_runs_commit_push_pr_label(
     tmp_path: Path,
 ) -> None:
+    """Reconciliation-detected `completion-pending` repair tail runs
+    commit + push + open_pr + mark_pr_open. close_task and
+    cleanup are deferred to the merge-advancement sweep on a
+    future invocation, mirroring `_run_single_task`'s
+    Task-3 defer-close shape.
+
+    Reconciliation classifies as `completion-pending` (not
+    `…-with-pr`) because `find_open_pr_url_for_branch` returns
+    None — no pre-existing PR on this branch."""
     _scratch_feature(tmp_path)
     task = _ref("bd-done", title="Complete me")
     beads = StubBeads(
@@ -630,24 +668,37 @@ def test_repair_completion_pending_runs_commit_push_pr_close(
     worktree.mkdir(parents=True)
     (worktree / ".task_complete").write_text("DONE\n")
 
-    services, wt, git, pr, worker = _make_services(
-        tmp_path, beads=beads
+    pr = StubPr()
+    # After the repair phase opens a PR, the merge-advancement
+    # sweep runs against the labelled task. Default StubPr URL
+    # ends in /pull/1 → the sweep looks up PR #1, which we
+    # configure to return OPEN so it leaves the task alone.
+    pr.pr_states = {1: PrState(number=1, state="OPEN", url="x")}
+
+    services, wt, git, _, worker = _make_services(
+        tmp_path, beads=beads, pr=pr
     )
     run_swarm("oauth", services=services)
 
+    # Repair tail ran commit + push + open_pr.
     git_steps = [c[0] for c in git.calls]
     assert "commit_all" in git_steps
     assert "push_branch" in git_steps
-    assert [c[0] for c in pr.calls] == [
-        "find_open_pr_url_for_branch",  # reconciliation's lookup
-        "open_pr",                      # repair-phase tail
-    ]
-    assert beads.closed == ["bd-done"]
+    assert any(c[0] == "open_pr" for c in pr.calls)
+    # Task labelled; not closed; worktree NOT cleaned up.
+    assert beads.pr_marked == [("bd-done", 1)]
+    assert beads.closed == []
+    assert not any(c[0] == "cleanup" for c in wt.calls)
 
 
-def test_repair_completion_pending_with_pr_closes_and_cleans(
+def test_repair_completion_pending_with_pr_labels_and_leaves(
     tmp_path: Path,
 ) -> None:
+    """Reconciliation-detected `completion-pending-with-pr`: PR
+    already open for the task branch. Repair handler labels the
+    task with the existing PR's number and leaves it
+    in_progress; close + cleanup happen later via the
+    merge-advancement sweep when the PR is observed as MERGED."""
     _scratch_feature(tmp_path)
     task = _ref("bd-has-pr")
     beads = StubBeads(in_progress=(task,), ready_queue=[()])
@@ -655,23 +706,24 @@ def test_repair_completion_pending_with_pr_closes_and_cleans(
     worktree.mkdir(parents=True)
     (worktree / ".task_complete").write_text("DONE\n")
 
-    pr = StubPr(url="https://github.com/example/repo/pull/9")
-    # Pre-existing PR for this branch → PR lookup returns a URL.
-    pr.url = "https://github.com/example/repo/pull/9"
-    # Hack: StubPr's find method returns None by default; flip it by
-    # monkeypatching to return a URL for this branch.
+    pr = StubPr()
     existing_url = "https://github.com/example/repo/pull/9"
     pr.find_open_pr_url_for_branch = lambda branch: existing_url  # type: ignore[assignment]
+    # Merge-advancement sweep will see pr-9 — configure it OPEN
+    # so it leaves the task alone after the repair label.
+    pr.pr_states = {9: PrState(number=9, state="OPEN", url="x")}
 
     services, wt, git, _, worker = _make_services(
         tmp_path, beads=beads, pr=pr
     )
     run_swarm("oauth", services=services)
 
-    # No new PR opened; task closed; worktree cleaned up.
+    # No new PR opened; task labelled with PR #9 (parsed from
+    # the existing URL); not closed; worktree NOT cleaned up.
     assert not any(c[0] == "open_pr" for c in pr.calls)
-    assert beads.closed == ["bd-has-pr"]
-    assert any(c[0] == "cleanup" for c in wt.calls)
+    assert beads.pr_marked == [("bd-has-pr", 9)]
+    assert beads.closed == []
+    assert not any(c[0] == "cleanup" for c in wt.calls)
 
 
 def test_repair_failure_pending_calls_fail_task(tmp_path: Path) -> None:
@@ -1097,3 +1149,366 @@ def test_pr_number_from_url_rejects_url_with_query_string() -> None:
         _pr_number_from_url(
             "https://github.com/owner/repo/pull/1?tab=conversation"
         )
+
+
+# ---------------------------------------------------------------------
+# Merge-advancement phase
+# ---------------------------------------------------------------------
+
+
+def _ref_with_pr_label(
+    task_id: str, pr_number: int, *, title: str = "t"
+) -> BeadsTaskRef:
+    """Build a BeadsTaskRef whose labels carry `turma-pr:<N>`. The
+    merge-advancement sweep filters tasks by this label."""
+    return BeadsTaskRef(
+        id=task_id,
+        title=title,
+        labels=("feature:oauth", f"turma-pr:{pr_number}"),
+    )
+
+
+def _setup_labelled_task_for_advancement(
+    tmp_path: Path,
+    task_id: str,
+    pr_number: int,
+) -> None:
+    """Create the on-disk state reconciliation expects for a
+    labelled in_progress task to survive the repair phase intact:
+    a worktree directory with `.task_complete` plus a stubbed
+    `find_open_pr_url_for_branch` (set up by the caller) so
+    reconciliation classifies as `completion-pending-with-pr` and
+    the repair phase's label-and-leave handler runs idempotently
+    (the label is already present), letting merge-advancement
+    operate on the still-in_progress task."""
+    worktree = tmp_path / ".worktrees" / "oauth" / task_id
+    worktree.mkdir(parents=True)
+    (worktree / ".task_complete").write_text("DONE\n")
+
+
+def test_merge_advancement_merged_path(tmp_path: Path) -> None:
+    """Single in_progress task with `turma-pr:5`, gh returns MERGED.
+    Sweep unmarks the label, closes the bd task, and cleans the
+    worktree — exactly the steps the prior success path used to
+    fire at PR-open time, now relocated."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", 5)
+    task = _ref_with_pr_label("bd-1", 5)
+    beads = StubBeads(in_progress=(task,))
+    pr = StubPr(
+        pr_states={
+            5: PrState(
+                number=5,
+                state="MERGED",
+                url="https://github.com/o/r/pull/5",
+            )
+        }
+    )
+    # Reconciliation classifies as completion-pending-with-pr;
+    # repair phase labels (idempotent — already labelled);
+    # merge-advancement then sees MERGED and closes.
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
+
+    services, wt, git, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    run_swarm("oauth", services=services)
+
+    # bd: unmark → close, in that order.
+    bd_call_order = [
+        c[0] for c in beads.calls
+        if c[0] in ("unmark_pr_open", "close_task")
+    ]
+    assert bd_call_order == ["unmark_pr_open", "close_task"]
+    assert beads.pr_unmarked == [("bd-1", 5)]
+    assert beads.closed == ["bd-1"]
+    # Worktree cleaned up.
+    assert any(c[0] == "cleanup" for c in wt.calls)
+    # No fail_task fired.
+    assert beads.failed == []
+
+
+def test_merge_advancement_open_leaves_alone(tmp_path: Path) -> None:
+    """`gh` returns OPEN — task stays in_progress, label intact,
+    no Beads / worktree mutation. Main loop runs normally
+    afterwards."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", 5)
+    task = _ref_with_pr_label("bd-1", 5)
+    beads = StubBeads(in_progress=(task,))
+    pr = StubPr(
+        pr_states={
+            5: PrState(
+                number=5,
+                state="OPEN",
+                url="https://github.com/o/r/pull/5",
+            )
+        }
+    )
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
+
+    services, wt, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    run_swarm("oauth", services=services)
+
+    # Repair phase labels (idempotent), merge-advancement sees
+    # OPEN → leave alone. No close, no fail, no cleanup.
+    assert beads.pr_unmarked == []
+    assert beads.closed == []
+    assert beads.failed == []
+    assert not any(c[0] == "cleanup" for c in wt.calls)
+
+
+def test_merge_advancement_draft_pr_treated_as_open(
+    tmp_path: Path,
+) -> None:
+    """`gh pr view --json state` returns "OPEN" for draft PRs;
+    the v1 contract is "treat drafts as OPEN" (the adapter does
+    not query `isDraft`). Pin that the merge-advancement sweep
+    leaves draft-state tasks alone, identical to non-draft OPEN."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", 5)
+    task = _ref_with_pr_label("bd-1", 5)
+    beads = StubBeads(in_progress=(task,))
+    # `state == "OPEN"` mirrors what `gh` returns for both
+    # drafts and non-drafts; the adapter contract is identical.
+    pr = StubPr(
+        pr_states={
+            5: PrState(
+                number=5,
+                state="OPEN",
+                url="https://github.com/o/r/pull/5",
+            )
+        }
+    )
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
+    services, _, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    run_swarm("oauth", services=services)
+
+    assert beads.pr_unmarked == []
+    assert beads.closed == []
+    assert beads.failed == []
+
+
+def test_merge_advancement_closed_without_merge_with_budget_remaining(
+    tmp_path: Path,
+) -> None:
+    """`gh` returns CLOSED — sweep unmarks the label and routes
+    through `_handle_failure`. Budget remaining → task returns
+    to `open` and becomes ready again on a future run."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", 5)
+    task = _ref_with_pr_label("bd-1", 5)
+    beads = StubBeads(in_progress=(task,))
+    pr = StubPr(
+        pr_states={
+            5: PrState(
+                number=5,
+                state="CLOSED",
+                url="https://github.com/o/r/pull/5",
+            )
+        }
+    )
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
+    services, _, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr, max_retries=1
+    )
+
+    run_swarm("oauth", services=services)
+
+    # unmark fired before fail_task (clean label first).
+    bd_call_order = [
+        c[0] for c in beads.calls
+        if c[0] in ("unmark_pr_open", "fail_task")
+    ]
+    assert bd_call_order == ["unmark_pr_open", "fail_task"]
+    # The reason landed on the bd task.
+    assert beads.failed[0][1] == "PR #5 closed without merge"
+    # Not closed (just labelled fail; budget remaining returns to
+    # open via fail_task).
+    assert beads.closed == []
+
+
+def test_merge_advancement_closed_without_merge_exhausted_halts(
+    tmp_path: Path,
+) -> None:
+    """CLOSED + already-at-budget-ceiling → halt run with a
+    terminal `PlanningError` naming the task."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", 5)
+    task = _ref_with_pr_label("bd-1", 5)
+    beads = StubBeads(
+        in_progress=(task,),
+        retries={"bd-1": 1},  # at the ceiling for max_retries=1
+    )
+    pr = StubPr(
+        pr_states={
+            5: PrState(
+                number=5,
+                state="CLOSED",
+                url="https://github.com/o/r/pull/5",
+            )
+        }
+    )
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
+    services, _, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr, max_retries=1
+    )
+
+    with pytest.raises(
+        PlanningError,
+        match="budget exhausted on bd-1.*merge-advancement",
+    ):
+        run_swarm("oauth", services=services)
+
+    assert beads.pr_unmarked == [("bd-1", 5)]
+
+
+def test_merge_advancement_multi_task_sweep(tmp_path: Path) -> None:
+    """Three labelled tasks across MERGED / OPEN / CLOSED. Each
+    handler fires once in iteration order; the OPEN task is
+    untouched; the run reaches `fetch_ready` (no exhaustion).
+
+    Reconciliation classifies all three as
+    `completion-pending-with-pr` — `find_open_pr_url_for_branch`
+    must return a URL. The repair phase labels each (idempotent
+    on the already-labelled tasks). Then merge-advancement
+    dispatches per gh's reported state."""
+    _scratch_feature(tmp_path)
+    for tid, n in [("bd-merged", 1), ("bd-open", 2), ("bd-closed", 3)]:
+        _setup_labelled_task_for_advancement(tmp_path, tid, n)
+    t_merged = _ref_with_pr_label("bd-merged", 1)
+    t_open = _ref_with_pr_label("bd-open", 2)
+    t_closed = _ref_with_pr_label("bd-closed", 3)
+    beads = StubBeads(
+        in_progress=(t_merged, t_open, t_closed),
+    )
+    pr = StubPr(
+        pr_states={
+            1: PrState(number=1, state="MERGED", url="x"),
+            2: PrState(number=2, state="OPEN", url="x"),
+            3: PrState(number=3, state="CLOSED", url="x"),
+        }
+    )
+    # Branch-keyed URL lookup so the repair phase labels each
+    # task with its correct PR number.
+    branch_to_url = {
+        "task/oauth/bd-merged": "https://github.com/o/r/pull/1",
+        "task/oauth/bd-open": "https://github.com/o/r/pull/2",
+        "task/oauth/bd-closed": "https://github.com/o/r/pull/3",
+    }
+    pr.find_open_pr_url_for_branch = lambda b: branch_to_url[b]  # type: ignore[assignment]
+
+    services, _, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr, max_retries=1
+    )
+
+    run_swarm("oauth", services=services)
+
+    # MERGED task: unmark + close. CLOSED task: unmark + fail.
+    # OPEN task: untouched.
+    assert beads.pr_unmarked == [
+        ("bd-merged", 1),
+        ("bd-closed", 3),
+    ]
+    assert beads.closed == ["bd-merged"]
+    assert [e[0] for e in beads.failed] == ["bd-closed"]
+
+
+def test_merge_advancement_404_halts_with_typed_error(
+    tmp_path: Path,
+) -> None:
+    """Recorded PR number doesn't exist on GitHub. The sweep
+    raises a typed `PlanningError` naming the task and PR
+    number; the run halts before the main loop. No mutations
+    to the task that triggered it.
+
+    The test pre-labels the task in bd state directly and skips
+    `find_open_pr_url_for_branch` (returning None) so
+    reconciliation classifies as `completion-pending` rather
+    than `completion-pending-with-pr` — the repair phase then
+    runs `_complete_pending_task` which would open a NEW PR…
+    which we don't want here. Easier: drop the worktree so
+    reconciliation classifies as `missing-worktree`, repair
+    fail_tasks the existing task. But we want
+    merge-advancement to fire on the labelled-but-stale 404
+    case. The cleanest is to inject the labelled task purely
+    into the merge-advancement input (in_progress) without
+    triggering reconciliation paths — possible by giving the
+    task a worktree directory that survives reconciliation as
+    `completion-pending-with-pr` against an existing PR URL,
+    then have merge-advancement encounter a 404 on the
+    *recorded* number (different from the find URL)."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-stale", 9999)
+    task = _ref_with_pr_label("bd-stale", 9999)
+    beads = StubBeads(in_progress=(task,))
+    pr = StubPr(pr_states={9999: None})  # explicit 404 trigger
+    # find returns a different URL; reconciliation labels
+    # with PR #1, not 9999. But the existing label is
+    # turma-pr:9999 (from the BeadsTaskRef fixture); bd's
+    # `--add-label` is idempotent, so the second label is
+    # additive, not replacing. _extract_pr_number picks the
+    # first match — `turma-pr:9999` (deterministic order).
+    pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/1"  # type: ignore[assignment]
+
+    services, _, _, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    with pytest.raises(
+        PlanningError, match="PR #9999 for task bd-stale not found"
+    ):
+        run_swarm("oauth", services=services)
+
+    # No `unmark_pr_open` for the failing task — the sweep
+    # raises before mutation.
+    assert ("bd-stale", 9999) not in beads.pr_unmarked
+    assert beads.closed == []
+
+
+def test_merge_advancement_dry_run_is_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On `--dry-run`, the sweep queries PR state but performs no
+    Beads / worktree mutations. Operator-facing log lines get a
+    `would: ` prefix so the preview is unambiguous.
+
+    Dry-run skips the repair phase entirely (existing behavior)
+    so the labelled tasks reach merge-advancement directly. No
+    fixture worktree / find_open_pr stubbing needed."""
+    _scratch_feature(tmp_path)
+    t_merged = _ref_with_pr_label("bd-merged", 1)
+    t_closed = _ref_with_pr_label("bd-closed", 3)
+    beads = StubBeads(in_progress=(t_merged, t_closed))
+    pr = StubPr(
+        pr_states={
+            1: PrState(number=1, state="MERGED", url="x"),
+            3: PrState(number=3, state="CLOSED", url="x"),
+        }
+    )
+    services, wt, git, _, _ = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    run_swarm("oauth", services=services, dry_run=True)
+
+    # PR-state queries fired.
+    assert ("get_pr_state_by_number", 1) in pr.calls
+    assert ("get_pr_state_by_number", 3) in pr.calls
+    # No mutations.
+    assert beads.pr_unmarked == []
+    assert beads.closed == []
+    assert beads.failed == []
+    assert not any(c[0] == "cleanup" for c in wt.calls)
+    # `would: ` prefix appears in stdout for each mutating-class
+    # finding.
+    captured = capsys.readouterr()
+    assert "would: merge-advancement: bd-merged → MERGED" in captured.out
+    assert "would: merge-advancement: bd-closed → CLOSED" in captured.out
