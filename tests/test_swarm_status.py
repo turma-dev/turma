@@ -259,7 +259,10 @@ def test_status_readout_never_calls_any_mutation_surface(
 
     status_readout("oauth", services=services, repo_root=tmp_path)
 
-    mutating_bd = {"claim_task", "close_task", "fail_task"}
+    mutating_bd = {
+        "claim_task", "close_task", "fail_task",
+        "mark_pr_open", "unmark_pr_open",
+    }
     mutating_wt = {"setup", "cleanup"}
     mutating_git = {"status_is_dirty", "commit_all", "push_branch"}
     mutating_pr = {"open_pr"}
