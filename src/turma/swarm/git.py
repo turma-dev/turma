@@ -112,6 +112,63 @@ class GitAdapter:
             step="git push",
         )
 
+    def fetch_and_ff_base(
+        self, repo_root: Path, base_branch: str
+    ) -> None:
+        """Fast-forward local `<base_branch>` from origin in one
+        subprocess call.
+
+        argv: `git -C <repo_root> fetch origin <base_branch>:<base_branch>`.
+
+        The colon-form refspec fetches `origin/<base_branch>` and
+        fast-forwards local `<base_branch>` to match in a single
+        operation. The operator's current HEAD / checked-out branch
+        is not disturbed, which matters because the orchestrator
+        runs from the operator's shell — they may be on a feature
+        branch with local edits.
+
+        Without this fetch, a `turma run` claiming a dependent task
+        would `git worktree add` from a stale local
+        `<base_branch>`, missing the merge of the parent's PR
+        that just landed on origin. See
+        `openspec/changes/swarm-merge-advancement-stabilization/
+        design.md` "`GitAdapter.fetch_and_ff_base`" for why this
+        beats a two-call `fetch + merge --ff-only` alternative.
+
+        Failure mapping:
+        - Local `<base_branch>` has diverged from origin →
+          `PlanningError` naming the branch and pointing at the
+          two `git log <a>..<b>` triage commands operators need
+          to compare divergence directions. Triggered by either
+          `non-fast-forward` or `[rejected]` in stderr.
+        - Any other non-zero exit (network, auth, etc.) →
+          `PlanningError` preserving stderr verbatim with a
+          `git fetch failed:` prefix.
+        """
+        argv = [
+            "git", "-C", str(repo_root),
+            "fetch", "origin", f"{base_branch}:{base_branch}",
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+
+        stderr = result.stderr or ""
+        if "non-fast-forward" in stderr or "[rejected]" in stderr:
+            raise PlanningError(
+                f"local {base_branch} has diverged from "
+                f"origin/{base_branch}; refusing to fast-forward. "
+                f"Triage with `git log "
+                f"{base_branch}..origin/{base_branch}` and "
+                f"`git log origin/{base_branch}..{base_branch}` "
+                f"to compare directions.\n{stderr.strip()}"
+            )
+
+        detail = stderr.strip() or (result.stdout or "").strip() or "unknown error"
+        raise PlanningError(
+            f"git fetch failed: exit {result.returncode}\n{detail}"
+        )
+
     @staticmethod
     def _run(
         argv: list[str],
