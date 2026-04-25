@@ -188,12 +188,19 @@ observes the merge, closes the Beads task, and removes the
 worktree without the operator having to touch bd or the
 worktree directly.
 
-Merge the PR opened in Step 2:
+Merge the PR opened in Step 2. Deliberately do NOT pass
+`--delete-branch` to `gh pr merge`: that flag deletes the
+remote branch as part of the merge, which would obscure the
+verification below. We want any branch removal in the verify
+step to be attributable to `WorktreeManager.cleanup`, not to
+gh's bookkeeping. The remote branch will still be present
+after the merge; the post-Cleanup section handles deleting
+it manually.
 
 ```bash
 PR_NUMBER=$(gh pr list --head "task/smoke-run/$TASK_ID" \
               --state open --json number --jq '.[0].number')
-gh pr merge "$PR_NUMBER" --squash --delete-branch
+gh pr merge "$PR_NUMBER" --squash
 ```
 
 Re-run the orchestrator:
