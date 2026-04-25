@@ -532,55 +532,74 @@ class BeadsAdapter:
         self._run(argv, step="bd update (fail_task)")
 
     def mark_pr_open(self, task_id: str, pr_number: int) -> None:
-        """Add `turma-pr:<N>` to `task_id`'s labels.
+        """Set the task's `turma-pr:` label to exactly `<N>`.
 
-        Idempotent at the adapter level: prechecks the task's
-        current labels via `bd show <id> --json` and skips
-        `bd update --add-label` when `turma-pr:<N>` is already
-        present. bd 1.0.2 itself appears to treat repeated
-        `--add-label` as set-like in practice (verified
-        empirically: three consecutive `--add-label turma-pr:42`
-        calls yield one label, not three), so the precheck is
-        belt-and-suspenders rather than load-bearing — pinning
-        idempotency at the adapter means callers don't have to
-        depend on bd's internals. Mirrors the contract
-        `unmark_pr_open` already has via bd's `--remove-label`
-        no-op semantics.
+        **Set-of-one invariant**: after this method returns, the
+        task carries at most one `turma-pr:` label, and it matches
+        `pr_number`. Any prior `turma-pr:<M>` (M != N) labels are
+        removed first, then `turma-pr:<N>` is added (or, if it was
+        already present, the add is skipped). This invariant
+        prevents stale labels from accumulating on closed tasks —
+        the smoke that motivated
+        `swarm-merge-advancement-stabilization` showed exactly this
+        accumulation when reconciliation re-marked a task whose PR
+        had already been merged. See that arc's `design.md`
+        "`mark_pr_open` becomes set-of-one" for the rationale.
 
         Called from the orchestrator's success path immediately
-        after `open_pr` returns, replacing the prior `close_task`
-        + `cleanup_worktree` tail. Also called from the repair
-        phase's `CompletionPendingWithPr` arm, which may fire on
-        every `turma run` until the PR merges — that callsite
-        relies on this method's idempotency to avoid duplicate-
-        label noise.
+        after `open_pr` returns, and from the repair phase's
+        `CompletionPendingWithPr` arm. Either callsite may fire
+        repeatedly across runs while a PR is awaiting merge —
+        idempotency + set-of-one means re-issuing
+        `mark_pr_open(task, N)` against an already-correct task
+        does nothing harmful (and cleans up any stale `turma-pr:`
+        labels found alongside the target as a side effect).
 
-        argv: `bd show <task_id> --json` (always); then
-        `bd update <task_id> --add-label turma-pr:<N>` (only
-        when the label is absent).
+        argv:
+        - `bd show <task_id> --json` (always — the precheck).
+        - `bd update <task_id> --remove-label turma-pr:<M>` for each
+          stale `turma-pr:<M>` label found in the precheck (M != N).
+        - `bd update <task_id> --add-label turma-pr:<N>` (only when
+          the target label is absent).
         """
-        label = f"{PR_LABEL_PREFIX}{pr_number}"
-        if self._label_present(task_id, label):
+        target = f"{PR_LABEL_PREFIX}{pr_number}"
+        labels = self._fetch_labels(task_id)
+        target_present = target in labels
+        stale = tuple(
+            label
+            for label in labels
+            if label.startswith(PR_LABEL_PREFIX) and label != target
+        )
+        for stale_label in stale:
+            self._run(
+                [
+                    "bd", "update", task_id,
+                    "--remove-label", stale_label,
+                ],
+                step="bd update (mark_pr_open stale cleanup)",
+            )
+        if target_present:
             return
         self._run(
             [
                 "bd", "update", task_id,
-                "--add-label", label,
+                "--add-label", target,
             ],
             step="bd update (mark_pr_open)",
         )
 
-    def _label_present(self, task_id: str, label: str) -> bool:
-        """True if `task_id` already carries `label`.
+    def _fetch_labels(self, task_id: str) -> tuple[str, ...]:
+        """Return the task's current label list as a tuple of
+        strings.
 
-        Used by `mark_pr_open` to make the add-label call
-        idempotent. `bd show` parse failures surface as
+        Used by `mark_pr_open` to enforce the set-of-one
+        invariant. `bd show` parse failures surface as
         `PlanningError` rather than being silently treated as
         label-absent — masking that would let `mark_pr_open`
-        issue a write against a task we couldn't actually
-        inspect. Empty stdout (e.g. unknown task id) IS treated
-        as absent; the subsequent `bd update` will then surface
-        bd's own not-found error.
+        issue writes against a task we couldn't actually inspect.
+        Empty stdout (e.g. unknown task id) returns the empty
+        tuple; the subsequent `bd update` will then surface bd's
+        own not-found error.
         """
         result = self._run(
             ["bd", "show", task_id, "--json"],
@@ -588,7 +607,7 @@ class BeadsAdapter:
         )
         payload = result.stdout.strip()
         if not payload:
-            return False
+            return ()
         try:
             data = json.loads(payload)
         except json.JSONDecodeError as exc:
@@ -597,7 +616,7 @@ class BeadsAdapter:
             ) from exc
         if isinstance(data, list):
             if not data:
-                return False
+                return ()
             data = data[0]
         if not isinstance(data, dict):
             raise PlanningError(
@@ -605,8 +624,8 @@ class BeadsAdapter:
                 f"{type(data).__name__}"
             )
         labels = data.get("labels") or []
-        return any(
-            isinstance(item, str) and item == label for item in labels
+        return tuple(
+            label for label in labels if isinstance(label, str)
         )
 
     def unmark_pr_open(self, task_id: str, pr_number: int) -> None:

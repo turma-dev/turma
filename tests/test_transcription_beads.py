@@ -861,6 +861,153 @@ def test_mark_pr_open_treats_empty_show_as_label_absent() -> None:
     assert any(a[:2] == ["bd", "update"] for a in seen)
 
 
+# Set-of-one tests (swarm-merge-advancement-stabilization Task 2) ------
+
+
+def test_mark_pr_open_replaces_prior_pr_label(
+) -> None:
+    """When the task carries `turma-pr:<M>` and `mark_pr_open(task,
+    N)` is called with N != M, the adapter removes the stale label
+    before adding the new one. Pin the order: precheck → remove old
+    → add new."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "id": "bd-42",
+                        "labels": ["feature:oauth", "turma-pr:5"],
+                    }
+                ),
+            )
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 6)
+
+    assert seen == [
+        ["bd", "show", "bd-42", "--json"],
+        ["bd", "update", "bd-42", "--remove-label", "turma-pr:5"],
+        ["bd", "update", "bd-42", "--add-label", "turma-pr:6"],
+    ]
+
+
+def test_mark_pr_open_precheck_skip_still_cleans_up_stale_labels(
+) -> None:
+    """The set-of-one invariant holds even on the precheck-skip
+    path. If the task carries `turma-pr:<N>` (target present) AND
+    a stale `turma-pr:<M>` (M != N), the adapter removes the stale
+    label and skips the add. Pins that re-issuing `mark_pr_open`
+    against an already-correct task also cleans up corruption
+    from pre-fix runs."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "id": "bd-42",
+                        "labels": [
+                            "feature:oauth",
+                            "turma-pr:5",
+                            "turma-pr:6",
+                        ],
+                    }
+                ),
+            )
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 5)
+
+    # bd update --remove-label turma-pr:6 fires; --add-label
+    # turma-pr:5 does NOT (already present).
+    assert seen == [
+        ["bd", "show", "bd-42", "--json"],
+        ["bd", "update", "bd-42", "--remove-label", "turma-pr:6"],
+    ]
+
+
+def test_mark_pr_open_removes_multiple_stale_labels_before_add(
+) -> None:
+    """A task somehow carrying TWO stale `turma-pr:` labels (from
+    a pre-fix run) gets both removed before the new label is
+    added. Removal order is deterministic (mirrors the iteration
+    order of the bd show payload) but not load-bearing — what
+    matters is that all removes happen before the add."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "id": "bd-42",
+                        "labels": [
+                            "feature:oauth",
+                            "turma-pr:5",
+                            "turma-pr:7",
+                        ],
+                    }
+                ),
+            )
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 9)
+
+    # Both stale labels must be removed before the new label is
+    # added.
+    assert seen[0] == ["bd", "show", "bd-42", "--json"]
+    assert seen[-1] == [
+        "bd", "update", "bd-42", "--add-label", "turma-pr:9"
+    ]
+    middle = seen[1:-1]
+    # Two remove-label calls in some order; same task id; both
+    # match `turma-pr:` of the stale numbers.
+    assert len(middle) == 2
+    assert {tuple(c) for c in middle} == {
+        ("bd", "update", "bd-42", "--remove-label", "turma-pr:5"),
+        ("bd", "update", "bd-42", "--remove-label", "turma-pr:7"),
+    }
+
+
+def test_mark_pr_open_no_change_when_only_target_label_present(
+) -> None:
+    """Sanity pin for the simplest set-of-one path: target label
+    present and no stale labels → precheck only, no writes. This
+    is the steady-state post-fix scenario."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "id": "bd-42",
+                        "labels": ["feature:oauth", "turma-pr:5"],
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 5)
+
+    assert seen == [["bd", "show", "bd-42", "--json"]]
+
+
 def test_unmark_pr_open_pins_argv() -> None:
     seen: list[list[str]] = []
 
