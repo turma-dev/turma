@@ -2,24 +2,24 @@
 
 ### 1. Add `BeadsAdapter.mark_pr_open` / `unmark_pr_open`
 
-- [ ] Add `mark_pr_open(task_id: str, pr_number: int) -> None`
+- [x] Add `mark_pr_open(task_id: str, pr_number: int) -> None`
       to `BeadsAdapter` in `src/turma/transcription/beads.py`.
       argv pinned: `bd update <task_id> --add-label
       turma-pr:<N>`.
-- [ ] Add `unmark_pr_open(task_id: str, pr_number: int) ->
+- [x] Add `unmark_pr_open(task_id: str, pr_number: int) ->
       None`. argv pinned: `bd update <task_id> --remove-label
       turma-pr:<N>`. Both methods raise `PlanningError` on
       non-zero exit, matching the existing label surface used
       by `fail_task`.
-- [ ] Module-level constant `PR_LABEL_PREFIX = "turma-pr:"` so
+- [x] Module-level constant `PR_LABEL_PREFIX = "turma-pr:"` so
       the label string is defined once. Mirrors the existing
       `RETRIES_LABEL_PREFIX` constant.
-- [ ] Add a small helper `_extract_pr_number(labels) ->
+- [x] Add a small helper `_extract_pr_number(labels) ->
       int | None` (parallel to the existing
       `_parse_retries_from_labels`) so the merge-advancement
       sweep doesn't reach into label string parsing
       directly.
-- [ ] Tests in `tests/test_transcription_beads.py`: argv pin
+- [x] Tests in `tests/test_transcription_beads.py`: argv pin
       for both methods; `_extract_pr_number` returns `None`
       when no `turma-pr:` label is present, returns `N` when
       one is, ignores malformed values
@@ -28,23 +28,23 @@
 
 ### 2. Add `PullRequestAdapter.get_pr_state_by_number`
 
-- [ ] Add a frozen `PrState(number: int, state: str, url:
+- [x] Add a frozen `PrState(number: int, state: str, url:
       str)` dataclass to `src/turma/swarm/pull_request.py`.
       `state` preserved as-returned by `gh`'s `--json state`
       vocabulary: `OPEN` / `MERGED` / `CLOSED`. v1 does not
       query `isDraft`; draft PRs return `state == "OPEN"`
       and are treated identically to non-draft open PRs.
-- [ ] Add `get_pr_state_by_number(pr_number: int) -> PrState`.
+- [x] Add `get_pr_state_by_number(pr_number: int) -> PrState`.
       argv pinned: `gh pr view <pr_number> --json
       number,state,url`.
-- [ ] Non-zero exit raises `PlanningError`. The
+- [x] Non-zero exit raises `PlanningError`. The
       "no pull requests found" / 404 case is recognized by
       checking `result.stderr` for the gh-canonical phrase;
       surfaces with a typed message that names the missing
       PR number and points the operator at `bd show
       <task_id>` for triage.
-- [ ] Non-JSON / non-dict payloads raise `PlanningError`.
-- [ ] Tests in `tests/test_swarm_pull_request.py`:
+- [x] Non-JSON / non-dict payloads raise `PlanningError`.
+- [x] Tests in `tests/test_swarm_pull_request.py`:
       argv shape; happy-path parses a single payload across
       each of the four states; 404 path produces the typed
       "PR <N> not found" error; non-zero non-404 exit
@@ -53,7 +53,7 @@
 
 ### 3. Switch the success path to label-and-leave-in-progress
 
-- [ ] In `src/turma/swarm/_orchestrator.py`'s
+- [x] In `src/turma/swarm/_orchestrator.py`'s
       `_run_single_task`, replace the
       `services.beads.close_task(task.id)` +
       `services.worktree.cleanup(ref)` tail (after a
@@ -61,17 +61,17 @@
       `services.beads.mark_pr_open(task.id,
       _pr_number_from_url(pr_url))` call. The task remains
       `in_progress` and the worktree stays on disk.
-- [ ] Add a small helper `_pr_number_from_url(url: str) ->
+- [x] Add a small helper `_pr_number_from_url(url: str) ->
       int` that parses GitHub PR URLs (the URL `gh pr
       create` returns is the canonical
       `https://github.com/<owner>/<repo>/pull/<N>` shape).
       Raise `PlanningError` on a URL that doesn't match the
       pattern; the orchestrator depends on the number.
-- [ ] Operator-facing log line updated: replace
+- [x] Operator-facing log line updated: replace
       `swarm: closed <id> (PR: <url>)` with
       `swarm: opened <id> (PR: <url>; awaiting merge)` so
       the new contract is unambiguous in the run log.
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       `test_single_task_happy_loop` updates from
       `assert beads.closed == ["bd-1"]` to
       `assert beads.pr_marked == [("bd-1", <N>)]`. Stub
@@ -82,26 +82,26 @@
       `test_max_tasks_caps_iterations`,
       `test_claim_race_skips_raced_task_and_continues`)
       update equivalently.
-- [ ] Tests in `tests/test_swarm_run.py` for
+- [x] Tests in `tests/test_swarm_run.py` for
       `_pr_number_from_url`: parses a canonical URL,
       raises on non-PR URLs, raises on URLs missing the
       number suffix.
 
 ### 4. Add the merge-advancement phase
 
-- [ ] New `_advance_merged_prs(feature, services, *,
+- [x] New `_advance_merged_prs(feature, services, *,
       dry_run)` function in
       `src/turma/swarm/_orchestrator.py`, called from
       `run_swarm` between `_apply_repairs(...)` and
       `_main_loop(...)`. Skipped when `dry_run=True`
       apart from the PR-state reads — see Task 6 for the
       dry-run invariant test.
-- [ ] Lists `services.beads.list_in_progress_tasks(feature)`,
+- [x] Lists `services.beads.list_in_progress_tasks(feature)`,
       filters to tasks whose labels carry a
       `turma-pr:<N>` marker (via the
       `_extract_pr_number` helper from Task 1), and for
       each calls `services.pr.get_pr_state_by_number(N)`.
-- [ ] Per-task dispatch:
+- [x] Per-task dispatch:
       - `state == "MERGED"` →
         `services.beads.unmark_pr_open(task.id, N)` →
         `services.beads.close_task(task.id)` →
@@ -118,15 +118,15 @@
       - `gh pr view` raises a typed "PR not found" error →
         re-raise as `PlanningError` with the canned triage
         message; halt before `fetch_ready`.
-- [ ] After the per-task loop, raise the existing
+- [x] After the per-task loop, raise the existing
       "retry budget exhausted on …" `PlanningError` if any
       task exhausted during the sweep — same shape as
       `_apply_repairs`.
-- [ ] Operator-facing log lines per finding:
+- [x] Operator-facing log lines per finding:
       `merge-advancement: <id> → MERGED, closed`,
       `merge-advancement: <id> → OPEN, leaving alone`,
       `merge-advancement: <id> → CLOSED without merge → fail_task`.
-- [ ] **Closed-task labels are out of scope for this sweep.**
+- [x] **Closed-task labels are out of scope for this sweep.**
       The sweep input is strictly `list_in_progress_tasks` —
       a stale `turma-pr:<N>` label on a closed task is not
       detected here. See `design.md` "Deferred: stale
@@ -137,7 +137,7 @@
 
 ### 5. Tests for the merge-advancement phase
 
-- [ ] New tests in `tests/test_swarm_run.py`:
+- [x] New tests in `tests/test_swarm_run.py`:
       - **MERGED happy path:** one labelled task, gh returns
         MERGED, assert `unmark_pr_open` then `close_task`
         then `cleanup` calls in that order, no other mutations.
@@ -173,23 +173,23 @@
 
 ### 6. Repair-phase updates
 
-- [ ] In `_complete_pending_task` (`_orchestrator.py`),
+- [x] In `_complete_pending_task` (`_orchestrator.py`),
       replace the `services.beads.close_task(task_id)` +
       `services.worktree.cleanup(ref)` tail with
       `services.beads.mark_pr_open(task_id,
       _pr_number_from_url(pr_url))`. Same shape change as
       Task 3, mirrored into the repair tail.
-- [ ] In the `case CompletionPendingWithPr(...)` arm of
+- [x] In the `case CompletionPendingWithPr(...)` arm of
       `_apply_repairs`, replace `close_task` + `cleanup`
       with `mark_pr_open(task_id,
       _pr_number_from_url(pr_url))`. The existing PR URL
       from the reconciliation finding is the source of N.
-- [ ] Log lines updated to match the new contract:
+- [x] Log lines updated to match the new contract:
       `repair: <id> → committed, pushed, PR opened
       (<url>; awaiting merge)` and
       `repair: <id> → labelled (PR already open at <url>;
       awaiting merge)`.
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - `test_repair_completion_pending_runs_commit_push_pr_close`
         renamed to
         `test_repair_completion_pending_runs_commit_push_pr_label`;
@@ -204,19 +204,19 @@
 
 ### 7. `turma status` in-progress section: surface PR + state
 
-- [ ] In `src/turma/swarm/status.py`'s in-progress
+- [x] In `src/turma/swarm/status.py`'s in-progress
       rendering, when a task carries a `turma-pr:<N>`
       label, query the PR state via
       `services.pr.get_pr_state_by_number(N)` and add a
       `pr: #<N> (<state>) <url>` line under the existing
       worktree / sentinel lines.
-- [ ] When the label is absent, no extra line — the
+- [x] When the label is absent, no extra line — the
       in-progress section renders as today.
-- [ ] Adapter call lives behind the existing no-mutation
+- [x] Adapter call lives behind the existing no-mutation
       invariant; `get_pr_state_by_number` is read-only.
       Extend the no-mutation headline test fixture to
       cover this addition.
-- [ ] Tests in `tests/test_swarm_status.py`:
+- [x] Tests in `tests/test_swarm_status.py`:
       - In-progress task with a `turma-pr:<N>` label and
         gh returning OPEN renders the new line.
       - Same task with gh returning MERGED renders too
@@ -230,7 +230,7 @@
 
 ### 8. Docs + CHANGELOG
 
-- [ ] `README.md` Swarm Execution section:
+- [x] `README.md` Swarm Execution section:
       - Update the "one-feature loop" subsection: success
         path stops at `open_pr` + label; close + cleanup
         defer to the next run's merge-advancement sweep.
@@ -241,27 +241,30 @@
         `turma run` invocations, the first opening a PR,
         the second observing the merge and advancing the
         DAG.
-- [ ] `docs/architecture.md` Execution section: extend the
+- [x] `docs/architecture.md` Execution section: extend the
       state machine diagram with the
       `merge_advancement_phase` node.
-- [ ] `docs/smoke-turma-run.md`: new step between the
+- [x] `docs/smoke-turma-run.md`: new step between the
       existing happy-path step and the failure step
       demonstrating
       `gh pr merge` + re-run `turma run` → observe
       merge-advancement close the bd task and unblock a
       dependent.
-- [ ] `CHANGELOG.md` `[Unreleased]`: roll-up entry under
+- [x] `CHANGELOG.md` `[Unreleased]`: roll-up entry under
       "Added" describing the new phase + the contract
       shift (success path no longer closes immediately).
 
 ### 9. Validation
 
-- [ ] `uv run pytest` green. Current baseline before this
+- [x] `uv run pytest` green. Current baseline before this
       change set: 469 tests. Expected net add: ~25 across
       adapter additions, merge-advancement coverage, status
       section, and updated existing tests.
 - [ ] Manual smoke against the existing
-      `khanhgithead/turma-run-smoke` scratch:
+      `khanhgithead/turma-run-smoke` scratch (left unchecked
+      until the operator walks the runbook end-to-end against
+      the live scratch; the new Step 3 in
+      `docs/smoke-turma-run.md` covers this):
       - Pre-stage a fresh feature with two dependency-
         chained tasks (the prior smoke runs only used
         single-task specs).
@@ -280,5 +283,5 @@
       - Confirm `bd show <task-1>` is closed; dependent
         becomes ready; PR for task 2 opens.
       - Document any surprises as follow-up tasks.
-- [ ] No new runtime deps in `pyproject.toml`. `bd` and
+- [x] No new runtime deps in `pyproject.toml`. `bd` and
       `gh` already prerequisites.
