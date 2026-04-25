@@ -27,14 +27,22 @@ orchestrator records the PR number on the Beads task at
 merge-advancement sweep reads the label, looks up that exact
 PR by number, and dispatches on `state`.
 
-`gh`'s state vocabulary for a PR is fixed:
+`gh pr view --json state` returns one of three values:
 
 | state | Meaning | Advancement action |
 | --- | --- | --- |
 | `OPEN` | Not yet merged or closed | Leave alone |
-| `DRAFT` | Open as draft | Leave alone (treated identically to OPEN) |
 | `MERGED` | Merged | `unmark_pr_open` → `close_task` → `cleanup_worktree` |
 | `CLOSED` | Closed without merge | `unmark_pr_open` → `fail_task("PR #<N> closed without merge")` |
+
+Draft PRs are NOT a separate `state` value — `gh` exposes
+draftness via a separate boolean `isDraft` JSON field. v1
+deliberately ignores `isDraft` and treats draft PRs identically
+to non-draft `OPEN` PRs (both leave the task alone; the merge
+hasn't happened either way). If a future arc needs to
+differentiate (e.g. surface "still in draft" in the operator
+log), the adapter contract extends to also query `isDraft`;
+this spec keeps the surface minimal.
 
 Other JSON fields (`mergedAt`, `mergeCommit`) are ignored —
 `state == "MERGED"` is sufficient. Capturing `mergedAt` would
@@ -117,37 +125,61 @@ rejected the work.
 
 ### 5. What happens if GitHub and Beads disagree?
 
-Five disagreement classes, each with a pinned response. The
-sweep is the only place these are detected; reconciliation
-already covers the broader "interrupted state" cases, so the
-merge-advancement handler only owns the label-driven cases.
+The sweep walks `list_in_progress_tasks(feature)` and
+dispatches per `(label, gh_state)` for each. Reconciliation
+already covers the broader "interrupted state" cases (the six
+findings landed in the swarm-orchestration arc), so the
+merge-advancement handler only owns the label-driven cases on
+in-progress tasks. Four pinned classes:
 
 | Beads state | label | gh result | Response |
 | --- | --- | --- | --- |
-| in_progress | `turma-pr:<N>` | `state == OPEN` / `DRAFT` | leave alone |
+| in_progress | `turma-pr:<N>` | `state == OPEN` | leave alone |
 | in_progress | `turma-pr:<N>` | `state == MERGED` | unmark + close + cleanup |
-| in_progress | `turma-pr:<N>` | `state == CLOSED` (mergedAt null) | unmark + fail_task |
+| in_progress | `turma-pr:<N>` | `state == CLOSED` (no merge) | unmark + fail_task |
 | in_progress | `turma-pr:<N>` | `gh` returns "PR not found" / 404 | `PlanningError` — operator triage |
-| closed | `turma-pr:<N>` lingering | any state | log only; do not mutate |
-
-Last row covers the "we crashed between unmark and close" or
-"operator manually closed the bd task while the label was
-still set" cases. The sweep prints a `merge-advancement:
-<task_id> closed task carries stale turma-pr:<N> label`
-warning and continues — automatic cleanup would be a
-mutation the operator didn't request.
-
-The `gh returns 404` row is the only path that raises. That
-case (label says PR <N> exists, gh says no PR <N>) means
-either the PR was deleted (rare; GitHub typically only
-allows that for spam) or the recorded number was wrong. Both
-need operator decision; the sweep refuses to guess.
 
 The "in_progress task with no `turma-pr:<N>` label" case is
 explicitly **not** the merge-advancement handler's job —
 that's reconciliation's `completion-pending` /
 `completion-pending-with-pr` / `stale-no-sentinels`
 territory, already handled by `_apply_repairs` upstream.
+
+The `gh returns 404` row is the only path that raises. That
+case (label says PR <N> exists, gh says no PR <N>) means
+either the PR was deleted (rare; GitHub typically only
+allows that for spam) or the recorded number was wrong.
+Both need operator decision; the sweep refuses to guess.
+
+#### Deferred: stale `turma-pr:<N>` label on a closed bd task
+
+A theoretical inconsistency exists where a closed Beads task
+still carries a `turma-pr:<N>` label — produced by an
+orchestrator crash between `unmark_pr_open` and `close_task`,
+or by an operator manually closing a labelled task via `bd`.
+v1 deliberately does **not** detect or repair this case
+inside the merge-advancement sweep:
+
+- The sweep input is `list_in_progress_tasks(feature)` — by
+  construction it does not return closed tasks. Broadening
+  the input to `list_feature_tasks_all_statuses` (the lister
+  added in the turma-status arc) would catch the case but
+  add a separate read path and a different mutation policy
+  on closed-task labels — too much new surface for an edge
+  case that has no functional impact (a stale label on a
+  closed task does not affect bd's dependency advancement,
+  `list_ready_tasks`, or any future sweep).
+- The label is harmless: bd's `close_task` doesn't read
+  it, downstream tasks unblock normally, and the label
+  surfaces only in `bd show <task_id>`'s label list. An
+  operator who notices it can clean it manually with
+  `bd update <task_id> --remove-label turma-pr:<N>`.
+
+If this case turns out to be common in practice, a follow-up
+arc can add detection (probably via `list_feature_tasks_all_statuses`
+in a separate "stale-label-cleanup" sweep, kept distinct
+from merge-advancement so the two phases own clear
+contracts). v1 does not need it.
 
 ### 6. Does one invocation advance one merged task or sweep all?
 
@@ -259,7 +291,7 @@ label strings.
 @dataclass(frozen=True)
 class PrState:
     number: int
-    state: str  # OPEN | MERGED | CLOSED | DRAFT
+    state: str  # OPEN | MERGED | CLOSED (gh's `--json state` vocabulary)
     url: str    # for the operator-facing log line
 
 
@@ -374,8 +406,12 @@ All existing scenarios update to the new contract. Categories:
    with `turma-pr:<N>` label, `gh` returns MERGED → assert
    the sequence `unmark_pr_open` → `close_task` → `cleanup`,
    no other adapter calls.
-3. **Merge-advancement OPEN / DRAFT** — task untouched; sweep
-   continues; main loop runs normally.
+3. **Merge-advancement OPEN** — task untouched; sweep
+   continues; main loop runs normally. Draft PRs (where bd's
+   `isDraft` JSON field is true but `state == OPEN`) are not
+   distinguished by the adapter and behave identically — pin
+   that explicitly with a fixture whose stub `gh` payload
+   exercises the OPEN branch.
 4. **Merge-advancement CLOSED-without-merge** — `unmark_pr_open`
    → `fail_task` with the canned reason; budget remaining
    returns to open, exhausted halts.

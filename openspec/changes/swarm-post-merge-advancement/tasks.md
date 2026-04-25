@@ -30,8 +30,10 @@
 
 - [ ] Add a frozen `PrState(number: int, state: str, url:
       str)` dataclass to `src/turma/swarm/pull_request.py`.
-      `state` preserved as-returned by `gh` (`OPEN` / `MERGED`
-      / `CLOSED` / `DRAFT`).
+      `state` preserved as-returned by `gh`'s `--json state`
+      vocabulary: `OPEN` / `MERGED` / `CLOSED`. v1 does not
+      query `isDraft`; draft PRs return `state == "OPEN"`
+      and are treated identically to non-draft open PRs.
 - [ ] Add `get_pr_state_by_number(pr_number: int) -> PrState`.
       argv pinned: `gh pr view <pr_number> --json
       number,state,url`.
@@ -104,7 +106,9 @@
         `services.beads.unmark_pr_open(task.id, N)` →
         `services.beads.close_task(task.id)` →
         `services.worktree.cleanup(_ref_for(...))`.
-      - `state in ("OPEN", "DRAFT")` → log only.
+      - `state == "OPEN"` → log only. (Draft PRs return
+        `state == "OPEN"` from `--json state` and fall
+        through this branch unchanged.)
       - `state == "CLOSED"` (mergedAt null is implied —
         `state == "CLOSED"` and not "MERGED" is sufficient)
         → `services.beads.unmark_pr_open(task.id, N)` →
@@ -122,16 +126,14 @@
       `merge-advancement: <id> → MERGED, closed`,
       `merge-advancement: <id> → OPEN, leaving alone`,
       `merge-advancement: <id> → CLOSED without merge → fail_task`.
-- [ ] **Stale-label-on-closed-task** edge case: a closed
-      bd task that still carries `turma-pr:<N>` (recovered
-      from a crash between `unmark_pr_open` and
-      `close_task`) prints
-      `merge-advancement: <id> closed task carries stale
-      turma-pr:<N> label` and continues without mutation.
-      The sweep walks `list_in_progress_tasks` so this case
-      is detected only when `list_feature_tasks_all_statuses`
-      is queried (Task 7's status-section change exercises
-      this; not v1-blocking).
+- [ ] **Closed-task labels are out of scope for this sweep.**
+      The sweep input is strictly `list_in_progress_tasks` —
+      a stale `turma-pr:<N>` label on a closed task is not
+      detected here. See `design.md` "Deferred: stale
+      turma-pr label on a closed bd task" for the rationale.
+      Do not silently broaden the sweep input to
+      `list_feature_tasks_all_statuses` to catch the case;
+      that's a separate spec if it ever becomes load-bearing.
 
 ### 5. Tests for the merge-advancement phase
 
@@ -142,7 +144,11 @@
       - **OPEN leaves alone:** labelled task, gh OPEN, assert
         no Beads / worktree mutation; main loop runs normally
         afterwards.
-      - **DRAFT identical to OPEN.**
+      - **Draft PRs treated as OPEN.** `gh`'s `--json state`
+        returns `OPEN` for draft PRs (draftness lives on a
+        separate `isDraft` boolean v1 does not query). The
+        existing OPEN test covers this; pin a fixture
+        comment so the relationship is explicit.
       - **CLOSED without merge → fail_task with retry
         budget remaining** (returns task to open).
       - **CLOSED without merge → exhausted budget halts**

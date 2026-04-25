@@ -59,8 +59,11 @@ scheduler, no parallel claims. Same scope discipline as
   dispatches on the PR's GitHub state:
   - `MERGED` → remove the label, `close_task`,
     `cleanup_worktree`.
-  - `OPEN` / `DRAFT` → leave alone (merge hasn't happened
-    yet).
+  - `OPEN` → leave alone (merge hasn't happened yet). Draft
+    PRs return `state == OPEN` from `gh`'s `--json state`
+    output (draftness lives on a separate `isDraft` boolean
+    field that v1 does not query); they fall through this
+    branch and are treated identically.
   - `CLOSED` (without merge) → `fail_task` with reason
     `"PR #<N> closed without merge"` so the retry budget
     applies; worktree stays on disk for triage per the v1
@@ -78,12 +81,13 @@ scheduler, no parallel claims. Same scope discipline as
     `fail_task` so the orchestrator doesn't reach into raw
     label strings.
   - `PullRequestAdapter.get_pr_state_by_number(pr_number)` —
-    `gh pr view <N> --json state` returning the PR's current
-    state (`OPEN` / `MERGED` / `CLOSED` / `DRAFT`).
-    `list_prs_for_feature` from the turma-status arc covers
-    the feature-scoped batch case but indexes by branch; the
-    advancement sweep needs to look up by the recorded PR
-    number directly.
+    `gh pr view <N> --json number,state,url` returning the
+    PR's current state (`OPEN` / `MERGED` / `CLOSED`; v1
+    does not differentiate drafts, which return `OPEN`
+    here). `list_prs_for_feature` from the turma-status arc
+    covers the feature-scoped batch case but indexes by
+    branch; the advancement sweep needs to look up by the
+    recorded PR number directly.
 - **`README.md` and `docs/architecture.md`** Execution sections
   updated for the new state machine. The smoke runbook gets a
   new step illustrating the merge-advancement path.
