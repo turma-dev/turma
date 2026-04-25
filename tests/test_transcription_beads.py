@@ -15,7 +15,9 @@ from turma.transcription.beads import (
     BeadsAdapter,
     BeadsTaskRef,
     BeadsTaskSnapshot,
+    PR_LABEL_PREFIX,
     VALID_BD_TYPES,
+    _extract_pr_number,
 )
 
 
@@ -702,3 +704,132 @@ def test_run_falls_back_to_unknown_error_when_both_streams_empty(
     adapter = BeadsAdapter()
     with pytest.raises(PlanningError, match="unknown error"):
         adapter.close_task("bd-1")
+
+
+# -----------------------------------------------------------------------
+# mark_pr_open / unmark_pr_open + PR_LABEL_PREFIX + _extract_pr_number
+# -----------------------------------------------------------------------
+
+
+def test_pr_label_prefix_is_documented_constant() -> None:
+    """Pin the prefix string so future readers don't drift it
+    accidentally. The merge-advancement sweep parses labels by
+    matching this prefix; a prefix change without lockstep updates
+    in the orchestrator would silently break the sweep."""
+    assert PR_LABEL_PREFIX == "turma-pr:"
+
+
+def test_mark_pr_open_pins_argv() -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 17)
+
+    assert seen == [
+        ["bd", "update", "bd-42", "--add-label", "turma-pr:17"]
+    ]
+
+
+def test_mark_pr_open_surfaces_stderr_on_failure() -> None:
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        raise PlanningError("bd update failed: exit 1\nbd: not authenticated")
+
+    adapter = _make_adapter_with_run(run)
+    with pytest.raises(PlanningError, match="not authenticated"):
+        adapter.mark_pr_open("bd-1", 5)
+
+
+def test_unmark_pr_open_pins_argv() -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.unmark_pr_open("bd-42", 17)
+
+    assert seen == [
+        ["bd", "update", "bd-42", "--remove-label", "turma-pr:17"]
+    ]
+
+
+def test_unmark_pr_open_idempotent_on_missing_label() -> None:
+    """bd's `--remove-label` is documented to be a no-op when the
+    label isn't present, so the merge-advancement sweep can call
+    `unmark_pr_open` defensively without first checking. The
+    adapter just shells out — bd handles the idempotency. Pin
+    that the adapter passes through bd's success exit unchanged."""
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        return _completed(argv)  # zero-exit; no stderr
+
+    adapter = _make_adapter_with_run(run)
+    adapter.unmark_pr_open("bd-1", 5)  # no exception
+
+
+def test_unmark_pr_open_surfaces_stderr_on_failure() -> None:
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        raise PlanningError(
+            "bd update failed: exit 2\nbd: issue not found: bd-99"
+        )
+
+    adapter = _make_adapter_with_run(run)
+    with pytest.raises(PlanningError, match="issue not found"):
+        adapter.unmark_pr_open("bd-99", 5)
+
+
+# _extract_pr_number ----------------------------------------------------
+
+
+def test_extract_pr_number_returns_none_when_no_label() -> None:
+    assert _extract_pr_number(()) is None
+    assert (
+        _extract_pr_number(("feature:oauth", "turma-type:impl")) is None
+    )
+
+
+def test_extract_pr_number_returns_value_when_present() -> None:
+    labels = ("feature:oauth", "turma-pr:42", "turma-type:impl")
+    assert _extract_pr_number(labels) == 42
+
+
+def test_extract_pr_number_returns_none_for_malformed_value() -> None:
+    """A label like `turma-pr:abc` is corrupt — should not raise,
+    should return None so the sweep treats the task as label-
+    absent (and reconciliation/triage can sort it out)."""
+    assert _extract_pr_number(("turma-pr:not-a-number",)) is None
+    assert _extract_pr_number(("turma-pr:",)) is None  # empty suffix
+
+
+def test_extract_pr_number_picks_first_valid_when_multiple() -> None:
+    """Defensive: a task somehow tagged with two `turma-pr:<N>`
+    labels (shouldn't happen — `mark_pr_open` runs once per PR
+    open) returns the first valid match. Stable choice so callers
+    are deterministic."""
+    labels = (
+        "turma-pr:7",
+        "feature:oauth",
+        "turma-pr:99",
+    )
+    assert _extract_pr_number(labels) == 7
+
+
+def test_extract_pr_number_skips_non_string_label_entries() -> None:
+    """bd's JSON typically returns string labels, but the parser
+    is defensive about non-string entries (matches
+    `_parse_retries_from_labels`'s behavior). A non-string entry
+    is skipped, not raised."""
+    labels = (None, 42, "turma-pr:5")  # type: ignore[arg-type]
+    assert _extract_pr_number(labels) == 5
+
+
+def test_extract_pr_number_skips_negative_numbers() -> None:
+    """PR numbers are positive integers. `turma-pr:-1` is
+    nonsense — return None so the sweep treats the task as
+    label-absent."""
+    assert _extract_pr_number(("turma-pr:-1",)) is None
+    assert _extract_pr_number(("turma-pr:0",)) is None  # PRs start at 1

@@ -80,6 +80,7 @@ VALID_BD_TYPES = frozenset({
 # scope so tests can pin them.
 RETRIES_LABEL_PREFIX = "turma-retries:"
 NEEDS_HUMAN_REVIEW_LABEL = "needs_human_review"
+PR_LABEL_PREFIX = "turma-pr:"
 
 
 def _parse_retries_from_labels(labels) -> int:
@@ -94,6 +95,35 @@ def _parse_retries_from_labels(labels) -> int:
         except ValueError:
             continue
     return 0
+
+
+def _extract_pr_number(labels) -> int | None:
+    """Return the PR number recorded in a `turma-pr:<N>` label, or
+    None if no valid such label is present.
+
+    Used by the merge-advancement sweep
+    (`openspec/changes/swarm-post-merge-advancement/`) to dispatch
+    on which GitHub PR to query for each in-progress task. Mirrors
+    `_parse_retries_from_labels`'s defensive shape: skips
+    non-string entries, parses the suffix as an int, returns None
+    for malformed / non-positive values, picks the first valid
+    label when somehow multiple exist (deterministic so callers
+    don't depend on iteration order).
+    """
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        if not label.startswith(PR_LABEL_PREFIX):
+            continue
+        raw = label[len(PR_LABEL_PREFIX):]
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value <= 0:
+            continue
+        return value
+    return None
 
 
 @dataclass(frozen=True)
@@ -500,6 +530,50 @@ class BeadsAdapter:
         argv += ["--status", "open"]
 
         self._run(argv, step="bd update (fail_task)")
+
+    def mark_pr_open(self, task_id: str, pr_number: int) -> None:
+        """Add `turma-pr:<N>` to `task_id`'s labels.
+
+        Called from the orchestrator's success path immediately
+        after `open_pr` returns, replacing the prior `close_task`
+        + `cleanup_worktree` tail. The task remains `in_progress`
+        until the merge-advancement sweep on a subsequent
+        `turma run` observes the PR as MERGED. Pairs with
+        `unmark_pr_open`, which runs from the sweep before any
+        terminal transition (`close_task` on MERGED or
+        `fail_task` on CLOSED-without-merge).
+
+        argv: `bd update <task_id> --add-label turma-pr:<N>`.
+        Reuses the same `bd update --add-label` mechanism
+        `fail_task` already uses for `turma-retries:` and
+        `needs_human_review`.
+        """
+        self._run(
+            [
+                "bd", "update", task_id,
+                "--add-label", f"{PR_LABEL_PREFIX}{pr_number}",
+            ],
+            step="bd update (mark_pr_open)",
+        )
+
+    def unmark_pr_open(self, task_id: str, pr_number: int) -> None:
+        """Remove `turma-pr:<N>` from `task_id`'s labels.
+
+        Called by the merge-advancement sweep before any terminal
+        transition so the label does not survive on the closed
+        or re-opened task. bd's `--remove-label` is documented to
+        be a no-op when the label isn't present, so this method
+        is safe to call defensively without first checking.
+
+        argv: `bd update <task_id> --remove-label turma-pr:<N>`.
+        """
+        self._run(
+            [
+                "bd", "update", task_id,
+                "--remove-label", f"{PR_LABEL_PREFIX}{pr_number}",
+            ],
+            step="bd update (unmark_pr_open)",
+        )
 
     def _add_dependency(self, *, blocked_id: str, blocker_id: str) -> None:
         # `bd dep add <blocked> <blocker>` — blocked depends on blocker.
