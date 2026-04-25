@@ -23,6 +23,26 @@ from turma.errors import PlanningError
 
 
 @dataclass(frozen=True)
+class PrState:
+    """Single-PR state snapshot returned by `get_pr_state_by_number`.
+
+    Used by the merge-advancement sweep to dispatch on the PR's
+    current GitHub state. `state` is one of the three values
+    `gh pr view --json state` returns: `OPEN` / `MERGED` /
+    `CLOSED`. Draft PRs return `OPEN` from `--json state`
+    (draftness lives on a separate `isDraft` field that v1 does
+    not query); they fall through the OPEN branch unchanged.
+
+    See `openspec/changes/swarm-post-merge-advancement/design.md`
+    for the dispatch contract.
+    """
+
+    number: int
+    state: str
+    url: str
+
+
+@dataclass(frozen=True)
 class PrSummary:
     """Summary row returned by `list_prs_for_feature` for `turma status`.
 
@@ -218,6 +238,75 @@ class PullRequestAdapter:
             )
             for rec in records
             if isinstance(rec, dict)
+        )
+
+    def get_pr_state_by_number(self, pr_number: int) -> PrState:
+        """Look up a PR by number and return its current state.
+
+        Used by the merge-advancement sweep
+        (`openspec/changes/swarm-post-merge-advancement/`) to
+        dispatch on what to do for each in-progress task carrying
+        a `turma-pr:<N>` label. The sweep records the number when
+        the PR is opened (via `BeadsAdapter.mark_pr_open`); this
+        method is the read-side that maps `<N>` back to current
+        state.
+
+        argv pinned: `gh pr view <N> --json number,state,url`.
+        Verified against gh 2.91.0 in the
+        turma-status-pr-feature-list-related branch and re-
+        verified against the `khanhgithead/turma-run-smoke`
+        scratch.
+
+        State vocabulary returned by `--json state`: `OPEN` /
+        `MERGED` / `CLOSED`. Draft PRs return `OPEN` from this
+        view; v1 does not query `isDraft` and treats drafts
+        identically to non-draft open PRs.
+
+        404 case (recorded number does not exist) is recognized
+        by the canonical `gh` GraphQL phrase
+        "Could not resolve to a PullRequest" in stderr and
+        surfaces as a typed `PlanningError` naming the missing
+        number and pointing at `bd show <task_id>` for triage —
+        the merge-advancement sweep cannot guess on a missing
+        PR. Other non-zero exits (auth failure, network error)
+        surface stderr verbatim, same shape the rest of the
+        adapter uses.
+        """
+        argv = [
+            "gh", "pr", "view", str(pr_number),
+            "--json", "number,state,url",
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            if "Could not resolve to a PullRequest" in stderr:
+                raise PlanningError(
+                    f"PR #{pr_number} not found via gh; the "
+                    f"`turma-pr:{pr_number}` label is stale. Triage "
+                    "with `bd show <task_id>` and "
+                    "`gh pr list --search 'head:task/<feature>/'`."
+                )
+            detail = stderr or result.stdout.strip() or "unknown error"
+            raise PlanningError(
+                f"gh pr view failed: exit {result.returncode}\n{detail}"
+            )
+        payload = result.stdout.strip()
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "gh pr view returned non-JSON output: "
+                f"{exc}\n{payload!r}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise PlanningError(
+                "gh pr view returned non-dict JSON: "
+                f"{type(data).__name__}"
+            )
+        return PrState(
+            number=int(data.get("number", pr_number)),
+            state=str(data.get("state", "")),
+            url=str(data.get("url", "")),
         )
 
     @staticmethod

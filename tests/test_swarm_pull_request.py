@@ -12,6 +12,7 @@ from turma.errors import PlanningError
 from turma.swarm.pull_request import (
     GH_AUTH_HINT,
     GH_INSTALL_HINT,
+    PrState,
     PrSummary,
     PullRequestAdapter,
 )
@@ -505,3 +506,175 @@ def test_list_prs_for_feature_skips_non_dict_records() -> None:
         result = adapter.list_prs_for_feature("oauth", wt)
     assert len(result) == 1
     assert result[0].number == 1
+
+
+# ---------------------------------------------------------------------
+# get_pr_state_by_number — number-indexed lookup for merge advancement
+# ---------------------------------------------------------------------
+
+
+def test_get_pr_state_by_number_pins_argv() -> None:
+    adapter = _make_adapter()
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_):
+        seen.append(argv)
+        return _completed(
+            argv,
+            stdout='{"number":17,"state":"OPEN","url":"https://x/pull/17"}',
+        )
+
+    with patch(
+        "turma.swarm.pull_request.subprocess.run", side_effect=fake_run
+    ):
+        adapter.get_pr_state_by_number(17)
+
+    assert seen == [
+        [
+            "gh", "pr", "view", "17",
+            "--json", "number,state,url",
+        ]
+    ]
+
+
+def test_get_pr_state_by_number_parses_open_state() -> None:
+    adapter = _make_adapter()
+    payload = (
+        '{"number":17,"state":"OPEN",'
+        '"url":"https://github.com/o/r/pull/17"}'
+    )
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.get_pr_state_by_number(17)
+
+    assert result == PrState(
+        number=17,
+        state="OPEN",
+        url="https://github.com/o/r/pull/17",
+    )
+
+
+def test_get_pr_state_by_number_parses_merged_state() -> None:
+    adapter = _make_adapter()
+    payload = (
+        '{"number":42,"state":"MERGED",'
+        '"url":"https://github.com/o/r/pull/42"}'
+    )
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.get_pr_state_by_number(42)
+
+    assert result.state == "MERGED"
+    assert result.number == 42
+
+
+def test_get_pr_state_by_number_parses_closed_state() -> None:
+    adapter = _make_adapter()
+    payload = (
+        '{"number":7,"state":"CLOSED",'
+        '"url":"https://github.com/o/r/pull/7"}'
+    )
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.get_pr_state_by_number(7)
+
+    assert result.state == "CLOSED"
+
+
+def test_get_pr_state_by_number_treats_draft_pr_as_open() -> None:
+    """`gh pr view --json state` returns "OPEN" for draft PRs;
+    draftness lives on a separate `isDraft` boolean field that v1
+    does not query. The adapter contract is "use the value `state`
+    returns" — `isDraft: true` in the surrounding payload (which
+    can come back even when not requested, since `gh` is loose
+    about extra fields) does not change the result.
+
+    Pinned per the post-merge-advancement design:
+    `openspec/changes/swarm-post-merge-advancement/design.md`.
+    """
+    adapter = _make_adapter()
+    payload = (
+        '{"number":3,"state":"OPEN","isDraft":true,'
+        '"url":"https://github.com/o/r/pull/3"}'
+    )
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout=payload),
+    ):
+        result = adapter.get_pr_state_by_number(3)
+
+    assert result.state == "OPEN"
+
+
+def test_get_pr_state_by_number_404_raises_typed_planning_error() -> None:
+    """The 404 case (recorded PR number does not exist on GitHub)
+    surfaces with a typed `PlanningError` message that names the
+    missing number and points the operator at `bd show` for
+    triage. Recognized by the canonical `gh` GraphQL phrase
+    'Could not resolve to a PullRequest'."""
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["gh", "pr", "view", "99999"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                "GraphQL: Could not resolve to a PullRequest with the "
+                "number of 99999. (repository.pullRequest)"
+            ),
+        ),
+    ):
+        with pytest.raises(PlanningError) as exc:
+            adapter.get_pr_state_by_number(99999)
+
+    msg = str(exc.value)
+    assert "PR #99999 not found" in msg
+    assert "bd show" in msg  # triage hint
+
+
+def test_get_pr_state_by_number_other_failure_surfaces_stderr() -> None:
+    """A non-404 non-zero exit (e.g. auth failure, network error)
+    surfaces gh's stderr verbatim — same shape the rest of the
+    adapter uses."""
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["gh", "pr", "view", "5"],
+            returncode=4,
+            stdout="",
+            stderr="HTTP 401: Bad credentials",
+        ),
+    ):
+        with pytest.raises(PlanningError, match="Bad credentials"):
+            adapter.get_pr_state_by_number(5)
+
+
+def test_get_pr_state_by_number_rejects_non_json() -> None:
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout="definitely not json"),
+    ):
+        with pytest.raises(PlanningError, match="non-JSON"):
+            adapter.get_pr_state_by_number(1)
+
+
+def test_get_pr_state_by_number_rejects_non_dict_json() -> None:
+    """`gh pr view` returns an object, not an array. If somehow it
+    returned an array, a string, etc., the adapter raises rather
+    than coerce."""
+    adapter = _make_adapter()
+    with patch(
+        "turma.swarm.pull_request.subprocess.run",
+        return_value=_completed(["gh"], stdout='[{"number":1}]'),
+    ):
+        with pytest.raises(PlanningError, match="non-dict"):
+            adapter.get_pr_state_by_number(1)
