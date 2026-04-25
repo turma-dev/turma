@@ -41,7 +41,11 @@ from turma.swarm.worker import (
     WorkerBackend,
     WorkerInvocation,
 )
-from turma.transcription.beads import BeadsAdapter, BeadsTaskRef
+from turma.transcription.beads import (
+    BeadsAdapter,
+    BeadsTaskRef,
+    _extract_pr_number,
+)
 
 
 CLEAN_TREE_REASON = "worker reported success but left the tree clean"
@@ -198,9 +202,15 @@ def run_swarm(
     )
 
     if dry_run:
+        # Dry-run preview: also surface what merge-advancement
+        # would do without committing. Reads PR state but never
+        # mutates Beads / worktree state. Repair-phase mutations
+        # remain skipped on dry-run as before.
+        _advance_merged_prs(feature, services, dry_run=True)
         return
 
     _apply_repairs(feature, report, services)
+    _advance_merged_prs(feature, services, dry_run=False)
     _main_loop(feature, services, max_tasks)
 
 
@@ -280,16 +290,21 @@ def _apply_repairs(
                 pr_url = _complete_pending_task(feature, task_id, services)
                 print(
                     f"repair: {task_id} → committed, pushed, PR opened "
-                    f"({pr_url}), closed"
+                    f"({pr_url}; awaiting merge), labelled"
                 )
 
             case CompletionPendingWithPr(task_id=task_id, pr_url=pr_url):
-                ref = _ref_for(feature, task_id, services)
-                services.beads.close_task(task_id)
-                services.worktree.cleanup(ref)
+                # PR already open; record its number on the bd task
+                # via `mark_pr_open` and leave the task in_progress.
+                # The merge-advancement sweep on a future
+                # `turma run` will close + cleanup once the PR
+                # merges. Mirrors the defer-close shape
+                # `_run_single_task` adopted in Task 3.
+                pr_number = _pr_number_from_url(pr_url)
+                services.beads.mark_pr_open(task_id, pr_number)
                 print(
-                    f"repair: {task_id} → closed (PR already open at "
-                    f"{pr_url}), worktree removed"
+                    f"repair: {task_id} → labelled "
+                    f"(PR already open at {pr_url}; awaiting merge)"
                 )
 
             case FailurePending(task_id=task_id, reason=reason):
@@ -336,6 +351,123 @@ def _apply_repairs(
             f"retry budget exhausted on {joined} during repair phase; "
             "halting run. Triage with `bd list --label "
             "needs_human_review`."
+        )
+
+
+# ---------------------------------------------------------------------
+# Merge-advancement phase
+# ---------------------------------------------------------------------
+
+
+def _advance_merged_prs(
+    feature: str,
+    services: SwarmServices,
+    *,
+    dry_run: bool,
+) -> None:
+    """Sweep in_progress tasks bearing a `turma-pr:<N>` label and
+    advance each per the PR's current GitHub state.
+
+    Per
+    `openspec/changes/swarm-post-merge-advancement/design.md`:
+
+    - `state == "MERGED"` → `unmark_pr_open` → `close_task` →
+      `cleanup_worktree`. The deferred close + cleanup that
+      `_run_single_task` no longer fires lands here.
+    - `state == "OPEN"` → leave alone. Draft PRs return
+      `state == "OPEN"` from `--json state` (`isDraft` is not
+      queried in v1) and fall through this branch unchanged.
+    - `state == "CLOSED"` (no merge) → `unmark_pr_open` →
+      `_handle_failure` with the canned reason
+      `PR #<N> closed without merge`. Full retry-budget
+      machinery applies; an exhausted-budget result is
+      collected and raised after the per-task loop, matching
+      the repair phase's existing pattern.
+    - 404 from `gh` (recorded number does not exist) → halt
+      the run with a typed `PlanningError` naming the task
+      and pointing the operator at `bd show` for triage.
+
+    On `dry_run=True` the sweep performs the PR-state reads
+    but **no mutations** — it logs `would: <line>` for each
+    task it would otherwise advance, so the operator gets a
+    preview of what the next non-dry-run invocation will do.
+    """
+    in_progress = services.beads.list_in_progress_tasks(feature)
+    exhausted_ids: list[str] = []
+
+    for task in in_progress:
+        pr_number = _extract_pr_number(task.labels)
+        if pr_number is None:
+            # No `turma-pr:<N>` label. Reconciliation already
+            # owns the "in_progress without label" cases via
+            # `completion-pending` / `stale-no-sentinels`.
+            continue
+
+        try:
+            pr_state = services.pr.get_pr_state_by_number(pr_number)
+        except PlanningError as exc:
+            if "not found via gh" in str(exc):
+                print(
+                    f"merge-advancement: {task.id} → 404; halting "
+                    f"(turma-pr:{pr_number} stale; triage)"
+                )
+                raise PlanningError(
+                    f"merge-advancement: PR #{pr_number} for task "
+                    f"{task.id} not found via gh; the "
+                    f"`turma-pr:{pr_number}` label is stale. "
+                    f"Triage with `bd show {task.id}` and "
+                    "`gh pr list --search 'head:task/<feature>/'`."
+                ) from exc
+            raise
+
+        prefix = "would: " if dry_run else ""
+
+        if pr_state.state == "MERGED":
+            print(
+                f"{prefix}merge-advancement: {task.id} → MERGED, closed"
+            )
+            if not dry_run:
+                services.beads.unmark_pr_open(task.id, pr_number)
+                services.beads.close_task(task.id)
+                ref = _ref_for(feature, task.id, services)
+                services.worktree.cleanup(ref)
+
+        elif pr_state.state == "CLOSED":
+            print(
+                f"{prefix}merge-advancement: {task.id} → CLOSED "
+                "without merge → fail_task"
+            )
+            if not dry_run:
+                services.beads.unmark_pr_open(task.id, pr_number)
+                if _handle_failure(
+                    services,
+                    task.id,
+                    f"PR #{pr_number} closed without merge",
+                ):
+                    exhausted_ids.append(task.id)
+
+        elif pr_state.state == "OPEN":
+            # Draft PRs surface as OPEN here; v1 does not
+            # differentiate.
+            print(
+                f"merge-advancement: {task.id} → OPEN, leaving alone"
+            )
+
+        else:
+            # Unknown state — log and leave alone. If `gh` ever
+            # adds a new state value, surfacing it here keeps
+            # the orchestrator honest without a hard halt.
+            print(
+                f"merge-advancement: {task.id} → "
+                f"unrecognized state {pr_state.state!r}, leaving alone"
+            )
+
+    if exhausted_ids:
+        joined = ", ".join(exhausted_ids)
+        raise PlanningError(
+            f"retry budget exhausted on {joined} during "
+            "merge-advancement phase; halting run. Triage with "
+            "`bd list --label needs_human_review`."
         )
 
 
@@ -534,8 +666,17 @@ def _complete_pending_task(
     task_id: str,
     services: SwarmServices,
 ) -> str:
-    """Run the normal commit/push/open-pr tail for a
-    reconciliation-detected completion-pending task, then close it."""
+    """Run the commit/push/open-pr tail for a reconciliation-
+    detected `completion-pending` task and label the task with
+    its new PR number.
+
+    The `close_task` + `cleanup_worktree` finish moves to the
+    merge-advancement sweep on a future `turma run` invocation —
+    the same defer-close shape `_run_single_task` adopted in
+    Task 3 of `swarm-post-merge-advancement`. Until the PR is
+    merged on GitHub, the task stays `in_progress` with a
+    `turma-pr:<N>` label and its worktree on disk.
+    """
     ref = _ref_for(feature, task_id, services)
     task = _lookup_task(services.beads, feature, task_id)
     description = services.beads.get_task_body(task_id)
@@ -548,8 +689,8 @@ def _complete_pending_task(
         title=_render_pr_title(task),
         body=_render_pr_body(task, description),
     )
-    services.beads.close_task(task_id)
-    services.worktree.cleanup(ref)
+    pr_number = _pr_number_from_url(pr_url)
+    services.beads.mark_pr_open(task_id, pr_number)
     return pr_url
 
 
