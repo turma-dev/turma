@@ -33,6 +33,27 @@ for an open PR whose head is the task branch, so `reconcile_feature`
 takes a `pr_adapter` in addition to the Beads / worktree / git
 dependencies. The PR lookup is a read-only `gh pr list` call; no
 mutation adapter surface is ever invoked.
+
+### Merge-tracked tasks are NOT classified
+
+In_progress tasks carrying a valid `turma-pr:<N>` label are owned by
+the merge-advancement sweep, not by reconciliation / repair. Per
+`openspec/changes/swarm-merge-advancement-stabilization/design.md`
+"Reconciliation: skip vs new finding" (Option A), reconciliation
+detects these tasks via `_extract_pr_number` and **skips them**
+before any classification fires:
+
+- The task is not added to `findings` — no finding type is emitted.
+- The task is added to `merge_tracked` (an informational field on
+  the report) so the orchestrator can log the routing decision.
+- The task's branch IS still added to `claimed_branches`, so the
+  orphan-branch loop does not misclassify it as orphan.
+
+The "every in-progress task gets a finding" property the original
+turma-status arc relied on is therefore retired: a labelled task
+exists but has no finding. Operators see merge-tracked state via
+the `reconcile: <id> → skipped (merge-tracked at PR #<N>)` log
+line and via `turma status`'s in-progress `pr:` line.
 """
 
 from __future__ import annotations
@@ -41,7 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from turma.transcription.beads import BeadsTaskRef
+from turma.transcription.beads import BeadsTaskRef, _extract_pr_number
 
 
 # ---------------------------------------------------------------------
@@ -139,9 +160,20 @@ Finding = (
 
 @dataclass(frozen=True)
 class ReconciliationReport:
-    """Ordered set of findings from a single reconciliation pass."""
+    """Ordered set of findings from a single reconciliation pass.
+
+    `merge_tracked` is an informational field carrying the
+    (task_id, pr_number) pairs reconciliation skipped because the
+    task is owned by the merge-advancement sweep. Defaults to ()
+    so existing tests / call sites that construct a
+    ReconciliationReport without this field continue to work.
+    No repair-phase action is associated with this list — it
+    exists purely so the orchestrator can log the routing decision
+    and so tests can assert on the skip set.
+    """
 
     findings: tuple[Finding, ...]
+    merge_tracked: tuple[tuple[str, int], ...] = ()
 
 
 # ---------------------------------------------------------------------
@@ -183,11 +215,20 @@ def reconcile_feature(
 
     in_progress = adapter.list_in_progress_tasks(feature)
     findings: list[Finding] = []
+    merge_tracked: list[tuple[str, int]] = []
 
     claimed_branches: set[str] = set()
     for task in in_progress:
         branch = worktree_manager.branch_name_for(feature, task.id)
         claimed_branches.add(branch)
+        # Merge-tracked tasks are owned by merge-advancement, not
+        # reconciliation / repair. Skip classification entirely;
+        # the branch still counts as claimed so orphan-branch
+        # detection below excludes it.
+        pr_number = _extract_pr_number(task.labels)
+        if pr_number is not None:
+            merge_tracked.append((task.id, pr_number))
+            continue
         findings.append(
             _classify_task(feature, task, worktree_manager, pr_adapter, branch)
         )
@@ -200,7 +241,10 @@ def reconcile_feature(
             continue
         findings.append(OrphanBranch(branch=branch))
 
-    report = ReconciliationReport(findings=tuple(findings))
+    report = ReconciliationReport(
+        findings=tuple(findings),
+        merge_tracked=tuple(merge_tracked),
+    )
     _print_summary(report, len(in_progress))
     return report
 
@@ -256,9 +300,16 @@ def _print_summary(report: ReconciliationReport, in_progress_count: int) -> None
 
     Per-repair lines are the orchestrator's responsibility — this
     module only describes what it observed, never what it changed.
+    Merge-tracked tasks (skipped before classification) get one
+    line each, alongside the per-finding lines.
     """
     task_noun = "task" if in_progress_count == 1 else "tasks"
     print(f"reconcile: {in_progress_count} in-progress {task_noun}")
+    for task_id, pr_number in report.merge_tracked:
+        print(
+            f"reconcile:   {task_id} → skipped "
+            f"(merge-tracked at PR #{pr_number})"
+        )
     for finding in report.findings:
         print(f"reconcile:   {_describe(finding)}")
 

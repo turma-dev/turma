@@ -118,8 +118,17 @@ class StubPullRequestAdapter:
         return ""
 
 
-def _ref(task_id: str, title: str = "") -> BeadsTaskRef:
-    return BeadsTaskRef(id=task_id, title=title, labels=("feature:oauth",))
+def _ref(
+    task_id: str,
+    title: str = "",
+    *,
+    extra_labels: tuple[str, ...] = (),
+) -> BeadsTaskRef:
+    return BeadsTaskRef(
+        id=task_id,
+        title=title,
+        labels=("feature:oauth", *extra_labels),
+    )
 
 
 def _make_worktree(
@@ -522,3 +531,178 @@ def test_summary_prints_findings_breakdown(
     # case the task id + branch should appear somewhere.
     assert "bd-done" in captured.out
     assert "bd-orphan" in captured.out or "orphan" in captured.out
+
+
+# ---------------------------------------------------------------------
+# Merge-tracked skip (swarm-merge-advancement-stabilization Task 1)
+# ---------------------------------------------------------------------
+
+
+def test_merge_tracked_task_is_skipped_from_findings(
+    tmp_path: Path,
+) -> None:
+    """An in_progress task carrying `turma-pr:<N>` is owned by the
+    merge-advancement sweep, not reconciliation. It must not appear
+    in any finding list — even if its worktree state would otherwise
+    classify it (e.g. .task_complete present)."""
+    worktree = _make_worktree(tmp_path, "oauth", "bd-tracked")
+    (worktree / ".task_complete").write_text("DONE\n")
+
+    report, *_ = _reconcile(
+        tmp_path,
+        in_progress=(_ref("bd-tracked", extra_labels=("turma-pr:42",)),),
+    )
+
+    # No findings at all — the task is merge-tracked.
+    assert report.findings == ()
+    # Surfaced via the new informational field instead.
+    assert report.merge_tracked == (("bd-tracked", 42),)
+
+
+def test_merge_tracked_skip_does_not_call_pr_adapter(
+    tmp_path: Path,
+) -> None:
+    """Skipping happens BEFORE the PR-state lookup that would
+    otherwise misclassify a merged-PR task as `completion-pending`.
+    Pin that the gh call doesn't fire for merge-tracked tasks."""
+    worktree = _make_worktree(tmp_path, "oauth", "bd-tracked")
+    (worktree / ".task_complete").write_text("DONE\n")
+
+    _, _, _, _, pr = _reconcile(
+        tmp_path,
+        in_progress=(_ref("bd-tracked", extra_labels=("turma-pr:7",)),),
+    )
+
+    assert not any(
+        c[0] == "find_open_pr_url_for_branch" for c in pr.calls
+    )
+
+
+def test_merge_tracked_skip_log_line_format(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exactly one `reconcile: <id> → skipped (merge-tracked at PR
+    #<N>)` line per skipped task. Format must match the existing
+    `reconcile:   <id> → ...` pattern (two-space indent, arrow,
+    description) so operator log filters keep working."""
+    _make_worktree(tmp_path, "oauth", "bd-1")
+    _make_worktree(tmp_path, "oauth", "bd-2")
+
+    _reconcile(
+        tmp_path,
+        in_progress=(
+            _ref("bd-1", extra_labels=("turma-pr:42",)),
+            _ref("bd-2", extra_labels=("turma-pr:7",)),
+        ),
+    )
+
+    captured = capsys.readouterr()
+    assert (
+        "reconcile:   bd-1 → skipped (merge-tracked at PR #42)"
+        in captured.out
+    )
+    assert (
+        "reconcile:   bd-2 → skipped (merge-tracked at PR #7)"
+        in captured.out
+    )
+
+
+def test_mixed_merge_tracked_and_regular_classification(
+    tmp_path: Path,
+) -> None:
+    """A merge-tracked task and a regular in_progress task in the
+    same run: skip the labelled one, classify the other normally.
+    Critical: the merge-tracked task's branch must still count as a
+    claimed branch so the orphan-branch loop doesn't misclassify it."""
+    # bd-tracked is merge-tracked; bd-stale has no sentinels.
+    _make_worktree(tmp_path, "oauth", "bd-tracked")
+    _make_worktree(tmp_path, "oauth", "bd-stale")
+
+    report, *_ = _reconcile(
+        tmp_path,
+        in_progress=(
+            _ref("bd-tracked", extra_labels=("turma-pr:5",)),
+            _ref("bd-stale"),
+        ),
+        task_branches=(
+            "task/oauth/bd-tracked",
+            "task/oauth/bd-stale",
+        ),
+    )
+
+    # Only bd-stale is classified.
+    assert len(report.findings) == 1
+    assert isinstance(report.findings[0], StaleNoSentinels)
+    assert report.findings[0].task_id == "bd-stale"
+    # bd-tracked surfaces via merge_tracked, NOT findings.
+    assert report.merge_tracked == (("bd-tracked", 5),)
+    # bd-tracked's branch is NOT classified as orphan, even though
+    # the task wasn't classified — it's still a claimed branch.
+    assert not any(
+        isinstance(f, OrphanBranch) and f.branch == "task/oauth/bd-tracked"
+        for f in report.findings
+    )
+
+
+def test_finding_1_regression_merged_pr_not_classified_as_completion_pending(
+    tmp_path: Path,
+) -> None:
+    """**Finding 1 regression**: an in_progress task with
+    `.task_complete` AND `turma-pr:<N>` AND no open PR for the
+    branch (because the PR was just merged on GitHub) must NOT be
+    classified as `completion-pending`. Pre-fix, the missing open
+    PR caused `_classify_task` to return `CompletionPending`, which
+    the repair phase then "fixed" by opening a duplicate PR.
+
+    With the skip in place, the task is owned by merge-advancement
+    and the report contains zero findings for it."""
+    worktree = _make_worktree(tmp_path, "oauth", "bd-merged")
+    (worktree / ".task_complete").write_text("DONE\n")
+
+    # Critically: the stub PR adapter has no entry for this branch
+    # — simulating a merged (not-OPEN) PR that
+    # find_open_pr_url_for_branch can't see.
+    report, _, _, _, pr = _reconcile(
+        tmp_path,
+        in_progress=(_ref("bd-merged", extra_labels=("turma-pr:99",)),),
+        pr_urls={},  # no open PR for this branch
+    )
+
+    # No CompletionPending. No CompletionPendingWithPr either.
+    assert not any(
+        isinstance(f, (CompletionPending, CompletionPendingWithPr))
+        for f in report.findings
+    )
+    assert report.findings == ()
+    assert report.merge_tracked == (("bd-merged", 99),)
+    # The defensive check: the gh adapter was NOT consulted, so
+    # there's no risk of an "open PR not found" path firing.
+    assert not any(
+        c[0] == "find_open_pr_url_for_branch" for c in pr.calls
+    )
+
+
+def test_malformed_turma_pr_label_falls_through_to_classification(
+    tmp_path: Path,
+) -> None:
+    """A label like `turma-pr:not-a-number` is corrupt.
+    `_extract_pr_number` returns None for it, which means "not
+    merge-tracked" — the task falls through to normal classification.
+    Mirrors the defensive shape `_extract_pr_number` pins at the
+    adapter level."""
+    worktree = _make_worktree(tmp_path, "oauth", "bd-corrupt")
+    (worktree / ".task_complete").write_text("DONE\n")
+
+    report, *_ = _reconcile(
+        tmp_path,
+        in_progress=(
+            _ref("bd-corrupt", extra_labels=("turma-pr:not-a-number",)),
+        ),
+    )
+
+    # Falls through: normal completion-pending classification fires.
+    assert len(report.findings) == 1
+    assert isinstance(report.findings[0], CompletionPending)
+    assert report.findings[0].task_id == "bd-corrupt"
+    # And it's NOT in merge_tracked.
+    assert report.merge_tracked == ()
