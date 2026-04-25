@@ -588,14 +588,15 @@ def test_get_pr_state_by_number_parses_closed_state() -> None:
 
 
 def test_get_pr_state_by_number_treats_draft_pr_as_open() -> None:
-    """`gh pr view --json state` returns "OPEN" for draft PRs;
-    draftness lives on a separate `isDraft` boolean field that v1
-    does not query. The adapter contract is "use the value `state`
-    returns" — `isDraft: true` in the surrounding payload (which
-    can come back even when not requested, since `gh` is loose
-    about extra fields) does not change the result.
+    """Pin the narrower invariant the adapter actually owns: the
+    parser uses whatever value `state` carries and ignores any
+    other fields in the payload, including `isDraft`. The fixture
+    sets `state == "OPEN"` and `isDraft: true`; the result must be
+    `state == "OPEN"`. v1 does not differentiate drafts — if that
+    ever changes, both the fixture and the adapter contract
+    update together.
 
-    Pinned per the post-merge-advancement design:
+    Per the post-merge-advancement design:
     `openspec/changes/swarm-post-merge-advancement/design.md`.
     """
     adapter = _make_adapter()
