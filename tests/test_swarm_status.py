@@ -17,7 +17,7 @@ import pytest
 
 from turma.errors import PlanningError
 from turma.swarm import SwarmServices
-from turma.swarm.pull_request import PrSummary
+from turma.swarm.pull_request import PrState, PrSummary
 from turma.swarm.status import status_readout
 from turma.transcription.beads import BeadsTaskRef, BeadsTaskSnapshot
 
@@ -119,6 +119,8 @@ class StubGit:
 class StubPr:
     prs: tuple[PrSummary, ...] = ()
     list_raises: PlanningError | None = None
+    pr_states: dict[int, PrState] = field(default_factory=dict)
+    state_raises: PlanningError | None = None
     calls: list[tuple] = field(default_factory=list)
 
     def list_prs_for_feature(
@@ -128,6 +130,18 @@ class StubPr:
         if self.list_raises is not None:
             raise self.list_raises
         return self.prs
+
+    def get_pr_state_by_number(self, pr_number: int) -> PrState:
+        self.calls.append(("get_pr_state_by_number", pr_number))
+        if self.state_raises is not None:
+            raise self.state_raises
+        try:
+            return self.pr_states[pr_number]
+        except KeyError as exc:
+            raise AssertionError(
+                f"StubPr.get_pr_state_by_number({pr_number}) called but no "
+                f"fixture; configure pr_states={{{pr_number}: PrState(...)}}"
+            ) from exc
 
     # Mutation surfaces.
     def open_pr(self, *args, **kwargs) -> str:
@@ -197,9 +211,16 @@ def _snap(
     )
 
 
-def _ref(task_id: str, *, title: str = "t") -> BeadsTaskRef:
+def _ref(
+    task_id: str,
+    *,
+    title: str = "t",
+    extra_labels: tuple[str, ...] = (),
+) -> BeadsTaskRef:
     return BeadsTaskRef(
-        id=task_id, title=title, labels=("feature:oauth",)
+        id=task_id,
+        title=title,
+        labels=("feature:oauth", *extra_labels),
     )
 
 
@@ -228,7 +249,10 @@ def test_status_readout_never_calls_any_mutation_surface(
             _snap("bd-5", status="blocked"),
         ),
         ready_tasks=(_ref("bd-2"),),
-        in_progress_tasks=(_ref("bd-1"),),
+        # bd-1 carries `turma-pr:1` so the in-progress section
+        # exercises the new `get_pr_state_by_number` adapter path
+        # under the no-mutation invariant.
+        in_progress_tasks=(_ref("bd-1", extra_labels=("turma-pr:1",)),),
         retries={"bd-1": 0},
     )
     pr = StubPr(
@@ -240,7 +264,12 @@ def test_status_readout_never_calls_any_mutation_surface(
                 title="t",
                 head_branch="task/oauth/bd-1",
             ),
-        )
+        ),
+        pr_states={
+            1: PrState(
+                number=1, state="OPEN", url="https://example/pr/1"
+            )
+        },
     )
     services, _, wt, git, _ = _make_services(
         tmp_path,
@@ -487,6 +516,132 @@ def test_in_progress_section_empty_renders_none(tmp_path: Path) -> None:
     out = status_readout("oauth", services=services, repo_root=tmp_path)
 
     assert "in-progress tasks:\n  (none)" in out
+
+
+def test_in_progress_section_renders_pr_line_when_label_present(
+    tmp_path: Path,
+) -> None:
+    """An in-progress task carrying a `turma-pr:<N>` label gets a
+    `pr: #<N> (<state>) <url>` line under the existing worktree /
+    sentinel lines. State + url come from the live
+    `get_pr_state_by_number` response, not the cached label, so
+    operators see GitHub's view rather than stale local state."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        in_progress_tasks=(
+            _ref("bd-1", title="Wire OAuth", extra_labels=("turma-pr:42",)),
+        ),
+    )
+    pr = StubPr(
+        pr_states={
+            42: PrState(
+                number=42,
+                state="OPEN",
+                url="https://github.com/o/r/pull/42",
+            )
+        }
+    )
+    services, _, _, _, pr_stub = _make_services(
+        tmp_path, beads=beads, pr=pr
+    )
+
+    out = status_readout("oauth", services=services, repo_root=tmp_path)
+
+    assert "    pr: #42 (OPEN) https://github.com/o/r/pull/42" in out
+    assert ("get_pr_state_by_number", 42) in pr_stub.calls
+
+
+def test_in_progress_section_renders_pr_line_when_pr_merged(
+    tmp_path: Path,
+) -> None:
+    """A MERGED state still renders. The next `turma run` will
+    advance it; in the meantime `turma status` shows the operator
+    why the task is still in_progress (waiting on the next sweep,
+    not on PR action)."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        in_progress_tasks=(
+            _ref("bd-1", extra_labels=("turma-pr:7",)),
+        ),
+    )
+    pr = StubPr(
+        pr_states={
+            7: PrState(
+                number=7, state="MERGED", url="https://github.com/o/r/pull/7"
+            )
+        }
+    )
+    services, *_ = _make_services(tmp_path, beads=beads, pr=pr)
+
+    out = status_readout("oauth", services=services, repo_root=tmp_path)
+
+    assert "    pr: #7 (MERGED) https://github.com/o/r/pull/7" in out
+
+
+def test_in_progress_section_no_pr_line_when_label_absent(
+    tmp_path: Path,
+) -> None:
+    """In-progress task with no `turma-pr:` label renders the
+    existing three lines (retries / worktree / sentinel) and
+    nothing else. `get_pr_state_by_number` is NOT called — pinning
+    the label-gated dispatch so a labelless task in_progress (the
+    pre-merge-advancement state, or a hand-claimed task) does not
+    accidentally trigger gh I/O."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(in_progress_tasks=(_ref("bd-1"),))  # no extra labels
+    services, _, _, _, pr_stub = _make_services(tmp_path, beads=beads)
+
+    out = status_readout("oauth", services=services, repo_root=tmp_path)
+
+    assert "    pr:" not in out
+    assert not any(
+        c[0] == "get_pr_state_by_number" for c in pr_stub.calls
+    )
+
+
+def test_in_progress_section_pr_state_failure_propagates(
+    tmp_path: Path,
+) -> None:
+    """`gh pr view` failure during the readout raises through. The
+    no-partial-readout rule applies: better to surface the gh
+    failure than to render a half-populated in-progress section
+    that hides the error."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        in_progress_tasks=(
+            _ref("bd-1", extra_labels=("turma-pr:42",)),
+        ),
+    )
+    pr = StubPr(
+        state_raises=PlanningError("gh pr view failed: 404 not found")
+    )
+    services, *_ = _make_services(tmp_path, beads=beads, pr=pr)
+
+    with pytest.raises(PlanningError, match="404 not found"):
+        status_readout("oauth", services=services, repo_root=tmp_path)
+
+
+def test_in_progress_section_skips_pr_line_for_malformed_label(
+    tmp_path: Path,
+) -> None:
+    """A `turma-pr:not-a-number` label is corrupt — the parser
+    returns None and the section renders without the PR line.
+    `get_pr_state_by_number` is NOT called. Mirrors the defensive
+    shape `_extract_pr_number` already pins at the adapter level."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        in_progress_tasks=(
+            _ref("bd-1", extra_labels=("turma-pr:not-a-number",)),
+        ),
+    )
+    services, _, _, _, pr_stub = _make_services(tmp_path, beads=beads)
+
+    out = status_readout("oauth", services=services, repo_root=tmp_path)
+
+    assert "    pr:" not in out
+    assert not any(
+        c[0] == "get_pr_state_by_number" for c in pr_stub.calls
+    )
 
 
 # ---------------------------------------------------------------------

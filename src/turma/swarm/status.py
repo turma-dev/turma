@@ -26,9 +26,13 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 from turma.swarm._orchestrator import SwarmServices
-from turma.swarm.pull_request import PrSummary
+from turma.swarm.pull_request import PrState, PrSummary
 from turma.swarm.worker import TASK_COMPLETE_SENTINEL, TASK_FAILED_SENTINEL
-from turma.transcription.beads import BeadsTaskRef, BeadsTaskSnapshot
+from turma.transcription.beads import (
+    BeadsTaskRef,
+    BeadsTaskSnapshot,
+    _extract_pr_number,
+)
 
 
 NEEDS_HUMAN_REVIEW_LABEL = "needs_human_review"
@@ -106,6 +110,19 @@ def status_readout(
     branches = services.worktree.list_task_branches(feature)
     prs = services.pr.list_prs_for_feature(feature, services.worktree)
 
+    # Per-task PR state for the in-progress section's `pr:` line.
+    # Only fires for tasks carrying a `turma-pr:<N>` label — the
+    # contract introduced by the merge-advancement phase. Tasks
+    # without the label render as today (no `pr:` line).
+    in_progress_pr_states: dict[str, PrState] = {}
+    for task in in_progress_tasks:
+        pr_number = _extract_pr_number(task.labels)
+        if pr_number is None:
+            continue
+        in_progress_pr_states[task.id] = (
+            services.pr.get_pr_state_by_number(pr_number)
+        )
+
     return _render(
         feature=feature,
         preflight=preflight,
@@ -113,6 +130,7 @@ def status_readout(
         ready_tasks=ready_tasks,
         in_progress_tasks=in_progress_tasks,
         in_progress_retries=in_progress_retries,
+        in_progress_pr_states=in_progress_pr_states,
         max_retries=services.max_retries,
         worktree_manager=services.worktree,
         branches=branches,
@@ -229,6 +247,7 @@ def _render(
     ready_tasks: tuple[BeadsTaskRef, ...],
     in_progress_tasks: tuple[BeadsTaskRef, ...],
     in_progress_retries: dict[str, int],
+    in_progress_pr_states: dict[str, PrState],
     max_retries: int,
     worktree_manager: _WorktreeView,
     branches: tuple[str, ...],
@@ -242,6 +261,7 @@ def _render(
             feature=feature,
             in_progress_tasks=in_progress_tasks,
             retries=in_progress_retries,
+            pr_states=in_progress_pr_states,
             max_retries=max_retries,
             worktree_manager=worktree_manager,
         ),
@@ -302,6 +322,7 @@ def _render_in_progress(
     feature: str,
     in_progress_tasks: tuple[BeadsTaskRef, ...],
     retries: dict[str, int],
+    pr_states: dict[str, PrState],
     max_retries: int,
     worktree_manager: _WorktreeView,
 ) -> str:
@@ -320,6 +341,11 @@ def _render_in_progress(
         else:
             lines.append(f"    worktree: {worktree}/ (absent)")
             lines.append("    sentinel: none")
+        pr_state = pr_states.get(task.id)
+        if pr_state is not None:
+            lines.append(
+                f"    pr: #{pr_state.number} ({pr_state.state}) {pr_state.url}"
+            )
     return "\n".join(lines)
 
 
