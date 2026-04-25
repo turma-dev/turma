@@ -400,7 +400,10 @@ def test_reconciliation_never_calls_any_mutation_surface(
         ),
         task_branches=("task/oauth/bd-orphan",),
     )
-    mutating_bd_methods = {"claim_task", "close_task", "fail_task"}
+    mutating_bd_methods = {
+        "claim_task", "close_task", "fail_task",
+        "mark_pr_open", "unmark_pr_open",
+    }
     assert not any(c[0] in mutating_bd_methods for c in bd.calls)
     mutating_wt_methods = {"setup", "cleanup"}
     assert not any(c[0] in mutating_wt_methods for c in wt.calls)

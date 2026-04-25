@@ -25,6 +25,7 @@ import pytest
 
 from turma.errors import PlanningError
 from turma.swarm import SwarmServices, run_swarm
+from turma.swarm._orchestrator import _pr_number_from_url
 from turma.swarm.worker import WorkerInvocation, WorkerResult
 from turma.swarm.worktree import WorktreeRef
 from turma.transcription.beads import BeadsTaskRef
@@ -45,6 +46,8 @@ class StubBeads:
     calls: list[tuple] = field(default_factory=list)
     failed: list[tuple[str, str, int, int]] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)
+    pr_marked: list[tuple[str, int]] = field(default_factory=list)
+    pr_unmarked: list[tuple[str, int]] = field(default_factory=list)
 
     # read-only surfaces --------------------------------------------------
 
@@ -98,6 +101,14 @@ class StubBeads:
     def close_task(self, task_id: str) -> None:
         self.calls.append(("close_task", task_id))
         self.closed.append(task_id)
+
+    def mark_pr_open(self, task_id: str, pr_number: int) -> None:
+        self.calls.append(("mark_pr_open", task_id, pr_number))
+        self.pr_marked.append((task_id, pr_number))
+
+    def unmark_pr_open(self, task_id: str, pr_number: int) -> None:
+        self.calls.append(("unmark_pr_open", task_id, pr_number))
+        self.pr_unmarked.append((task_id, pr_number))
 
     def fail_task(
         self,
@@ -353,11 +364,18 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     )
     run_swarm("oauth", services=services)
 
-    # Beads: claim, get_task_body (for invocation), close. No fail.
+    # Beads: claim, get_task_body (for invocation), mark_pr_open.
+    # No fail. close_task is deferred to the merge-advancement
+    # sweep on a future `turma run` invocation per
+    # `openspec/changes/swarm-post-merge-advancement/`.
     ordered = [c[0] for c in beads.calls]
     assert "claim_task" in ordered
-    assert "close_task" in ordered
+    assert "mark_pr_open" in ordered
+    assert "close_task" not in ordered
     assert "fail_task" not in ordered
+    # PR number 1 derives from the StubPr default URL
+    # (`https://github.com/example/repo/pull/1`).
+    assert beads.pr_marked == [("bd-1", 1)]
 
     # Worker received the rehydrated description.
     assert worker.invocations[0].description == "Subtask body here."
@@ -377,9 +395,11 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     assert "Closes bd-1." in body
     assert "Subtask body here." in body
 
-    # Worktree set up and cleaned up exactly once.
+    # Worktree set up exactly once. Cleanup is deferred to the
+    # merge-advancement sweep on a future invocation, not the
+    # success path itself.
     assert [c[0] for c in wt.calls].count("setup") == 1
-    assert [c[0] for c in wt.calls].count("cleanup") == 1
+    assert [c[0] for c in wt.calls].count("cleanup") == 0
 
 
 def test_multi_task_sequential_loop(tmp_path: Path) -> None:
@@ -392,7 +412,11 @@ def test_multi_task_sequential_loop(tmp_path: Path) -> None:
     )
     run_swarm("oauth", services=services)
 
-    assert beads.closed == ["bd-1", "bd-2"]
+    # Both tasks reached the success-path tail and got labelled
+    # `turma-pr:<N>`; close happens later via the merge-advancement
+    # sweep on a future run.
+    assert beads.pr_marked == [("bd-1", 1), ("bd-2", 1)]
+    assert beads.closed == []
     # Two PR URLs opened; order matches claim order.
     assert [c[1] for c in pr.calls] == [
         "task/oauth/bd-1",
@@ -409,8 +433,12 @@ def test_max_tasks_caps_iterations(tmp_path: Path) -> None:
     )
     run_swarm("oauth", services=services, max_tasks=1)
 
-    # Only bd-1 closed; loop stopped before bd-2.
-    assert beads.closed == ["bd-1"]
+    # Only bd-1 was processed; loop stopped before bd-2. The
+    # success path now ends at `mark_pr_open` rather than
+    # `close_task` (close is deferred to the merge-advancement
+    # sweep).
+    assert beads.pr_marked == [("bd-1", 1)]
+    assert beads.closed == []
 
 
 # ---------------------------------------------------------------------
@@ -435,11 +463,14 @@ def test_claim_race_skips_raced_task_and_continues(tmp_path: Path) -> None:
     )
     run_swarm("oauth", services=services)
 
-    # Raced task was attempted (claim raised), winner closed normally.
+    # Raced task was attempted (claim raised), winner reached the
+    # success-path tail (mark_pr_open). close_task is deferred to
+    # the merge-advancement sweep.
     claim_ids = [c[1] for c in beads.calls if c[0] == "claim_task"]
     assert "bd-race" in claim_ids
     assert "bd-winner" in claim_ids
-    assert beads.closed == ["bd-winner"]
+    assert beads.pr_marked == [("bd-winner", 1)]
+    assert beads.closed == []
     # Worker only ran for the winner.
     assert [inv.task_id for inv in worker.invocations] == ["bd-winner"]
 
@@ -493,9 +524,12 @@ def test_worker_failure_with_budget_remaining_retries(tmp_path: Path) -> None:
     )
     run_swarm("oauth", services=services)
 
-    # One failure recorded, one successful close.
+    # One failure recorded; the retry reached the success-path
+    # tail and labelled the task `turma-pr:<N>` (close happens
+    # later via the merge-advancement sweep).
     assert [e[1] for e in beads.failed] == ["timeout"]
-    assert beads.closed == ["bd-1"]
+    assert beads.pr_marked == [("bd-1", 1)]
+    assert beads.closed == []
 
 
 def test_worker_failure_with_exhausted_budget_halts_loop(
@@ -838,9 +872,11 @@ def test_clear_sentinels_removes_stale_both_before_worker_invocation(
 
     # Neither sentinel was visible at the moment worker.run() fired.
     assert worker.sentinels_present_at_run == []
-    # Happy path: task closed, no fail_task contamination from the
-    # stale .task_failed reason.
-    assert beads.closed == ["bd-1"]
+    # Happy path: task labelled `turma-pr:<N>` (mark_pr_open), no
+    # fail_task contamination from the stale .task_failed reason.
+    # close_task is deferred to the merge-advancement sweep.
+    assert beads.pr_marked == [("bd-1", 1)]
+    assert beads.closed == []
     assert beads.failed == []
 
 
@@ -866,7 +902,10 @@ def test_clear_sentinels_stale_failed_only_does_not_leak_into_fail_task(
     run_swarm("oauth", services=services)
 
     assert worker.sentinels_present_at_run == []
-    assert beads.closed == ["bd-1"]
+    # Success path now ends at `mark_pr_open`; `close_task` is
+    # deferred to the merge-advancement sweep.
+    assert beads.pr_marked == [("bd-1", 1)]
+    assert beads.closed == []
     assert beads.failed == []
 
 
@@ -885,7 +924,10 @@ def test_clear_sentinels_is_noop_on_fresh_worktree(
     # No sentinels, no worktree dir; StubWorktree.setup will mkdir.
     run_swarm("oauth", services=services)
 
-    assert beads.closed == ["bd-1"]
+    # Success path now ends at `mark_pr_open`; `close_task` is
+    # deferred to the merge-advancement sweep.
+    assert beads.pr_marked == [("bd-1", 1)]
+    assert beads.closed == []
     assert beads.failed == []
     # Worker invoked exactly once; no error path entered.
     assert len(worker.invocations) == 1
@@ -931,8 +973,10 @@ def test_repair_orphan_branch_log_suppressed_for_ready_task_retry(
     assert "task/oauth/bd-retry → orphan-branch" in captured.out
     # But the misleading operator-facing repair log line is suppressed.
     assert "orphan branch (operator triage)" not in captured.out
-    # Main loop proceeded to claim + close the task.
-    assert beads.closed == ["bd-retry"]
+    # Main loop proceeded to claim + label the task; close happens
+    # later via the merge-advancement sweep.
+    assert beads.pr_marked == [("bd-retry", 1)]
+    assert beads.closed == []
 
 
 def test_repair_orphan_branch_still_logs_for_genuinely_orphaned(
@@ -989,3 +1033,67 @@ def test_repair_orphan_branch_mixed_suppresses_only_retry_match(
         "repair: orphan branch (operator triage): "
         "task/oauth/bd-retry"
     ) not in captured.out
+
+
+# ---------------------------------------------------------------------
+# _pr_number_from_url
+# ---------------------------------------------------------------------
+
+
+def test_pr_number_from_url_canonical() -> None:
+    assert (
+        _pr_number_from_url(
+            "https://github.com/turma-dev/turma/pull/42"
+        )
+        == 42
+    )
+
+
+def test_pr_number_from_url_canonical_with_trailing_slash() -> None:
+    assert (
+        _pr_number_from_url(
+            "https://github.com/owner/repo/pull/7/"
+        )
+        == 7
+    )
+
+
+def test_pr_number_from_url_rejects_issue_url() -> None:
+    """`/issues/<N>` is the wrong path segment — not a PR URL."""
+    with pytest.raises(PlanningError, match="Could not parse"):
+        _pr_number_from_url(
+            "https://github.com/owner/repo/issues/42"
+        )
+
+
+def test_pr_number_from_url_rejects_non_https() -> None:
+    """`gh pr create` only emits https URLs; an http URL is a
+    contract violation, halt rather than guess."""
+    with pytest.raises(PlanningError, match="Could not parse"):
+        _pr_number_from_url(
+            "http://github.com/owner/repo/pull/1"
+        )
+
+
+def test_pr_number_from_url_rejects_empty_string() -> None:
+    with pytest.raises(PlanningError, match="Could not parse"):
+        _pr_number_from_url("")
+
+
+def test_pr_number_from_url_rejects_url_without_number() -> None:
+    with pytest.raises(PlanningError, match="Could not parse"):
+        _pr_number_from_url(
+            "https://github.com/owner/repo/pull/"
+        )
+
+
+def test_pr_number_from_url_rejects_url_with_query_string() -> None:
+    """`gh pr create` returns the URL on its own line without query
+    params; if a future surface ever adds them the parser
+    surfaces a `PlanningError` so the orchestrator halts before
+    silently misrecording. Update the regex if/when this becomes
+    a real case."""
+    with pytest.raises(PlanningError, match="Could not parse"):
+        _pr_number_from_url(
+            "https://github.com/owner/repo/pull/1?tab=conversation"
+        )

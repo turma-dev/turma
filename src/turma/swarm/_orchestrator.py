@@ -15,6 +15,7 @@ live subprocess in this module's unit-test scope.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -46,6 +47,36 @@ from turma.transcription.beads import BeadsAdapter, BeadsTaskRef
 CLEAN_TREE_REASON = "worker reported success but left the tree clean"
 TURMA_TYPE_LABEL_PREFIX = "turma-type:"
 _DEFAULT_TURMA_TYPE = "impl"
+
+# `gh pr create` returns the PR URL on its own line on success; the
+# orchestrator records the PR's number on the bd task via
+# `mark_pr_open` so the merge-advancement sweep can look it up
+# directly. Pinned to GitHub's canonical PR URL shape; if `gh` ever
+# returns a non-canonical form, `_pr_number_from_url` raises
+# `PlanningError` rather than silently misrecording.
+_PR_URL_PATTERN = re.compile(
+    r"^https://github\.com/[^/]+/[^/]+/pull/(\d+)/?$"
+)
+
+
+def _pr_number_from_url(url: str) -> int:
+    """Parse a GitHub PR URL into its integer PR number.
+
+    `gh pr create` returns URLs of the canonical form
+    `https://github.com/<owner>/<repo>/pull/<N>` (with an optional
+    trailing slash). The orchestrator's success path depends on
+    extracting `<N>` from that URL so it can label the bd task
+    via `mark_pr_open(task_id, N)`. Raises `PlanningError` on
+    URLs that don't match the canonical pattern — internal
+    contract violation, halt rather than guess.
+    """
+    match = _PR_URL_PATTERN.match(url)
+    if match is None:
+        raise PlanningError(
+            f"Could not parse PR number from URL: {url!r}. "
+            "Expected `https://github.com/<owner>/<repo>/pull/<N>`."
+        )
+    return int(match.group(1))
 
 
 # ---------------------------------------------------------------------
@@ -410,9 +441,20 @@ def _run_single_task(
     except PlanningError as exc:
         return _handle_failure(services, task.id, str(exc))
 
-    services.beads.close_task(task.id)
-    services.worktree.cleanup(ref)
-    print(f"swarm: closed {task.id} (PR: {pr_url})")
+    # Defer `close_task` + `cleanup_worktree` to the merge-
+    # advancement sweep on a future `turma run` invocation: a PR
+    # has been opened, but the human reviewer hasn't merged it
+    # yet. Until then the task stays `in_progress` with a
+    # `turma-pr:<N>` label, the worktree stays on disk, and any
+    # task that depends on this one stays blocked-by-deps. See
+    # `openspec/changes/swarm-post-merge-advancement/` for the
+    # full contract; the merge-advancement phase
+    # (`_advance_merged_prs`, future task) consumes the label.
+    pr_number = _pr_number_from_url(pr_url)
+    services.beads.mark_pr_open(task.id, pr_number)
+    print(
+        f"swarm: opened {task.id} (PR: {pr_url}; awaiting merge)"
+    )
     return False
 
 
