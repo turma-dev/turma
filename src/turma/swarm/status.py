@@ -17,6 +17,14 @@ branches section uses `reconcile_feature`'s exact
 `in_progress`-only filter and does not redefine the v1
 reconciliation contract (see `design.md` "orphan branches"
 subsection for the rationale).
+
+The adapter read pipeline was originally pinned as five steps
+(bd snapshots → ready → in-progress + retries → branches →
+list_prs_for_feature). The merge-advancement arc adds an
+additive sixth phase: per-in-progress-task
+`get_pr_state_by_number` gated on the `turma-pr:<N>` label.
+See `openspec/changes/swarm-post-merge-advancement/design.md`
+"`turma status` read-pipeline addition" for the contract.
 """
 
 from __future__ import annotations
@@ -89,12 +97,17 @@ def status_readout(
     """
     preflight = _check_preflight(feature, repo_root)
 
-    # Adapter reads in the order pinned by design.md:
+    # Adapter reads in the order pinned by the turma-status arc
+    # plus the additive sixth phase from the merge-advancement
+    # arc (see module docstring for spec references):
     #   1. all-statuses snapshots (for counters + orphan filter).
     #   2. ready task list.
     #   3. in-progress task list + per-task retries.
     #   4. worktree branches.
     #   5. PRs for the feature.
+    #   6. per-in-progress-task PR state, gated on the
+    #      `turma-pr:<N>` label (additive — labelless tasks
+    #      trigger zero gh I/O).
     all_snapshots = services.beads.list_feature_tasks_all_statuses(feature)
     ready_tasks = services.beads.list_ready_tasks(feature)
     in_progress_tasks = services.beads.list_in_progress_tasks(feature)
@@ -110,10 +123,6 @@ def status_readout(
     branches = services.worktree.list_task_branches(feature)
     prs = services.pr.list_prs_for_feature(feature, services.worktree)
 
-    # Per-task PR state for the in-progress section's `pr:` line.
-    # Only fires for tasks carrying a `turma-pr:<N>` label — the
-    # contract introduced by the merge-advancement phase. Tasks
-    # without the label render as today (no `pr:` line).
     in_progress_pr_states: dict[str, PrState] = {}
     for task in in_progress_tasks:
         pr_number = _extract_pr_number(task.labels)
