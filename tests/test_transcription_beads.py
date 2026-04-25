@@ -720,27 +720,145 @@ def test_pr_label_prefix_is_documented_constant() -> None:
 
 
 def test_mark_pr_open_pins_argv() -> None:
+    """When the label is absent, mark_pr_open issues `bd show` to
+    precheck and then `bd update --add-label`. Pin both argvs in
+    order — the precheck is part of the adapter's contract."""
     seen: list[list[str]] = []
 
     def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {"id": "bd-42", "labels": ["feature:oauth"]}
+                ),
+            )
         return _completed(argv)
 
     adapter = _make_adapter_with_run(run)
     adapter.mark_pr_open("bd-42", 17)
 
     assert seen == [
-        ["bd", "update", "bd-42", "--add-label", "turma-pr:17"]
+        ["bd", "show", "bd-42", "--json"],
+        ["bd", "update", "bd-42", "--add-label", "turma-pr:17"],
     ]
 
 
-def test_mark_pr_open_surfaces_stderr_on_failure() -> None:
+def test_mark_pr_open_skips_update_when_label_already_present() -> None:
+    """Adapter-level idempotency: if `turma-pr:<N>` is already on
+    the task, `bd update --add-label` is NOT called. Lets repair-
+    phase callers re-issue mark_pr_open on each iteration without
+    creating duplicate-label noise (and matches the pre-existing
+    contract for `unmark_pr_open`, which is idempotent via bd's
+    own `--remove-label` no-op semantics)."""
+    seen: list[list[str]] = []
+
     def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "id": "bd-42",
+                        "labels": ["feature:oauth", "turma-pr:17"],
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 17)
+
+    assert seen == [["bd", "show", "bd-42", "--json"]]
+
+
+def test_mark_pr_open_idempotent_across_consecutive_calls() -> None:
+    """Two consecutive `mark_pr_open(task, N)` calls result in
+    exactly one `bd update --add-label` invocation. Pins the
+    integration-level idempotency the repair phase relies on:
+    `_apply_repairs` may observe `CompletionPendingWithPr` on
+    every run until the PR merges; each pass calls mark_pr_open
+    but only the first should issue the bd write."""
+    seen: list[list[str]] = []
+    label_added = False
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        nonlocal label_added
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            labels = ["feature:oauth"]
+            if label_added:
+                labels.append("turma-pr:17")
+            return _completed(
+                argv, stdout=json.dumps({"id": "bd-42", "labels": labels})
+            )
+        if argv[:2] == ["bd", "update"]:
+            label_added = True
+            return _completed(argv)
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-42", 17)
+    adapter.mark_pr_open("bd-42", 17)
+
+    update_calls = [a for a in seen if a[:2] == ["bd", "update"]]
+    show_calls = [a for a in seen if a[:2] == ["bd", "show"]]
+    assert len(update_calls) == 1
+    assert len(show_calls) == 2  # precheck runs both times
+
+
+def test_mark_pr_open_surfaces_stderr_on_failure() -> None:
+    """A non-zero exit on the `bd update` write surfaces as a
+    PlanningError with bd's stderr preserved. The precheck
+    succeeds (label absent) so the failure happens on the write."""
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["bd", "show"]:
+            return _completed(
+                argv,
+                stdout=json.dumps({"id": "bd-1", "labels": []}),
+            )
         raise PlanningError("bd update failed: exit 1\nbd: not authenticated")
 
     adapter = _make_adapter_with_run(run)
     with pytest.raises(PlanningError, match="not authenticated"):
         adapter.mark_pr_open("bd-1", 5)
+
+
+def test_mark_pr_open_surfaces_show_parse_failure() -> None:
+    """A garbled `bd show` payload during the precheck surfaces as
+    a PlanningError rather than silently being treated as
+    label-absent — masking a parse error there would make
+    mark_pr_open issue a write against a task whose state we
+    couldn't actually inspect."""
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["bd", "show"]:
+            return _completed(argv, stdout="not json {")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    with pytest.raises(PlanningError, match="non-JSON"):
+        adapter.mark_pr_open("bd-1", 5)
+
+
+def test_mark_pr_open_treats_empty_show_as_label_absent() -> None:
+    """Empty stdout from `bd show` (e.g. unknown task id) is
+    treated as label-absent so the write proceeds — bd will then
+    surface its own "not found" error on the update call. The
+    adapter doesn't second-guess bd's notion of existence."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], *, step: str) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        if argv[:2] == ["bd", "show"]:
+            return _completed(argv, stdout="")
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    adapter.mark_pr_open("bd-1", 5)
+
+    assert any(a[:2] == ["bd", "update"] for a in seen)
 
 
 def test_unmark_pr_open_pins_argv() -> None:
