@@ -365,6 +365,46 @@ These two changes preserve the v1 invariant that
 `close_task` and `cleanup_worktree` only fire after a PR
 merge has been observed.
 
+## `turma status` read-pipeline addition
+
+The turma-status arc pinned the status module's adapter
+reads as a five-step pipeline:
+
+1. `BeadsAdapter.list_feature_tasks_all_statuses(feature)`
+2. `BeadsAdapter.list_ready_tasks(feature)`
+3. `BeadsAdapter.list_in_progress_tasks(feature)` +
+   per-task `retries_so_far`
+4. `WorktreeManager.list_task_branches(feature)`
+5. `PullRequestAdapter.list_prs_for_feature(feature, ...)`
+
+This change adds an **additive sixth read phase**, kept
+explicit so the contract drift is visible:
+
+6. `PullRequestAdapter.get_pr_state_by_number(N)` — fired
+   once per in-progress task whose labels carry a valid
+   `turma-pr:<N>` (the dispatch helper is the same
+   `_extract_pr_number` the merge-advancement sweep uses on
+   `_orchestrator.py`). Tasks without the label trigger
+   zero gh I/O, matching the label-gated dispatch the sweep
+   itself uses.
+
+The new read sits between step 5 and the render step. It
+lives behind the existing no-mutation invariant — the
+headline test in `tests/test_swarm_status.py` is extended
+with a `turma-pr:1` label fixture so the new code path is
+exercised under the same zero-mutation assertion as the
+prior five reads. `gh pr view` failure during the readout
+propagates as `PlanningError`, matching the existing
+no-partial-readout rule.
+
+The status module's render contract gains one line in the
+in-progress section when the label is present:
+`pr: #<N> (<state>) <url>`. State and URL come from the
+live `get_pr_state_by_number` response, not the cached
+label, so MERGED PRs awaiting the next sweep are visible
+to operators reading `turma status` without re-running
+`turma run`.
+
 ## Error surface
 
 All failures raise `PlanningError`, consistent with the rest
