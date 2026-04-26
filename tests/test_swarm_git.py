@@ -540,3 +540,215 @@ def test_fetch_and_ff_base_branch_name_interpolated_into_typed_error(
     assert "origin/develop..develop" in msg
     # No leaked default `main` outside the `develop` substitutions.
     assert "main" not in msg.replace("develop", "")
+
+
+# ---------------------------------------------------------------------
+# revert_paths + path_is_dirty
+# (swarm-beads-state-merge-cleanliness Task 1)
+# ---------------------------------------------------------------------
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_revert_paths_pins_argv_shape(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """`git -C <repo_root> restore --staged --worktree -- <p1> ...`.
+
+    Both `--staged` and `--worktree` because bd's
+    `export.git-add=true` (default) means `bd update` writes
+    AND stages `.beads/issues.jsonl`. A simple
+    `git checkout -- <path>` would only fix the worktree;
+    `restore --staged --worktree` clears both.
+    """
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    adapter = GitAdapter()
+    adapter.revert_paths(tmp_path, (".beads/issues.jsonl",))
+
+    mock_run.assert_called_once()
+    actual_argv = mock_run.call_args.args[0]
+    assert actual_argv == [
+        "git", "-C", str(tmp_path),
+        "restore", "--staged", "--worktree",
+        "--", ".beads/issues.jsonl",
+    ]
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_revert_paths_empty_paths_skips_subprocess(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Empty paths tuple → no subprocess call. Don't fire git
+    with zero paths; its defaults are surprising and we don't
+    want operator confusion if a future call site accidentally
+    passes ()."""
+    adapter = GitAdapter()
+    result = adapter.revert_paths(tmp_path, ())
+
+    assert result is None
+    assert mock_run.call_count == 0
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_revert_paths_multi_path_pins_argv_order(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Paths are passed verbatim in order after `--`.
+    Stable order pins the operator-facing log if/when git
+    fails."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    adapter = GitAdapter()
+    adapter.revert_paths(
+        tmp_path, (".beads/issues.jsonl", ".beads/config.yaml")
+    )
+
+    actual_argv = mock_run.call_args.args[0]
+    assert actual_argv == [
+        "git", "-C", str(tmp_path),
+        "restore", "--staged", "--worktree",
+        "--", ".beads/issues.jsonl", ".beads/config.yaml",
+    ]
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_revert_paths_failure_surfaces_stderr(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Non-zero exit → `PlanningError("git restore failed:
+    ...", stderr_preserved)`. Possible causes: file doesn't
+    exist (operator deleted it), git config issues, file
+    isn't tracked. Halts the run; operator triages."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="",
+        stderr=(
+            "error: pathspec '.beads/issues.jsonl' did not "
+            "match any files\n"
+        ),
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.revert_paths(tmp_path, (".beads/issues.jsonl",))
+    msg = str(exc.value)
+    assert "git restore failed" in msg
+    assert "did not match any files" in msg
+
+
+# path_is_dirty -------------------------------------------------------
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_pins_argv_shape(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """`git -C <repo_root> status --porcelain=v1 -- <path>`.
+    Used by the preflight check before run_swarm to refuse
+    on a pre-existing dirty `.beads/issues.jsonl`."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    adapter = GitAdapter()
+    adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl")
+
+    mock_run.assert_called_once()
+    actual_argv = mock_run.call_args.args[0]
+    assert actual_argv == [
+        "git", "-C", str(tmp_path),
+        "status", "--porcelain=v1", "--", ".beads/issues.jsonl",
+    ]
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_returns_false_on_clean(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Empty stdout (clean working tree) → False."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="", stderr=""
+    )
+    adapter = GitAdapter()
+    assert adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl") is False
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_returns_true_on_modified_unstaged(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Unstaged modification (` M <path>` in porcelain
+    output) → True. This is the post-bd-update state when
+    `export.git-add=false` is configured."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout=" M .beads/issues.jsonl\n",
+        stderr="",
+    )
+    adapter = GitAdapter()
+    assert adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl") is True
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_returns_true_on_staged(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Staged modification (`M  <path>` in porcelain output)
+    → True. This is the post-bd-update state under bd's
+    default `export.git-add=true` config — the case the
+    smoke surfaced."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout="M  .beads/issues.jsonl\n",
+        stderr="",
+    )
+    adapter = GitAdapter()
+    assert adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl") is True
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_returns_false_on_untracked(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Untracked file at the path (`?? <path>` in porcelain
+    output) → False. An untracked file at the bd-state path
+    is the operator's business, not Turma's; we don't
+    refuse to start on it."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout="?? .beads/issues.jsonl\n",
+        stderr="",
+    )
+    adapter = GitAdapter()
+    assert adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl") is False
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_path_is_dirty_failure_surfaces_stderr(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """Non-zero exit → `PlanningError("git status failed:
+    ...", stderr_preserved)`. Surfaces the actual git error
+    to the operator instead of silently treating as
+    clean."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=128,
+        stdout="",
+        stderr="fatal: not a git repository\n",
+    )
+    adapter = GitAdapter()
+    with pytest.raises(PlanningError) as exc:
+        adapter.path_is_dirty(tmp_path, ".beads/issues.jsonl")
+    msg = str(exc.value)
+    assert "git status failed" in msg
+    assert "not a git repository" in msg
