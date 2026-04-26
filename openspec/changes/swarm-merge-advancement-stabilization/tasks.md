@@ -2,24 +2,24 @@
 
 ### 1. Reconciliation skips merge-tracked tasks
 
-- [ ] In `src/turma/swarm/reconciliation.py`, modify the
+- [x] In `src/turma/swarm/reconciliation.py`, modify the
       classification loop so that any in_progress task with
       a valid `turma-pr:<N>` label
       (via `_extract_pr_number`) is skipped before the
       worktree / sentinel / PR checks fire. The task is not
       added to any of the report's finding lists.
-- [ ] Reconciliation prints one log line per skipped task:
+- [x] Reconciliation prints one log line per skipped task:
       ```
       reconcile: <id> → skipped (merge-tracked at PR #<N>)
       ```
       Format must be parseable by the same line-prefix
       pattern the existing `reconcile:` lines use.
-- [ ] Update `reconciliation.py`'s module docstring to
+- [x] Update `reconciliation.py`'s module docstring to
       document the skip behavior and link to this change's
       `design.md` "Reconciliation: skip vs new finding"
       subsection. The "every in-progress task gets a
       finding" property is explicitly retired.
-- [ ] Tests in `tests/test_swarm_reconciliation.py`:
+- [x] Tests in `tests/test_swarm_reconciliation.py`:
       - in_progress task with `turma-pr:<N>` label is
         absent from every finding list in the returned
         report.
@@ -41,7 +41,7 @@
 
 ### 2. `mark_pr_open` becomes set-of-one
 
-- [ ] In `src/turma/transcription/beads.py`, modify
+- [x] In `src/turma/transcription/beads.py`, modify
       `mark_pr_open(task_id, pr_number)`:
       - Read labels via the existing `bd show --json`
         precheck.
@@ -53,12 +53,12 @@
         add `turma-pr:<N>`.
       - Each removal is a separate
         `bd update --remove-label turma-pr:<M>` call.
-- [ ] Update the method's docstring to pin the new
+- [x] Update the method's docstring to pin the new
       invariant: **a bd task carries at most one
       `turma-pr:` label at any time, matching the PR
       currently tracked**. Reference the design.md
       subsection.
-- [ ] Tests in `tests/test_transcription_beads.py`:
+- [x] Tests in `tests/test_transcription_beads.py`:
       - Existing argv-pin test continues to pass for the
         no-prior-label path (single `--add-label`).
       - New: precheck-skip path where the task has
@@ -81,7 +81,7 @@
 
 ### 3. `GitAdapter.fetch_and_ff_base`
 
-- [ ] Add `fetch_and_ff_base(base_branch: str) -> None` to
+- [x] Add `fetch_and_ff_base(base_branch: str) -> None` to
       `GitAdapter` in `src/turma/swarm/git.py`. argv pinned:
       ```
       git -C <repo_root> fetch origin <base_branch>:<base_branch>
@@ -89,7 +89,7 @@
       The colon-form fast-forwards the local ref or fails
       loudly on divergence — single subprocess call, no
       separate merge step.
-- [ ] Failure mapping:
+- [x] Failure mapping:
       - Non-zero exit with stderr containing
         `non-fast-forward` or `rejected` →
         `PlanningError("local <base_branch> has diverged
@@ -100,7 +100,7 @@
       - Any other non-zero exit → `PlanningError` preserving
         git's stderr verbatim, prefixed with
         `git fetch failed:`.
-- [ ] Tests in `tests/test_swarm_git.py`:
+- [x] Tests in `tests/test_swarm_git.py`:
       - argv shape pin (subprocess stub records the call).
       - Happy path returns None on zero exit.
       - Divergent-local → typed PlanningError with the
@@ -110,20 +110,20 @@
 
 ### 4. Orchestrator calls `fetch_and_ff_base` once per run
 
-- [ ] In `src/turma/swarm/_orchestrator.py`'s `run_swarm`,
+- [x] In `src/turma/swarm/_orchestrator.py`'s `run_swarm`,
       call `services.git.fetch_and_ff_base(services.base_branch)`
       after preflight, before `_reconcile`. Wrap the call
       in a `try/except PlanningError` only if needed for
       log-line dressing — otherwise let it propagate
       (preflight failures already halt the run via
       PlanningError today).
-- [ ] Skip the call entirely under `--dry-run`. Print
+- [x] Skip the call entirely under `--dry-run`. Print
       `fetch: skipped (--dry-run)` on dry-run; print
       `fetch: origin/<base_branch> → <base_branch>` on the
       non-dry-run happy path. (No need to compute
       "advanced N commits" — that's cosmetic and v1 omits
       it.)
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - Happy path test: `fetch_and_ff_base` is called
         before reconcile.
       - Fetch failure halts before reconcile: the stub
@@ -137,7 +137,7 @@
 
 ### 5. End-to-end regression test for the chained flow
 
-- [ ] In `tests/test_swarm_run.py`, add
+- [x] In `tests/test_swarm_run.py`, add
       `test_chained_feature_post_merge_advances_dependent`
       that simulates the smoke's failure mode end-to-end
       against stub adapters:
@@ -157,23 +157,23 @@
       - The labels on task A through the run never include
         more than one `turma-pr:` value; final state is
         closed with no `turma-pr:` label remaining.
-- [ ] This test's assertions form the regression contract
+- [x] This test's assertions form the regression contract
       for Findings 1 + 2 + 3 together. If any single fix
       regresses, this test fails.
 
 ### 6. Docs + CHANGELOG
 
-- [ ] `README.md` Swarm Execution: insert a
+- [x] `README.md` Swarm Execution: insert a
       `fetch_and_ff_base` step at the top of the state
       machine description; one short subsection
       "Base-branch sync" between Prerequisites and the
       one-feature loop.
-- [ ] `docs/architecture.md` Execution section: extend the
+- [x] `docs/architecture.md` Execution section: extend the
       state-machine diagram with the new
       `fetch_and_ff_base` node before reconcile; add a
       paragraph explaining that v1 refuses divergent local
       bases (operator triages).
-- [ ] `docs/smoke-turma-run.md`:
+- [x] `docs/smoke-turma-run.md`:
       - Step 2's expected log gains the `fetch:` line at
         the top.
       - Step 3's expected log gains the
@@ -186,7 +186,7 @@
       - Documentation note: the Apr 25 smoke surfaced this
         arc's three findings. Brief paragraph linking to
         this change.
-- [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: roll-up entry
+- [x] `CHANGELOG.md` `[Unreleased]/Fixed`: roll-up entry
       naming the three findings, the contract changes
       (label-aware reconcile, set-of-one `mark_pr_open`,
       base-branch fast-forward), and the regression-test
@@ -194,18 +194,21 @@
 
 ### 7. Validation
 
-- [ ] `uv run pytest` green. Current baseline before this
+- [x] `uv run pytest` green. Current baseline before this
       change set: 514 tests. Expected net add: ~10–14
       across reconciliation skip tests, set-of-one
       adapter tests, fetch_and_ff_base argv tests,
       orchestrator integration tests, and the chained
       regression test.
-- [ ] No new runtime deps in `pyproject.toml`. `git`
+- [x] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
-- [ ] Manual smoke against `khanhgithead/turma-run-smoke`:
-      walk `docs/smoke-turma-run.md` Steps 1 → 2 → 3 with
-      the same two-task chained feature
-      (`smoke-merge`-style spec). Expected differences
+- [ ] Manual smoke against `khanhgithead/turma-run-smoke`
+      (left unchecked until the operator walks the runbook
+      end-to-end against the live scratch; the chained-flow
+      sub-step is now Step 3a in
+      `docs/smoke-turma-run.md`):
+      walk Steps 1 → 2 → 3 with the same two-task chained
+      feature (`smoke-merge`-style spec). Expected differences
       from the Apr 25 run:
       - Run 2's reconciliation skips task 1 (no
         `completion-pending` classification, no duplicate
