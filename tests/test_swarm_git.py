@@ -320,8 +320,24 @@ def test_commit_all_surfaces_commit_subprocess_failure(
 
 
 # ---------------------------------------------------------------------
-# fetch_and_ff_base (swarm-merge-advancement-stabilization Task 3)
+# fetch_and_ff_base
+# (swarm-fetch-and-ff-base-correction supersedes the colon-form
+# from swarm-merge-advancement-stabilization Task 3)
 # ---------------------------------------------------------------------
+
+
+def _ok(stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=stdout, stderr=stderr
+    )
+
+
+def _fail(
+    code: int, stderr: str = "", stdout: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[], returncode=code, stdout=stdout, stderr=stderr
+    )
 
 
 @patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
@@ -329,24 +345,28 @@ def test_commit_all_surfaces_commit_subprocess_failure(
 def test_fetch_and_ff_base_pins_argv_shape(
     mock_run: MagicMock, _which: MagicMock, tmp_path: Path
 ) -> None:
-    """Single-call colon-form fetch:
-    `git -C <repo_root> fetch origin <base>:<base>`.
+    """Three subprocess calls in order: symbolic-ref → fetch → merge.
 
-    The colon-form refspec fetches `origin/<base>` and fast-forwards
-    local `<base>` to match in one operation. No separate
-    `git merge --ff-only` step.
+    See `openspec/changes/swarm-fetch-and-ff-base-correction/`
+    for the contract. The HEAD precheck guards the silent
+    feature-FF footgun the colon-form ignored.
     """
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="", stderr=""
-    )
+    # symbolic-ref returns the current branch name on stdout.
+    mock_run.side_effect = [
+        _ok(stdout="main\n"),  # symbolic-ref
+        _ok(),                 # fetch
+        _ok(),                 # merge
+    ]
     adapter = GitAdapter()
     adapter.fetch_and_ff_base(tmp_path, "main")
 
-    mock_run.assert_called_once()
-    actual_argv = mock_run.call_args.args[0]
-    assert actual_argv == [
-        "git", "-C", str(tmp_path),
-        "fetch", "origin", "main:main",
+    assert mock_run.call_count == 3
+    argv_calls = [c.args[0] for c in mock_run.call_args_list]
+    assert argv_calls == [
+        ["git", "-C", str(tmp_path), "symbolic-ref", "--short", "HEAD"],
+        ["git", "-C", str(tmp_path), "fetch", "origin", "main"],
+        ["git", "-C", str(tmp_path),
+         "merge", "--ff-only", "origin/main"],
     ]
 
 
@@ -355,16 +375,90 @@ def test_fetch_and_ff_base_pins_argv_shape(
 def test_fetch_and_ff_base_happy_path_returns_none(
     mock_run: MagicMock, _which: MagicMock, tmp_path: Path
 ) -> None:
-    """Zero exit → method returns None (no payload). The colon-form
-    is silent on success; reading the up-to-date / advanced state
-    from stdout/stderr is cosmetic and not part of the contract."""
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=0,
-        stdout="",
-        stderr="From github.com:turma-dev/turma\n   abc..def  main → main\n",
-    )
+    """All three calls return zero exit; method returns None."""
+    mock_run.side_effect = [
+        _ok(stdout="main\n"),
+        _ok(stderr="From github.com:owner/repo\n   abc..def  main → main\n"),
+        _ok(stdout="Updating abc..def\nFast-forward\n"),
+    ]
     adapter = GitAdapter()
     assert adapter.fetch_and_ff_base(tmp_path, "main") is None
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_typed_error_on_head_not_on_base(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """symbolic-ref returns a branch name that isn't `<base_branch>`
+    → typed PlanningError pointing operator at `cd`. Fetch + merge
+    must NOT be invoked. This is the silent-feature-FF footgun
+    the precheck closes."""
+    mock_run.side_effect = [_ok(stdout="feature-x\n")]
+    adapter = GitAdapter()
+
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+
+    # Exactly ONE call (the precheck). Fetch + merge skipped.
+    assert mock_run.call_count == 1
+    msg = str(exc.value)
+    assert "feature-x" in msg
+    assert "main" in msg
+    assert "cd" in msg.lower()
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_typed_error_on_detached_head(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """symbolic-ref non-zero exit (e.g. detached HEAD) → typed
+    PlanningError with the detached-HEAD signal preserved. Fetch
+    + merge must NOT be invoked."""
+    mock_run.side_effect = [
+        _fail(128, stderr="fatal: ref HEAD is not a symbolic ref\n"),
+    ]
+    adapter = GitAdapter()
+
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+
+    assert mock_run.call_count == 1
+    msg = str(exc.value)
+    assert "detached" in msg.lower()
+    assert "main" in msg
+
+
+@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
+@patch("turma.swarm.git.subprocess.run")
+def test_fetch_and_ff_base_skips_merge_when_fetch_fails(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    """symbolic-ref ok; fetch raises non-zero → exactly TWO calls
+    (precheck + fetch). Merge is NOT invoked. Pin the ordering."""
+    mock_run.side_effect = [
+        _ok(stdout="main\n"),
+        _fail(
+            128,
+            stderr=(
+                "fatal: Could not read from remote repository.\n"
+                "Please make sure you have the correct access rights\n"
+                "and the repository exists.\n"
+            ),
+        ),
+    ]
+    adapter = GitAdapter()
+
+    with pytest.raises(PlanningError) as exc:
+        adapter.fetch_and_ff_base(tmp_path, "main")
+
+    assert mock_run.call_count == 2
+    msg = str(exc.value)
+    assert "git fetch failed" in msg
+    assert "Could not read from remote" in msg
+    # No diverged-triage hint for a fetch failure.
+    assert "main..origin/main" not in msg
 
 
 @patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
@@ -372,79 +466,54 @@ def test_fetch_and_ff_base_happy_path_returns_none(
 def test_fetch_and_ff_base_typed_error_on_non_fast_forward(
     mock_run: MagicMock, _which: MagicMock, tmp_path: Path
 ) -> None:
-    """Local `<base>` has diverged from origin → typed PlanningError
-    naming the branch and pointing the operator at the two
-    `git log` commands needed to compare divergence directions.
-    Pin the substring `non-fast-forward` triggers this branch."""
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=1,
-        stdout="",
-        stderr=(
-            "From github.com:turma-dev/turma\n"
-            " ! [rejected]        main -> main (non-fast-forward)\n"
+    """symbolic-ref + fetch ok; merge returns non-zero with
+    `Not possible to fast-forward` in stderr → typed divergence
+    error naming the branch and pointing at both
+    `git log <a>..<b>` triage commands."""
+    mock_run.side_effect = [
+        _ok(stdout="main\n"),
+        _ok(),
+        _fail(
+            1,
+            stderr=(
+                "fatal: Not possible to fast-forward, aborting.\n"
+            ),
         ),
-    )
+    ]
     adapter = GitAdapter()
+
     with pytest.raises(PlanningError) as exc:
         adapter.fetch_and_ff_base(tmp_path, "main")
+
+    assert mock_run.call_count == 3
     msg = str(exc.value)
-    assert "main" in msg
     assert "diverged" in msg.lower()
-    # Both triage directions named so the operator can compare.
     assert "main..origin/main" in msg
     assert "origin/main..main" in msg
 
 
 @patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
 @patch("turma.swarm.git.subprocess.run")
-def test_fetch_and_ff_base_typed_error_on_rejected_substring(
+def test_fetch_and_ff_base_merge_generic_failure_preserves_stderr(
     mock_run: MagicMock, _which: MagicMock, tmp_path: Path
 ) -> None:
-    """Some divergence-rejection messages from older git versions
-    use `! [rejected]` without the explicit `non-fast-forward`
-    parenthetical. Pin that the typed-error branch fires on
-    `[rejected]` too."""
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=1,
-        stdout="",
-        stderr=(
-            "From github.com:turma-dev/turma\n"
-            " ! [rejected]        main -> main\n"
-        ),
-    )
+    """Merge non-zero with stderr that doesn't match the
+    divergence signal → generic `git merge --ff-only failed:`
+    PlanningError preserving stderr."""
+    mock_run.side_effect = [
+        _ok(stdout="main\n"),
+        _ok(),
+        _fail(1, stderr="some unexpected merge error\n"),
+    ]
     adapter = GitAdapter()
+
     with pytest.raises(PlanningError) as exc:
         adapter.fetch_and_ff_base(tmp_path, "main")
-    msg = str(exc.value)
-    assert "diverged" in msg.lower()
 
-
-@patch("turma.swarm.git.shutil.which", return_value="/usr/bin/git")
-@patch("turma.swarm.git.subprocess.run")
-def test_fetch_and_ff_base_generic_error_preserves_stderr(
-    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
-) -> None:
-    """Network / auth failures (anything that isn't a
-    non-fast-forward / rejected signal) surface as PlanningError
-    with stderr preserved verbatim and a `git fetch failed:`
-    prefix so the operator can grep the run log."""
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=128,
-        stdout="",
-        stderr=(
-            "fatal: Could not read from remote repository.\n"
-            "Please make sure you have the correct access rights\n"
-            "and the repository exists.\n"
-        ),
-    )
-    adapter = GitAdapter()
-    with pytest.raises(PlanningError) as exc:
-        adapter.fetch_and_ff_base(tmp_path, "main")
     msg = str(exc.value)
-    assert "git fetch failed" in msg
-    assert "Could not read from remote" in msg
-    # Should NOT mention the diverged-triage hint for a non-divergence
-    # failure.
+    assert "git merge --ff-only failed" in msg
+    assert "some unexpected merge error" in msg
+    # No diverged-triage hint for a generic merge failure.
     assert "main..origin/main" not in msg
 
 
@@ -456,18 +525,18 @@ def test_fetch_and_ff_base_branch_name_interpolated_into_typed_error(
     """The typed error uses the supplied `base_branch` parameter,
     not a hard-coded `main`. Operators with a non-default base
     branch (e.g. `develop`) get useful triage commands."""
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=1,
-        stdout="",
-        stderr=(
-            "From github.com:owner/repo\n"
-            " ! [rejected]        develop -> develop (non-fast-forward)\n"
-        ),
-    )
+    mock_run.side_effect = [
+        _ok(stdout="develop\n"),
+        _ok(),
+        _fail(1, stderr="fatal: Not possible to fast-forward, aborting.\n"),
+    ]
     adapter = GitAdapter()
+
     with pytest.raises(PlanningError) as exc:
         adapter.fetch_and_ff_base(tmp_path, "develop")
+
     msg = str(exc.value)
     assert "develop..origin/develop" in msg
     assert "origin/develop..develop" in msg
-    assert "main" not in msg.replace("develop", "")  # no leaked default
+    # No leaked default `main` outside the `develop` substitutions.
+    assert "main" not in msg.replace("develop", "")
