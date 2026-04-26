@@ -133,10 +133,13 @@ cd "$WORKDIR"
 Expected stdout:
 
 ```
+fetch: skipped (--dry-run)
 reconcile: 0 in-progress tasks
 ```
 
-No Beads mutation, no worktree, no `gh pr create`. Verify with:
+No Beads mutation, no worktree, no `gh pr create`, and no
+`git fetch` either — `--dry-run` skips the base-branch
+fast-forward because the FF mutates a local ref. Verify with:
 
 ```bash
 bd list --label feature:smoke-run --json --limit 0 \
@@ -155,11 +158,17 @@ Expected stdout shape (ids depend on bd's prefix; `<id>` below is
 whatever `TASK_ID` holds from the capture above, e.g. `smoke-vl1`):
 
 ```
+fetch: origin/main → main
 reconcile: 0 in-progress tasks
 swarm: claimed <id> — Append a line to SMOKE.txt
 swarm: opened <id> (PR: https://github.com/<you>/turma-run-smoke/pull/1; awaiting merge)
 swarm: no ready tasks remain; done
 ```
+
+The `fetch:` line at the top reflects the base-branch sync the
+orchestrator runs once per non-dry-run invocation. On a fresh
+repo at origin/main this is a no-op fast-forward; the line
+prints either way so operators can confirm the sync happened.
 
 Claude Code runs inside `.worktrees/smoke-run/<id>/`,
 creates `SMOKE.txt`, writes `.task_complete`. The orchestrator
@@ -210,15 +219,23 @@ cd "$WORKDIR"
 "$TURMA_REPO/.venv/bin/turma" run --feature smoke-run
 ```
 
-Expected: the merge-advancement phase fires before
-`fetch_ready`, sees the PR as MERGED via
-`gh pr view <N> --json state`, removes the `turma-pr:<N>`
-label, closes the bd task, and cleans up the worktree.
-With no further ready tasks (the smoke spec has only one
-task), the main loop exits immediately.
+Expected: the orchestrator first prints the base-branch sync
+line, then reconciliation walks the in-progress set. Task A
+carries `turma-pr:<N>` from Step 2, so reconciliation **skips**
+its classification — that task is merge-advancement's territory
+now, not repair's. Skip-then-sweep means no duplicate PR is
+ever opened, even when the prior run's PR has already been
+merged on origin (the case that pre-stabilization triggered a
+spurious `completion-pending` repair). Merge-advancement then
+sees MERGED via `gh pr view <N> --json state`, removes the
+`turma-pr:<N>` label, closes the bd task, and cleans up the
+worktree. With no further ready tasks (the smoke spec has
+only one task), the main loop exits immediately.
 
 ```
-reconcile: 0 in-progress tasks
+fetch: origin/main → main
+reconcile: 1 in-progress task
+reconcile:   <id> → skipped (merge-tracked at PR #<N>)
 merge-advancement: <id> → MERGED, closed
 swarm: no ready tasks remain; done
 ```
@@ -232,11 +249,112 @@ git worktree list                             # the per-task worktree is gone
 git branch --list "task/smoke-run/$TASK_ID"   # empty — branch was deleted on cleanup
 ```
 
+> **Note (2026-04-25 smoke).** This step's contract — reconcile
+> skip + merge-advancement close + base-branch fetch — comes
+> from the `swarm-merge-advancement-stabilization` arc. The
+> 2026-04-25 chained-feature smoke against this same scratch
+> repo surfaced three pre-fix issues (reconciliation
+> false-positive on merged PRs, accumulating stale
+> `turma-pr:` labels, and dependent worktrees set up from
+> stale local main) that this arc fixes together. See
+> `openspec/changes/swarm-merge-advancement-stabilization/`
+> for the full contract.
+
 If the smoke feature had a dependent task chained off this
 one, that dependent would have become ready on this same
 run and the main loop would claim it. The single-task smoke
-exits early; an end-to-end test against a chain is the
-quickest way to feel the dependency unblock in motion.
+exits early; the chained variant below exercises the
+dependency-unblock path explicitly.
+
+### Step 3a — Chained-feature dependency unblock (optional)
+
+The single-task scenario above proves the merge-advancement
+sweep closes the parent task. To prove the dependent unblocks
+and runs against the merged base — the failure mode the
+2026-04-25 smoke surfaced — pre-stage a two-task chained
+feature instead:
+
+```bash
+cd "$WORKDIR"
+mkdir -p openspec/changes/smoke-merge
+cat > openspec/changes/smoke-merge/tasks.md <<'EOF'
+## Tasks
+
+### 1. Create STAGE.txt with stage one marker
+- [ ] Create a new file STAGE.txt at the repository root.
+- [ ] Write a single line: `stage one complete`
+
+### 2. Append stage two marker to STAGE.txt
+- [ ] Append a new line `stage two complete` to STAGE.txt.
+- [ ] Preserve the existing first line.
+EOF
+printf '## Why\nDemonstrate chained smoke.\n' > openspec/changes/smoke-merge/proposal.md
+printf '## Goals\nDependent waits for parent merge.\n' > openspec/changes/smoke-merge/design.md
+touch openspec/changes/smoke-merge/APPROVED
+git add openspec/changes/smoke-merge
+git -c core.hooksPath=/dev/null commit -m "smoke-merge: chained spec"
+git push
+
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature smoke-merge
+git add openspec/changes/smoke-merge/TRANSCRIBED.md
+git -c core.hooksPath=/dev/null commit -m "smoke-merge: transcribed"
+git push
+
+TASK_A=$(bd ready --json --limit 0 | jq -er '.[0].id')
+```
+
+Run the first iteration — opens a PR for task A, leaves it
+in_progress with `turma-pr:<N>`. Task B is still `open` and
+blocked on A.
+
+```bash
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-merge --max-tasks 1
+```
+
+Merge task A's PR (no `--delete-branch` for the same
+attribution reason as Step 3):
+
+```bash
+PR_NUMBER=$(gh pr list --head "task/smoke-merge/$TASK_A" \
+              --state open --json number --jq '.[0].number')
+gh pr merge "$PR_NUMBER" --squash
+```
+
+Run the second iteration — the sweep closes task A, the
+base-branch fetch picks up A's merge commit on local `main`,
+and the main loop then claims task B. Task B's worktree is
+cut from the post-fetch base, so the worker sees the
+`STAGE.txt` task A created and can append to it.
+
+```bash
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-merge --max-tasks 1
+```
+
+Expected stdout shape:
+
+```
+fetch: origin/main → main
+reconcile: 1 in-progress task
+reconcile:   <task-A-id> → skipped (merge-tracked at PR #<N>)
+merge-advancement: <task-A-id> → MERGED, closed
+swarm: claimed <task-B-id> — Append stage two marker to STAGE.txt
+swarm: opened <task-B-id> (PR: ...; awaiting merge)
+swarm: stopping at --max-tasks=1
+```
+
+Verify:
+
+```bash
+bd show "$TASK_A"                                 # status: closed
+TASK_B=$(bd list --label feature:smoke-merge --status in_progress \
+           --json --limit 0 | jq -er '.[0].id')
+bd show "$TASK_B" | grep -i 'turma-pr:'           # exactly one label
+cat ".worktrees/smoke-merge/$TASK_B/STAGE.txt"    # both lines present
+```
+
+If task B's worktree contains both `stage one complete` AND
+`stage two complete`, the dependent ran against the
+post-fetch merged base — the semantic Finding 3 fixes.
 
 ## Step 4 — Reconciliation on resume (`completion-pending`)
 
@@ -296,11 +414,18 @@ defer to merge advancement), then the main loop finds nothing
 ready and exits.
 
 ```
+fetch: origin/main → main
 reconcile: 1 in-progress task
 reconcile:   <NEW_ID> → completion-pending
 repair: <NEW_ID> → committed, pushed, PR opened (...; awaiting merge), labelled
 swarm: no ready tasks remain; done
 ```
+
+(The task here has no `turma-pr:` label yet — that's what
+distinguishes `completion-pending` from a merge-tracked task.
+Reconciliation classifies it normally, the repair phase opens
+the PR, and `mark_pr_open` adds the label as part of the same
+repair tail.)
 
 Verify:
 
