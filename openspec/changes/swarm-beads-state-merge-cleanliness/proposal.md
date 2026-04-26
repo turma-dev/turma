@@ -272,17 +272,30 @@ v1 ships with this weakened contract because:
    driven commits to origin/main). Most PR-review repos
    don't grant that. Doing it via PRs adds significant
    overhead. Out of scope for this stabilization arc.
-3. **The lag is bounded by the next worker commit.**
-   For typical Turma usage (a `turma run` opens a PR,
-   gets merged, the next `turma run` continues), the
-   lag is at most one iteration's tail. Multi-clone
-   workflows see one-iteration-stale bd state, not
-   indefinitely-stale.
+3. **The lag is bounded ONLY by future worker
+   activity, which may never happen.** When a
+   subsequent `turma run` claims a new task, that
+   worker's pre-commit hook will export and capture
+   the accumulated bd state — propagating the
+   accumulated tail through the next PR-merge cycle.
+   But there is no scheduled future commit: if the
+   operator's workload is "one `turma run` opens a
+   PR and that's it for the day", the tail mutation
+   from `mark_pr_open` (and any sweep-phase closes /
+   fails) stays in local dolt until the operator
+   either runs Turma again or manually exports.
+   v1 accepts this **unbounded-until-manual-action**
+   property; reason 4 (the warning) is what makes it
+   visible.
 4. **An operator-visible warning at end of `turma
    run` (Task 4 below)** surfaces tail mutations so
    operators know when state isn't yet propagated.
    This converts a silent contract change into an
-   explicit one the operator can act on.
+   explicit one the operator can act on at the
+   moment of decision (commit now? leave it for the
+   next run? let the cycle play out?). Without the
+   warning, reason 3's unboundedness would be a
+   silent landmine.
 
 ### Stricter shareability is explicitly deferred
 
