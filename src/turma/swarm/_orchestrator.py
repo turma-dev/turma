@@ -192,6 +192,23 @@ def run_swarm(
 
     _preflight(feature, services.repo_root)
 
+    # Fast-forward local <base_branch> from origin once per
+    # invocation so dependent tasks claim against the merged base.
+    # Skipped under --dry-run because the FF mutates a local ref.
+    # See `openspec/changes/swarm-merge-advancement-stabilization/
+    # design.md` "GitAdapter.fetch_and_ff_base" for the contract
+    # (single colon-form fetch; refuses divergent local).
+    if dry_run:
+        print("fetch: skipped (--dry-run)")
+    else:
+        services.git.fetch_and_ff_base(
+            services.repo_root, services.base_branch
+        )
+        print(
+            f"fetch: origin/{services.base_branch} → "
+            f"{services.base_branch}"
+        )
+
     report = reconcile_feature(
         feature,
         adapter=services.beads,
