@@ -119,18 +119,53 @@ preflight → fetch_and_ff_base → reconcile (read-only)
   → repair_phase → merge_advancement_phase → main_loop
 ```
 
-`fetch_and_ff_base` is a single-call `git fetch origin
-<base_branch>:<base_branch>` (see
-`openspec/changes/swarm-merge-advancement-stabilization/`)
-that fast-forwards the local base ref to match origin without
-disturbing the operator's HEAD. It runs once per non-`--dry-run`
-invocation. v1 explicitly **refuses** to fast-forward when the
-local branch has diverged from origin: a divergence raises a
-typed `PlanningError` naming the branch and the two
-`git log <a>..<b>` triage commands. Operators decide how to
-reconcile divergence (rebase, merge, hard reset) — the
-orchestrator does not guess. `--dry-run` skips the fetch
-entirely because the FF mutates a local ref.
+`fetch_and_ff_base` is a three-call sequence (see
+`openspec/changes/swarm-merge-advancement-stabilization/`
+for the original arc and
+`openspec/changes/swarm-fetch-and-ff-base-correction/` for
+the live-smoke-driven correction that replaced an earlier
+single-call colon-form):
+
+```
+git -C <repo_root> symbolic-ref --short HEAD
+git -C <repo_root> fetch origin <base_branch>
+git -C <repo_root> merge --ff-only origin/<base_branch>
+```
+
+The first call is a HEAD precheck: it reads the current
+branch name and refuses cleanly if it isn't `<base_branch>`
+(typed `PlanningError` pointing the operator at `cd`).
+This closes a silent-corruption footgun where, without the
+precheck, a `git merge --ff-only origin/<base_branch>` from
+a feature branch that's an ancestor of origin's tip would
+silently advance the **feature** ref to match origin's
+main — corrupting the operator's local work. The second
+and third calls do the actual fast-forward against the
+local checkout.
+
+The earlier single-call colon-form
+`git fetch origin <base_branch>:<base_branch>` was retired
+because git refuses that form when the destination ref is
+the currently checked-out branch — and the standard
+`turma run` invocation runs from the repo's active working
+copy with `<base_branch>` checked out. The colon-form's
+"doesn't disturb HEAD" justification was the inverse of
+git's actual behavior; git refused precisely because HEAD
+would be updated. The 2026-04-26 chained-flow live smoke
+caught this on iteration 1, after subprocess-mock tests
+had validated the adapter's claimed contract against
+itself; real-git integration tests in
+`tests/test_swarm_git_integration.py` now back the
+contract with actual git behavior.
+
+`fetch_and_ff_base` runs once per non-`--dry-run`
+invocation. v1 explicitly **refuses** to fast-forward when
+the local branch has diverged from origin: a divergence
+raises a typed `PlanningError` naming the branch and the
+two `git log <a>..<b>` triage commands. Operators decide
+how to reconcile divergence (rebase, merge, hard reset) —
+the orchestrator does not guess. `--dry-run` skips the
+fetch entirely because the FF mutates a local ref.
 
 The fetch lives at the top of the run rather than inside
 `main_loop` because chained features need `<base_branch>` to
