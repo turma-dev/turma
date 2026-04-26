@@ -1641,3 +1641,138 @@ def test_merge_advancement_dry_run_is_read_only(
     captured = capsys.readouterr()
     assert "would: merge-advancement: bd-merged → MERGED" in captured.out
     assert "would: merge-advancement: bd-closed → CLOSED" in captured.out
+
+
+# ---------------------------------------------------------------------
+# End-to-end chained-flow regression
+# (swarm-merge-advancement-stabilization Task 5)
+# ---------------------------------------------------------------------
+
+
+def test_chained_feature_post_merge_advances_dependent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**Regression test for Findings 1 + 2 + 3 together.**
+
+    This is the failure mode the 2026-04-25 smoke surfaced
+    against `khanhgithead/turma-run-smoke`: a chained feature
+    where task A blocks task B; task A's PR was opened by a
+    prior `turma run` and merged on GitHub between runs; the
+    next `turma run` must close task A through merge-advancement
+    and run task B against the merged base.
+
+    Pre-stabilization, this run produced:
+    - **Finding 1**: reconciliation classified task A as
+      `completion-pending` (no open PR for the branch — the
+      merged PR is no longer OPEN). Repair phase opened a
+      duplicate PR.
+    - **Finding 2**: the duplicate PR's `turma-pr:<M>` label
+      stacked on top of the original `turma-pr:<N>`. The sweep
+      then unmarked only `<N>`, leaving `<M>` as a stale label
+      on the closed task.
+    - **Finding 3**: task B's worktree was set up from local
+      `main` which never picked up the parent's merge.
+      Worker refused.
+
+    With Tasks 1-4 in place this test asserts the post-fix
+    behavior holds end-to-end. If any single fix regresses,
+    one of the assertions below fails.
+    """
+    _scratch_feature(tmp_path)
+
+    # Task A: in_progress, carries the PR label, has
+    # `.task_complete` on disk. The PR for A was merged on
+    # GitHub.
+    task_a_id = "bd-task-a"
+    task_b_id = "bd-task-b"
+    task_a = _ref_with_pr_label(task_a_id, 5, title="Stage one")
+    task_b = _ref(task_b_id, title="Stage two")
+    _setup_labelled_task_for_advancement(tmp_path, task_a_id, 5)
+
+    beads = StubBeads(
+        in_progress=(task_a,),
+        ready_queue=[(task_b,)],
+        bodies={task_b_id: "Append stage two marker."},
+    )
+    pr = StubPr(
+        url="https://github.com/example/repo/pull/9",  # task B's PR
+        pr_states={
+            5: PrState(
+                number=5,
+                state="MERGED",
+                url="https://github.com/example/repo/pull/5",
+            ),
+        },
+    )
+    services, wt, git, _, worker = _make_services(
+        tmp_path, beads=beads, pr=pr, worker_results=[_success()]
+    )
+
+    run_swarm("oauth", services=services)
+
+    # ----- Finding 3: fetch happens before reconcile. -----
+    fetch_calls = [c for c in git.calls if c[0] == "fetch_and_ff_base"]
+    assert len(fetch_calls) == 1, (
+        "fetch_and_ff_base must run exactly once per invocation "
+        "before any reconciliation/claim work"
+    )
+
+    # ----- Finding 1: reconciliation skipped task A. -----
+    # The skip log line fires.
+    captured = capsys.readouterr()
+    assert (
+        f"reconcile:   {task_a_id} → skipped "
+        "(merge-tracked at PR #5)" in captured.out
+    )
+    # And the PR adapter was NOT consulted for task A's branch
+    # via `find_open_pr_url_for_branch` — that's the call that
+    # used to misclassify the task as `completion-pending`.
+    assert not any(
+        c[0] == "find_open_pr_url_for_branch"
+        and c[1] == f"task/oauth/{task_a_id}"
+        for c in pr.calls
+    )
+
+    # ----- Finding 2: no duplicate mark_pr_open on task A. -----
+    # The set-of-one invariant means task A's `pr_marked` count
+    # stays at zero in this run (it was already labelled before
+    # the run started). ONLY task B receives a `mark_pr_open`
+    # call from the success path, with the new PR's number.
+    assert beads.pr_marked == [(task_b_id, 9)], (
+        f"pr_marked should record exactly one entry for task B "
+        f"(no duplicate from a repair-phase false-positive on "
+        f"task A); got {beads.pr_marked!r}"
+    )
+
+    # Merge-advancement sequence on task A: unmark → close →
+    # cleanup, in that order.
+    bd_a_calls = [
+        c for c in beads.calls
+        if len(c) >= 2 and c[1] == task_a_id
+    ]
+    bd_a_steps = [c[0] for c in bd_a_calls]
+    assert bd_a_steps == ["unmark_pr_open", "close_task"]
+    assert beads.pr_unmarked == [(task_a_id, 5)]
+    assert beads.closed == [task_a_id]
+    # Worktree for task A was cleaned up.
+    assert any(
+        c[0] == "cleanup" and task_a_id in c[1]
+        for c in wt.calls
+    )
+
+    # ----- Finding 3: task B's worker actually ran. -----
+    # If fetch_and_ff_base hadn't refreshed local main, the
+    # dependent's worktree would have been stale and the worker
+    # would have refused. This test uses stubs so the worker just
+    # records the invocation, but the fact that the orchestrator
+    # got far enough to invoke the worker is the v1-stub-level
+    # equivalent of "the dependent ran cleanly".
+    assert len(worker.invocations) == 1
+    assert worker.invocations[0].task_id == task_b_id
+    # Task B's PR opened.
+    assert any(
+        c[0] == "open_pr" and c[1] == f"task/oauth/{task_b_id}"
+        for c in pr.calls
+    )
+    # No fail_task fired anywhere in the run.
+    assert beads.failed == []
