@@ -154,11 +154,18 @@ remains.
 New method, scoped narrowly:
 
 ```python
-def fetch_and_ff_base(self, base_branch: str) -> None:
+def fetch_and_ff_base(
+    self, repo_root: Path, base_branch: str
+) -> None:
     """Fast-forward local `<base_branch>` from origin.
 
     argv (single call):
       git -C <repo_root> fetch origin <base_branch>:<base_branch>
+
+    `repo_root` matches `GitAdapter`'s existing per-method
+    `worktree: Path` shape (the adapter stores no state
+    beyond the `which("git")` check at construction). The
+    orchestrator wires `services.repo_root` here.
 
     The colon-form refspec fetches `origin/<base_branch>`
     and fast-forwards local `<base_branch>` to match in one

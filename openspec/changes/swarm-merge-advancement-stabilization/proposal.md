@@ -89,8 +89,8 @@ fixed together.
   that a task has at most one `turma-pr:` label at any time.
   The precheck-skip path (label already exactly N) is
   unchanged.
-- **`GitAdapter` gains a `fetch_and_ff_base(base_branch)`
-  method.** Single-call argv pinned:
+- **`GitAdapter` gains a `fetch_and_ff_base(repo_root,
+  base_branch)` method.** Single-call argv pinned:
   `git -C <repo_root> fetch origin
   <base_branch>:<base_branch>`. The colon-form fast-forwards
   the local ref without disturbing the operator's HEAD or

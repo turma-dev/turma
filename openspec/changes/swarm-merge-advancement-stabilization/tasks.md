@@ -81,8 +81,12 @@
 
 ### 3. `GitAdapter.fetch_and_ff_base`
 
-- [x] Add `fetch_and_ff_base(base_branch: str) -> None` to
-      `GitAdapter` in `src/turma/swarm/git.py`. argv pinned:
+- [x] Add `fetch_and_ff_base(repo_root: Path, base_branch:
+      str) -> None` to `GitAdapter` in
+      `src/turma/swarm/git.py`. The `repo_root` parameter
+      matches `GitAdapter`'s existing per-method
+      `worktree: Path` shape rather than carrying state on
+      the adapter. argv pinned:
       ```
       git -C <repo_root> fetch origin <base_branch>:<base_branch>
       ```
@@ -111,12 +115,15 @@
 ### 4. Orchestrator calls `fetch_and_ff_base` once per run
 
 - [x] In `src/turma/swarm/_orchestrator.py`'s `run_swarm`,
-      call `services.git.fetch_and_ff_base(services.base_branch)`
-      after preflight, before `_reconcile`. Wrap the call
-      in a `try/except PlanningError` only if needed for
-      log-line dressing — otherwise let it propagate
-      (preflight failures already halt the run via
-      PlanningError today).
+      call
+      `services.git.fetch_and_ff_base(services.repo_root,
+      services.base_branch)` after preflight, before
+      `_reconcile`. Two args, matching the adapter signature
+      Task 3 shipped (`fetch_and_ff_base(repo_root,
+      base_branch)`). Wrap the call in a
+      `try/except PlanningError` only if needed for log-line
+      dressing — otherwise let it propagate (preflight
+      failures already halt the run via PlanningError today).
 - [x] Skip the call entirely under `--dry-run`. Print
       `fetch: skipped (--dry-run)` on dry-run; print
       `fetch: origin/<base_branch> → <base_branch>` on the
