@@ -21,18 +21,20 @@
         fast-forward. Triage with `git log
         <base_branch>..origin/<base_branch>` and the
         reverse.")`
-      - Merge non-zero exit with stderr containing
-        `not something we can merge` → typed
-        `PlanningError("HEAD is not on <base_branch>;
-        cannot fast-forward. cd into the repo's active
-        working copy and re-run.")` (the merge step emits
-        this when invoked from a non-`<base_branch>`
-        HEAD).
       - Merge non-zero exit, other → `PlanningError("git
         merge --ff-only failed: exit <N>\n<stderr>")`.
+- [ ] HEAD-on-`<base_branch>` is documented as a
+      precondition in the docstring; v1 does NOT
+      explicitly check it. See `design.md`
+      "HEAD-on-<base_branch> is a documented
+      precondition, not a checked one" for why
+      (`git merge --ff-only` has no clean detection
+      signal for HEAD-on-feature; would require a third
+      subprocess call to `git symbolic-ref`, deferred).
 - [ ] Update the method's docstring to spell out the
       two-call argv, the HEAD-on-`<base_branch>`
-      precondition, and the four-way error mapping. Cross-
+      precondition (with explicit "v1 does not check"
+      caveat), and the three-way error mapping. Cross-
       reference `swarm-fetch-and-ff-base-correction/
       design.md` "`Adapter contract`" subsection.
 - [ ] Update existing subprocess-mock tests in
@@ -56,13 +58,22 @@
         a merge-generic-failure case.
       - `test_fetch_and_ff_base_branch_name_interpolated_into_typed_error`:
         retained against merge-step stderr.
-- [ ] Two new subprocess-mock tests:
+- [ ] One new subprocess-mock test:
       - `test_fetch_and_ff_base_skips_merge_when_fetch_fails`:
         fetch raises non-zero → assert exactly ONE
         `subprocess.run` call. Pin the ordering.
-      - `test_fetch_and_ff_base_typed_error_when_head_not_on_base`:
-        merge stderr `merge: <base> - not something we
-        can merge` → typed `PlanningError` with `cd` hint.
+
+      The earlier draft of this task added a second new
+      test for HEAD-not-on-base detection via
+      `merge: <base> - not something we can merge` stderr
+      — that test is dropped because git's actual behavior
+      doesn't emit that signal for HEAD-on-feature (it
+      either silently FFs the feature ref or surfaces the
+      same `Not possible to fast-forward` signal as
+      divergence). v1 documents HEAD-on-`<base_branch>`
+      as an unchecked precondition. See `design.md`
+      "HEAD-on-<base_branch> is a documented precondition,
+      not a checked one" for the rationale.
 
 ### 2. Real-git integration test
 
@@ -71,14 +82,18 @@
       Skip-if-git-missing guard at module level so the file
       is robust to environments without git (CI almost
       always has git; documented for completeness).
-- [ ] Three tests:
-      - **Happy path**: helper builds a tmpdir bare remote
-        + a working clone with main checked out. A second
-        working clone pushes a new commit to the bare
-        remote. `fetch_and_ff_base(working_clone,
-        "main")` runs against the first clone. Assert
+- [ ] Two tests:
+      - **Happy path** (the case the live smoke caught):
+        helper builds a tmpdir bare remote + a working
+        clone with `main` checked out. A second working
+        clone pushes a new commit to the bare remote.
+        `fetch_and_ff_base(working_clone, "main")` runs
+        against the first clone. Assert
         `git rev-parse HEAD` on the first clone now
-        matches the bare remote's tip.
+        matches the bare remote's tip. This is the test
+        that would have caught the colon-form bug — it
+        exercises real git with HEAD on the destination
+        ref.
       - **Divergent local**: bare remote at commit X,
         working clone at commit X, then a local commit Y
         on main (never pushed); meanwhile bare remote
@@ -86,12 +101,20 @@
         `fetch_and_ff_base` raises typed `PlanningError`
         with "diverged" in the message and the branch
         name interpolated.
-      - **HEAD on feature branch**: working clone, check
-        out a new branch off main, optionally commit on
-        it. `fetch_and_ff_base(working_clone, "main")`
-        raises typed `PlanningError` with "HEAD is not
-        on main" in the message.
-- [ ] Helpers shared across the three tests: a small
+
+      A HEAD-on-feature-branch test was originally
+      planned here too. It's dropped because git's
+      actual behavior in that case is split (silent FF
+      of the feature ref vs. divergence error), neither
+      of which gives a clean "HEAD not on base"
+      assertion to write — see Task 1's note on the
+      same. Validating that v1 does NOT silently corrupt
+      a feature branch when HEAD is on it would require
+      either checking the feature ref unchanged (an
+      indirect test) or adding the deferred
+      `git symbolic-ref` precheck (out of scope for this
+      arc).
+- [ ] Helpers shared across the two tests: a small
       `_make_bare_and_clone(tmp_path) -> tuple[Path, Path]`
       that returns `(bare_remote_path, working_clone_path)`
       with main initialized to a single committed file. Use

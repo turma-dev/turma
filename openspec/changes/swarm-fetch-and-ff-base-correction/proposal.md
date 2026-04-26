@@ -62,16 +62,27 @@ This is release-blocking for 0.3.0.
   - `git fetch` non-zero exit → network / auth / remote
     error. `PlanningError` preserving stderr with a
     `git fetch failed:` prefix.
-  - `git merge --ff-only` non-zero exit → divergence error.
-    Typed `PlanningError` naming the branch and the two
-    `git log <a>..<b>` triage commands. Stderr signals git
-    emits here include `Not possible to fast-forward` and
-    `not something we can merge` — match either.
-  - HEAD not on `<base_branch>` (e.g. operator on a feature
-    branch when invoking `turma run`) → typed
-    `PlanningError("HEAD is not on <base_branch>; cannot
-    fast-forward. cd into the repo's active working copy and
-    re-run.")`. Detected via the merge step's stderr.
+  - `git merge --ff-only` non-zero exit, stderr names
+    `Not possible to fast-forward` or `non-fast-forward`
+    → divergence error. Typed `PlanningError` naming the
+    branch and the two `git log <a>..<b>` triage commands.
+  - `git merge --ff-only` non-zero exit, other stderr →
+    `PlanningError` preserving stderr with a
+    `git merge --ff-only failed:` prefix.
+- **HEAD-on-`<base_branch>` is a documented precondition,
+  not a checked one.** `git merge --ff-only` does not emit
+  a clean "HEAD is not on the merge target" stderr signal
+  — when the operator is on a feature branch, the merge
+  either silently fast-forwards the feature ref (if it's
+  an ancestor of origin) or refuses with the same
+  divergence signal a real divergent local would produce.
+  Detecting this cleanly would require a third
+  `git symbolic-ref` call; v1 defers that and documents
+  the precondition instead. The smoke runbook's setup
+  ensures HEAD is on `<base_branch>` for the supported
+  usage. See `design.md` "HEAD-on-<base_branch> is a
+  documented precondition, not a checked one" for the
+  full rationale.
 - **Subprocess-mock tests in `tests/test_swarm_git.py`
   updated** for the two-call argv shape and split error
   mapping. Removed: `test_fetch_and_ff_base_typed_error_on_rejected_substring`

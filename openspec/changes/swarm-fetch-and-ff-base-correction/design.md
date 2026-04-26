@@ -72,11 +72,13 @@ def fetch_and_ff_base(
       git -C <repo_root> fetch origin <base_branch>
       git -C <repo_root> merge --ff-only origin/<base_branch>
 
-    Precondition: HEAD must be on <base_branch>. The
-    standard `turma run` invocation runs from the repo's
-    active working copy with main checked out. If HEAD is
-    on a feature branch, the merge step refuses with a
-    typed error pointing the operator at `cd`.
+    Precondition: HEAD must be on <base_branch>. v1 does
+    NOT check this explicitly — see the "HEAD-on-<base_branch>
+    is a documented precondition, not a checked one"
+    subsection below for why. The standard `turma run`
+    invocation runs from the repo's active working copy
+    with main checked out, so the precondition holds for
+    the documented usage.
     """
 ```
 
@@ -86,12 +88,50 @@ def fetch_and_ff_base(
 | --- | --- | --- |
 | fetch non-zero | network / auth / remote | `PlanningError("git fetch failed: ...", stderr_preserved)`. Merge step is not run. |
 | merge non-zero, stderr names `Not possible to fast-forward` or `non-fast-forward` | divergent local | typed `PlanningError("local <base_branch> has diverged from origin/<base_branch>; refusing to fast-forward. Triage with git log <a>..<b> ...")` |
-| merge non-zero, stderr names `merge: <base_branch> - not something we can merge` or HEAD-name mismatch | HEAD not on `<base_branch>` | typed `PlanningError("HEAD is not on <base_branch>; cannot fast-forward. cd into the repo's active working copy and re-run.")` |
 | merge non-zero, other | unknown | `PlanningError("git merge --ff-only failed: ...", stderr_preserved)` |
 
 The split lets operators read the surface error and know
 which mechanism failed without inspecting which subprocess
 ran.
+
+### HEAD-on-`<base_branch>` is a documented precondition, not a checked one
+
+If HEAD is on a feature branch when `fetch_and_ff_base`
+runs, behavior is undefined:
+
+- If the feature branch is an ancestor of
+  `origin/<base_branch>`, `git merge --ff-only origin/<base_branch>`
+  silently fast-forwards the **feature branch** to
+  origin's tip, corrupting the operator's local work.
+- If the feature branch has commits that diverge from
+  `origin/<base_branch>`, the merge refuses with the same
+  `Not possible to fast-forward` signal divergence
+  produces — operators see a "diverged" error that is
+  technically correct but doesn't name the underlying
+  cause (HEAD-on-feature, not actual main divergence).
+
+`git merge --ff-only` does NOT emit a clean "HEAD is not
+on the merge target" stderr signal we can match on. The
+prior draft of this design imagined matching on
+`merge: <base> - not something we can merge`, but that
+phrase actually fires when the **target ref doesn't
+exist** (e.g. origin has no `<base_branch>`), not when
+HEAD is on a different branch. There is no clean
+detection signal in the merge step alone.
+
+Adding explicit detection would require a third
+subprocess call before the fetch+merge:
+`git -C <repo_root> symbolic-ref --short HEAD` to read
+the current branch name and compare to `<base_branch>`.
+v1 defers this — see "Open items deferred".
+
+v1 documents HEAD-on-`<base_branch>` as a precondition
+the caller must satisfy. The smoke runbook's setup
+ensures it; the orchestrator runs from the operator's
+shell, which is expected to be on the active working
+copy. Operators who violate the precondition get
+undefined behavior and should `cd` into the working copy
+and re-run.
 
 ### Implementation notes
 
@@ -144,19 +184,25 @@ Two layers, both required:
 actual `git` binary against a tmpdir. Skip if `git` not on
 PATH (CI shouldn't hit this; documented for completeness).
 
-Three tests:
+Two tests:
 
 - **Happy path**: tmpdir bare remote, clone, commit on
   remote (via a second working clone), `fetch_and_ff_base`
   fast-forwards local main. Assert local HEAD matches the
-  new origin/main tip.
+  new origin/main tip. **This is the case the colon-form
+  failed.** It exercises real git with HEAD on the
+  destination ref — exactly the scenario subprocess mocks
+  couldn't reach.
 - **Divergent local**: bare remote at commit X. Working
   clone diverges (commit Y on local main, never pushed).
   `fetch_and_ff_base` raises typed PlanningError naming the
   branch.
-- **HEAD on feature branch**: working clone, checkout a
-  feature branch, `fetch_and_ff_base("main")` raises typed
-  "HEAD not on main" PlanningError.
+
+A HEAD-on-feature-branch test was originally planned. It's
+dropped because git's behavior in that case doesn't give a
+clean "HEAD not on base" signal to assert against. See the
+"HEAD-on-`<base_branch>` is a documented precondition"
+subsection above.
 
 The integration test's value is exactly what the smoke
 caught: it exercises git's actual checkout-protection,
@@ -168,11 +214,10 @@ All failures continue to raise `PlanningError`:
 
 - `git fetch failed: <stderr>` — network/auth/remote.
 - `local <branch> has diverged from origin/<branch>; ...` —
-  fast-forward-impossible due to local commits ahead of
-  origin in a non-FF way.
-- `HEAD is not on <branch>; cannot fast-forward. cd into the
-  repo's active working copy and re-run.` — operator
-  invoked from a feature-branch working copy.
+  fast-forward-impossible because local has commits
+  origin doesn't (or, undetectably, because HEAD is on a
+  feature branch with commits diverging from origin's
+  base — see HEAD-precondition subsection).
 - `git merge --ff-only failed: <stderr>` — anything else
   the merge step rejects.
 
@@ -200,8 +245,17 @@ this rearranges which subprocess call surfaces which class.
 
 ## Open items deferred
 
-- **HEAD-independent implementation**. A future arc could
-  use lower-level ref-update plumbing
+- **HEAD-precheck via `git symbolic-ref`**. Adding a third
+  subprocess call before fetch+merge to verify HEAD is on
+  `<base_branch>` would let us refuse cleanly when the
+  operator is on a feature branch (preventing the silent
+  feature-FF footgun documented above). v1 leaves this as
+  a documented precondition because the failure mode only
+  triggers when operators violate the runbook's setup,
+  but the precheck would be cheap defense-in-depth and
+  is a natural follow-up.
+- **HEAD-independent implementation**. A more ambitious
+  future arc could use lower-level ref-update plumbing
   (`git update-ref refs/heads/<base> origin/<base>` with a
   detached-HEAD dance) to make the adapter work regardless
   of HEAD. v1 explicitly does NOT do this — operators always
