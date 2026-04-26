@@ -115,9 +115,28 @@ implemented by the `turma run` orchestrator.
 ### State machine
 
 ```
-preflight → reconcile (read-only) → repair_phase
-  → merge_advancement_phase → main_loop
+preflight → fetch_and_ff_base → reconcile (read-only)
+  → repair_phase → merge_advancement_phase → main_loop
 ```
+
+`fetch_and_ff_base` is a single-call `git fetch origin
+<base_branch>:<base_branch>` (see
+`openspec/changes/swarm-merge-advancement-stabilization/`)
+that fast-forwards the local base ref to match origin without
+disturbing the operator's HEAD. It runs once per non-`--dry-run`
+invocation. v1 explicitly **refuses** to fast-forward when the
+local branch has diverged from origin: a divergence raises a
+typed `PlanningError` naming the branch and the two
+`git log <a>..<b>` triage commands. Operators decide how to
+reconcile divergence (rebase, merge, hard reset) — the
+orchestrator does not guess. `--dry-run` skips the fetch
+entirely because the FF mutates a local ref.
+
+The fetch lives at the top of the run rather than inside
+`main_loop` because chained features need `<base_branch>` to
+reflect any merges that landed since the prior run **before**
+reconciliation classifies in-progress state and before any
+dependent task gets claimed and worktree-set.
 
 `merge_advancement_phase` is the post-merge advancement sweep
 (see `openspec/changes/swarm-post-merge-advancement/`): for

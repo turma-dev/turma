@@ -236,9 +236,38 @@ per-invocation cap with no config equivalent. Missing or partial
   either halts with a pointer back to `turma plan` or
   `turma plan-to-beads`.
 
+### Base-branch sync
+
+Every non-`--dry-run` invocation begins with a single
+`git fetch origin <base_branch>:<base_branch>` against the local
+checkout, fast-forwarding `<base_branch>` to match origin. This
+runs after preflight and before reconciliation. Without it,
+chained features stall: when task A's PR merges between runs and
+the next `turma run` claims the dependent task B, B's worktree
+would otherwise be cut from a stale local base that lacks A's
+commits, and the worker would refuse to operate against the
+missing precondition.
+
+The fetch refuses to overwrite divergent local history — if
+local `<base_branch>` has commits that origin doesn't, the run
+halts with a `PlanningError` naming the branch and the two
+`git log <base_branch>..origin/<base_branch>` triage commands.
+Operators triage manually rather than letting turma rebase or
+merge automatically.
+
+`--dry-run` skips the fetch (a fast-forward mutates the local
+ref) and prints `fetch: skipped (--dry-run)` so the omission
+is explicit.
+
 ### The one-feature loop
 
-For each ready Beads task, the orchestrator runs:
+`turma run`'s top-level state machine:
+
+```
+preflight → fetch_and_ff_base → reconcile → repair → merge_advancement → main_loop
+```
+
+`main_loop` runs, per ready Beads task:
 
 ```
 claim → setup_worktree → run_worker → (sentinel) → commit → push → open_pr → mark_pr_open
