@@ -168,6 +168,7 @@ class StubGit:
     dirty: bool = True
     commit_raises: PlanningError | None = None
     push_raises: PlanningError | None = None
+    fetch_raises: PlanningError | None = None
     calls: list[tuple] = field(default_factory=list)
 
     def status_is_dirty(self, worktree: Path) -> bool:
@@ -186,6 +187,13 @@ class StubGit:
         self.calls.append(("push_branch", str(worktree), branch, remote))
         if self.push_raises is not None:
             raise self.push_raises
+
+    def fetch_and_ff_base(self, repo_root: Path, base_branch: str) -> None:
+        self.calls.append(
+            ("fetch_and_ff_base", str(repo_root), base_branch)
+        )
+        if self.fetch_raises is not None:
+            raise self.fetch_raises
 
 
 @dataclass
@@ -369,11 +377,125 @@ def test_dry_run_never_calls_any_mutation(tmp_path: Path) -> None:
     assert not any(c[0] in mutating_bd for c in beads.calls)
     mutating_wt = {"setup", "cleanup"}
     assert not any(c[0] in mutating_wt for c in wt.calls)
-    mutating_git = {"commit_all", "push_branch"}
+    # `fetch_and_ff_base` mutates a local ref (the fast-forward),
+    # so dry-run must NOT call it. Added by
+    # swarm-merge-advancement-stabilization Task 4.
+    mutating_git = {"commit_all", "push_branch", "fetch_and_ff_base"}
     assert not any(c[0] in mutating_git for c in git.calls)
     mutating_pr = {"open_pr"}
     assert not any(c[0] in mutating_pr for c in pr.calls)
     assert worker.invocations == []
+
+
+# ---------------------------------------------------------------------
+# Base-branch fetch (swarm-merge-advancement-stabilization Task 4)
+# ---------------------------------------------------------------------
+
+
+def test_run_swarm_calls_fetch_before_reconcile(tmp_path: Path) -> None:
+    """Non-dry-run runs must `fetch_and_ff_base` once before any
+    reconciliation read. Without this, a chained feature whose
+    parent just merged on origin sets up the dependent's worktree
+    from stale local history (Finding 3 from the 2026-04-25 smoke).
+
+    Pin the ordering by triggering a fetch failure: if the fetch
+    halt fires *before* reconcile, then `bd.list_in_progress_tasks`
+    must NOT have been called. Failure-driven ordering is more
+    robust than cross-stub timestamps."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
+    git = StubGit(
+        fetch_raises=PlanningError(
+            "git fetch failed: exit 128\n"
+            "fatal: Could not read from remote repository."
+        )
+    )
+    services, wt, _, pr, worker = _make_services(
+        tmp_path, beads=beads, git=git
+    )
+
+    with pytest.raises(PlanningError, match="Could not read from remote"):
+        run_swarm("oauth", services=services)
+
+    # Fetch was attempted exactly once.
+    assert [c[0] for c in git.calls] == ["fetch_and_ff_base"]
+    # Reconcile never ran (its first read is list_in_progress_tasks).
+    assert not any(
+        c[0] == "list_in_progress_tasks" for c in beads.calls
+    )
+    # No downstream phase fired either.
+    assert worker.invocations == []
+    assert not any(c[0] == "open_pr" for c in pr.calls)
+
+
+def test_run_swarm_fetch_argv_uses_services_repo_root_and_base_branch(
+    tmp_path: Path,
+) -> None:
+    """The orchestrator must pass services.repo_root + the
+    SwarmServices.base_branch to fetch_and_ff_base. Default is
+    `main`; pin it explicitly so a future SwarmServices field
+    rename doesn't silently regress the call site."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])
+    services, _, git, _, _ = _make_services(tmp_path, beads=beads)
+    run_swarm("oauth", services=services)
+
+    fetch_calls = [c for c in git.calls if c[0] == "fetch_and_ff_base"]
+    assert len(fetch_calls) == 1
+    _, recorded_repo_root, recorded_base = fetch_calls[0]
+    assert recorded_repo_root == str(tmp_path)
+    assert recorded_base == "main"
+
+
+def test_dry_run_prints_fetch_skipped_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dry-run prints `fetch: skipped (--dry-run)` so the operator
+    sees the omission explicitly rather than wondering whether a
+    fetch happened invisibly."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])
+    services, *_ = _make_services(tmp_path, beads=beads)
+    run_swarm("oauth", services=services, dry_run=True)
+
+    captured = capsys.readouterr()
+    assert "fetch: skipped (--dry-run)" in captured.out
+
+
+def test_non_dry_run_prints_fetch_advance_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Non-dry-run happy path prints `fetch: origin/<base> →
+    <base>` after the fetch succeeds. Pin format so operator
+    log filters can detect the line."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])
+    services, *_ = _make_services(tmp_path, beads=beads)
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    assert "fetch: origin/main → main" in captured.out
+
+
+def test_fetch_failure_does_not_print_advance_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `fetch: origin/<base> → <base>` line prints only on
+    success — printing it before a fetch that then fails would
+    read as if the fetch succeeded and something else broke.
+    Pin that the success line is suppressed when fetch raises."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])
+    git = StubGit(
+        fetch_raises=PlanningError("git fetch failed: exit 128\n...")
+    )
+    services, *_ = _make_services(tmp_path, beads=beads, git=git)
+
+    with pytest.raises(PlanningError):
+        run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    assert "fetch: origin/main → main" not in captured.out
 
 
 # ---------------------------------------------------------------------
@@ -410,9 +532,16 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     assert worker.invocations[0].description == "Subtask body here."
     assert worker.invocations[0].task_id == "bd-1"
 
-    # Git path: dirty check → commit → push. No retry.
+    # Git path: fetch (top of run) → dirty check → commit → push.
+    # No retry. fetch_and_ff_base is added by
+    # swarm-merge-advancement-stabilization Task 4.
     git_steps = [c[0] for c in git.calls]
-    assert git_steps == ["status_is_dirty", "commit_all", "push_branch"]
+    assert git_steps == [
+        "fetch_and_ff_base",
+        "status_is_dirty",
+        "commit_all",
+        "push_branch",
+    ]
 
     # PR opened with the rendered template.
     assert len(pr.calls) == 1
