@@ -219,43 +219,78 @@ That keeps the helper general while concentrating the
 "Turma owns this file" decision at the orchestrator
 callsites.
 
-## Shareability contract (explicit acceptance)
+## Product decision: weakened cross-clone visibility for v1
 
-This arc DOES affect bd's shareability semantics, in a
-way the prior draft glossed over. Calling it out
-explicitly because it is a real change:
+**This is not just dirty-tree cleanup. It is a product
+decision that materially weakens cross-clone bd-state
+visibility for v1.** Calling it out as a load-bearing
+section because the prior draft buried it.
 
-- **The propagation pathway for Turma's bd-state
-  mutations is unchanged.** Mutations on main's
-  working tree (which become invisible after the
-  revert) still reach git only via the **next worker
-  commit**, whose pre-commit hook exports the shared
-  dolt db state into the worktree's `.beads/issues.
-  jsonl`.
-- **The visibility of un-propagated tail mutations
-  changes.** Pre-fix, tail mutations (the last
-  `mark_pr_open` of a `turma run`, sweep-phase
-  closes when no more workers run) showed up as a
-  dirty `git status`. Post-fix, the revert clears
-  them from the working tree. They live in local
-  dolt only until a future worker commit captures
-  them.
-- **Multi-clone deployments will see a lag**: another
-  operator pulling origin/main only sees bd state
-  through the last PR-merged worker commit. Tail
-  mutations from someone else's recent `turma run`
-  aren't visible until that clone's next worker
-  commit propagates them.
+### What changes for the user-facing contract
 
-v1 explicitly accepts this contract. The reasoning,
-v1 deployment-target framing, and a deferred
-stricter-shareability follow-up are documented in
-`design.md` "Shareability contract: what this arc
-actually changes". TL;DR: Turma's primary v1 target
-is single-operator; multi-clone shareability is a
-follow-up if needed; auto-commit-and-push-bd-state
-to main requires push permission most repos don't
-grant.
+- **Same-clone reentrancy is preserved.** `turma status`,
+  `bd ready`, and a re-invoked `turma run` from the
+  same checkout all see Turma's mutations immediately
+  (they read main's local dolt db, which holds them).
+- **Cross-clone visibility is weakened.** Pre-fix,
+  Turma's bd mutations showed up as dirty
+  `.beads/issues.jsonl` in main's working tree —
+  visible to `git status` even if rarely committed.
+  Post-fix, the revert clears the working tree and the
+  mutations live only in the local dolt db. They reach
+  origin/main ONLY when a subsequent worker commit's
+  pre-commit hook captures them via export.
+- **Tail mutations have no propagation guarantee.**
+  `mark_pr_open` after the worker's commit, sweep-
+  phase `unmark_pr_open` + `close_task` + `fail_task`,
+  main-loop `fail_task` after a failed claim — these
+  fire AFTER the most recent worker commit and have no
+  scheduled future commit to propagate them. They stay
+  in local dolt indefinitely.
+- **Concrete v1 consequences operators must understand**:
+  1. Another operator who clones the repo sees bd state
+     up to the last PR-merged worker commit, not the
+     post-tail-mutation state.
+  2. A freshly rebuilt local bd db (from the tracked
+     `.beads/issues.jsonl`) loses the tail mutations.
+  3. Multi-operator chained-feature workflows where
+     operators alternate `turma run` invocations need
+     to re-derive bd state from origin's PR history
+     rather than from the dolt db; bd's
+     "version-control-friendly" model is partially
+     lost.
+
+### v1's acceptance
+
+v1 ships with this weakened contract because:
+
+1. **Single-operator deployment is the v1 target.**
+   Cross-clone shareability isn't load-bearing for
+   that target.
+2. **Stricter alternatives all require direct push
+   to the base branch** (synthetic bd-state PRs, Turma-
+   driven commits to origin/main). Most PR-review repos
+   don't grant that. Doing it via PRs adds significant
+   overhead. Out of scope for this stabilization arc.
+3. **The lag is bounded by the next worker commit.**
+   For typical Turma usage (a `turma run` opens a PR,
+   gets merged, the next `turma run` continues), the
+   lag is at most one iteration's tail. Multi-clone
+   workflows see one-iteration-stale bd state, not
+   indefinitely-stale.
+4. **An operator-visible warning at end of `turma
+   run` (Task 4 below)** surfaces tail mutations so
+   operators know when state isn't yet propagated.
+   This converts a silent contract change into an
+   explicit one the operator can act on.
+
+### Stricter shareability is explicitly deferred
+
+A future arc that adds Turma-driven push of bd state
+to origin/main would close the lag, at the cost of
+push-permission requirements. v1 doesn't do this.
+See `design.md` "Deferred: stricter shareability via
+explicit Turma commits" for the design space.
 
 ## What does NOT change
 
