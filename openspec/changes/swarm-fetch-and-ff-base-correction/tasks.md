@@ -2,7 +2,7 @@
 
 ### 1. Adapter: flip to three-call symbolic-ref + fetch + merge --ff-only
 
-- [ ] In `src/turma/swarm/git.py`, replace
+- [x] In `src/turma/swarm/git.py`, replace
       `fetch_and_ff_base`'s single colon-form subprocess
       with three subprocess.run calls in order:
       ```
@@ -10,7 +10,7 @@
       git -C <repo_root> fetch origin <base_branch>
       git -C <repo_root> merge --ff-only origin/<base_branch>
       ```
-- [ ] Failure mapping at the call boundary:
+- [x] Failure mapping at the call boundary:
       - symbolic-ref returns a branch name (stdout) that
         is NOT `<base_branch>` → typed
         `PlanningError("HEAD is on <current>; turma run
@@ -34,7 +34,7 @@
         reverse.")`
       - Merge non-zero exit, other → `PlanningError("git
         merge --ff-only failed: exit <N>\n<stderr>")`.
-- [ ] Update the method's docstring to spell out the
+- [x] Update the method's docstring to spell out the
       three-call argv, the HEAD-precheck behavior (refuses
       with explicit `cd` instruction when HEAD is on
       anything other than `<base_branch>`), and the
@@ -42,7 +42,7 @@
       `swarm-fetch-and-ff-base-correction/design.md`
       "`Adapter contract`" and "Why the HEAD precheck is
       in scope" subsections.
-- [ ] Update existing subprocess-mock tests in
+- [x] Update existing subprocess-mock tests in
       `tests/test_swarm_git.py`:
       - `test_fetch_and_ff_base_pins_argv_shape`: assert
         THREE `subprocess.run` calls in order (symbolic-
@@ -64,7 +64,7 @@
         case.
       - `test_fetch_and_ff_base_branch_name_interpolated_into_typed_error`:
         retained against merge-step stderr.
-- [ ] Three new subprocess-mock tests:
+- [x] Three new subprocess-mock tests:
       - `test_fetch_and_ff_base_typed_error_on_head_not_on_base`:
         symbolic-ref stdout is `feature-x` (not
         `<base_branch>`) → typed `cd`-instructing
@@ -81,12 +81,12 @@
 
 ### 2. Real-git integration test
 
-- [ ] New file `tests/test_swarm_git_integration.py`. Shells
+- [x] New file `tests/test_swarm_git_integration.py`. Shells
       out to the actual `git` binary against a tmpdir.
       Skip-if-git-missing guard at module level so the file
       is robust to environments without git (CI almost
       always has git; documented for completeness).
-- [ ] Three tests:
+- [x] Three tests:
       - **Happy path** (the case the live smoke caught):
         helper builds a tmpdir bare remote + a working
         clone with `main` checked out. A second working
@@ -117,7 +117,7 @@
         `git rev-parse <feature>` before and after).
         That's the safety the precheck buys us; the
         assertion makes it a regression contract.
-- [ ] Helpers shared across the three tests: a small
+- [x] Helpers shared across the three tests: a small
       `_make_bare_and_clone(tmp_path) -> tuple[Path, Path]`
       that returns `(bare_remote_path, working_clone_path)`
       with main initialized to a single committed file. Use
@@ -127,7 +127,7 @@
 
 ### 3. Docs + CHANGELOG amendment
 
-- [ ] `docs/architecture.md` Execution section:
+- [x] `docs/architecture.md` Execution section:
       replace the `fetch_and_ff_base` paragraph's "single-
       call colon-form" wording with "three-call
       `symbolic-ref` + `fetch` + `merge --ff-only`". Add
@@ -135,7 +135,7 @@
       protection rejection as the reason for the
       correction AND the silent-feature-FF footgun the
       precheck closes.
-- [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: amend the prior
+- [x] `CHANGELOG.md` `[Unreleased]/Fixed`: amend the prior
       arc's Finding 3 paragraph to name the three-call
       form (HEAD precheck + fetch + merge --ff-only) and
       reference this correction arc. Add one sentence
@@ -143,7 +143,7 @@
       silent-feature-FF footgun the precheck prevents so
       the changelog audit trail captures why the
       implementation flipped between versions.
-- [ ] No README changes required. The "Base-branch sync"
+- [x] No README changes required. The "Base-branch sync"
       subsection's user-facing description (HEAD must be
       on the base branch, fetch fails loudly on
       divergence, --dry-run skips it) is correct as
@@ -151,17 +151,19 @@
 
 ### 4. Validation
 
-- [ ] `uv run pytest` green. Current baseline: 536 tests
+- [x] `uv run pytest` green. Current baseline: 536 tests
       (after `swarm-merge-advancement-stabilization`).
       Expected net delta: around +6 to +8 (one mock test
       deleted, three mock tests added for HEAD-precheck
       cases + the fetch-skip-on-failure ordering test,
       one mock test split into two, three integration
       tests added).
-- [ ] No new runtime deps in `pyproject.toml`. `git`
+- [x] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
 - [ ] Live re-run of the chained smoke against
-      `khanhgithead/turma-run-smoke`, walking
+      `khanhgithead/turma-run-smoke` (left unchecked
+      until the operator walks the runbook end-to-end
+      against the live scratch), walking
       `docs/smoke-turma-run.md` Step 3a end-to-end:
       - Iteration 1: `turma run --feature smoke-chain
         --max-tasks 1` opens task A's PR. Verify task A
