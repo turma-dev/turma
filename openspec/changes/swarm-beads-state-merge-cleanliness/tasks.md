@@ -2,33 +2,64 @@
 
 ### 0. Investigate bd-side options before committing the revert approach
 
-- [ ] Confirm by direct test that bd resolves
-      `.beads/embeddeddolt/` from main when invoked from
-      inside a worktree (i.e. all worktrees share the
-      same dolt db). The proposal assumes this; verify
-      it on the existing smoke scratch dir or a fresh
-      `bd init`-ed tmpdir before relying on the
-      assumption.
-- [ ] Check whether bd has a flag (`--no-export`,
-      `--no-hooks`, or similar) on `bd update` that
-      suppresses the post-update jsonl re-export. If it
-      exists, this arc's `revert_paths` approach can be
-      replaced with passing that flag at every Turma bd
-      mutation site — cleaner because the dirty file
-      never gets written in the first place.
-- [ ] Check whether bd's "worktree redirect file"
-      (mentioned in `.beads/.gitignore`) provides a
-      different cwd-walkup mechanism inside worktrees.
-      Likely irrelevant for this arc (we're not
-      moving any mutations to worktrees), but document
-      what it does so future arcs can use it if
-      needed.
-- [ ] No code changes; this is a 5-10 minute scratch-
-      dir investigation. Surface findings before
-      starting Task 1. If a `--no-export` flag exists,
-      the spec gets a final revision to switch from
-      revert to flag-passing; the rest of the tasks
-      shrink accordingly.
+**Completed 2026-04-26 against the smoke scratch dir.**
+Three findings, two of which forced spec revisions:
+
+- [x] **Worktree dolt-db model verified empirically and
+      found WRONG** as the prior spec claimed it. Each
+      worktree has its own `.beads/` directory checked
+      out from main's HEAD. bd from inside a worktree
+      walks up and finds the WORKTREE's `.beads/`,
+      not main's; it lazily creates an `embeddeddolt/`
+      there on first invocation. Worktrees do NOT
+      share main's dolt db via cwd-walkup. The spec's
+      "shared dolt db" framing was retired; see the
+      "Wrong-direction post-mortem (two rounds)"
+      section in `design.md` for what was corrected
+      and what the empirically-verified model actually
+      is. Net effect on this arc: documentation
+      change only — Turma invokes bd commands from
+      main's working tree exclusively, so main's bd
+      db is the canonical record of Turma's view of
+      state, and status / reentrancy work correctly
+      regardless of how worktrees handle their own
+      dbs.
+- [x] **bd has `export.auto` and `export.git-add`
+      config keys** (default both `true`).
+      `export.auto=false` would suppress the
+      post-update jsonl re-export, but the
+      pre-commit hook ALSO respects it (verified
+      empirically: a `git commit` with `bd update`
+      having fired `auto=false` did NOT capture any
+      bd-state change). Setting `auto=false` would
+      break the worker-commit propagation pathway
+      and is NOT a usable simplification. The
+      `git-add=true` finding IS load-bearing,
+      though: `bd update` doesn't just write
+      `.beads/issues.jsonl`, it also `git add`s it.
+      The spec's `git checkout -- <path>` revert was
+      incomplete (it would only fix the worktree;
+      the index would still be dirty); corrected to
+      `git restore --staged --worktree -- <path>`.
+- [x] **The "worktree redirect file" referenced in
+      bd's `.gitignore` was not present in the
+      empirically-tested worktree** (no file
+      matching `redirect`, `worktree`, or `ref` in
+      the worktree's `.beads/`). bd may create such
+      a file under conditions not exercised by the
+      smoke. Empirically irrelevant for v1: the smoke
+      iter-1 worker commit captured the right bd
+      state without any such file appearing. v1
+      treats bd's worktree-handling as opaque
+      machinery that works.
+
+**Spec revisions made before Task 1 starts**: the
+"shared dolt db" framing is retired across all three
+artifacts; `revert_paths`'s argv switches from
+`git checkout` to `git restore --staged --worktree`;
+the preflight error-message triage commands updated to
+`git restore --staged --worktree`. No further bd-side
+flag-based simplifications available.
 
 ### 1. GitAdapter: add `revert_paths` and `path_is_dirty`
 
@@ -36,13 +67,22 @@
       `revert_paths(repo_root: Path, paths: tuple[str,
       ...]) -> None`. argv pinned:
       ```
-      git -C <repo_root> checkout -- <p1> <p2> ...
+      git -C <repo_root> restore --staged --worktree -- <p1> <p2> ...
       ```
+      `--staged --worktree` clears BOTH the index
+      AND the working tree. Required because bd's
+      `export.git-add=true` (default, verified Task 0
+      empirically) means `bd update` doesn't just write
+      `.beads/issues.jsonl` — it also `git add`s it.
+      A simple `git checkout -- <path>` would only fix
+      the worktree; the index would still be dirty
+      from bd's stage and the next `merge --ff-only`
+      would still refuse.
 - [ ] Empty paths tuple → no subprocess call, return
       None immediately. Don't fire git with zero paths
       (it has surprising defaults).
 - [ ] Failure mapping: non-zero exit → `PlanningError(
-      "git checkout failed: exit <N>\n<stderr>")`.
+      "git restore failed: exit <N>\n<stderr>")`.
       Preserves stderr verbatim so operators can read
       the actual git error.
 - [ ] Also add `path_is_dirty(repo_root: Path, path:
@@ -92,9 +132,10 @@
       file to be clean before starting because it
       manages the file's working-tree state across
       iterations. Triage with:
-        git diff .beads/issues.jsonl
-        git stash push -- .beads/issues.jsonl
-        git checkout -- .beads/issues.jsonl
+        git diff --cached .beads/issues.jsonl    # see staged
+        git diff .beads/issues.jsonl             # see unstaged
+        git stash push -- .beads/issues.jsonl    # save aside
+        git restore --staged --worktree -- .beads/issues.jsonl    # discard
       ```
 - [ ] Call site in `run_swarm`: invoke
       `_preflight_beads_state_clean(services)` after
