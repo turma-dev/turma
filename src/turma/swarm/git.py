@@ -237,6 +237,95 @@ class GitAdapter:
             f"git merge --ff-only failed: exit {merge_result.returncode}\n{detail}"
         )
 
+    def revert_paths(
+        self, repo_root: Path, paths: tuple[str, ...]
+    ) -> None:
+        """Restore `paths` in `repo_root`'s working tree AND
+        index to the HEAD version, discarding both staged and
+        unstaged changes.
+
+        argv: `git -C <repo_root> restore --staged --worktree
+              -- <p1> <p2> ...`.
+
+        Both `--staged` and `--worktree` are required because
+        bd's `export.git-add=true` (default) means `bd update`
+        writes AND stages `.beads/issues.jsonl`. A simple
+        `git checkout -- <path>` would only fix the worktree;
+        the index would still be dirty and the next
+        `merge --ff-only` would still refuse.
+
+        Empty paths tuple → no subprocess call, returns None
+        immediately. Don't fire git with zero paths (its
+        defaults are surprising).
+
+        Failure surfaces as `PlanningError("git restore
+        failed: ...")` with stderr preserved.
+
+        See `openspec/changes/swarm-beads-state-merge-cleanliness/
+        design.md` "Adapter contract" for the rationale.
+        """
+        if not paths:
+            return
+        argv = [
+            "git", "-C", str(repo_root),
+            "restore", "--staged", "--worktree",
+            "--", *paths,
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        detail = (
+            (result.stderr or "").strip()
+            or (result.stdout or "").strip()
+            or "unknown error"
+        )
+        raise PlanningError(
+            f"git restore failed: exit {result.returncode}\n{detail}"
+        )
+
+    def path_is_dirty(self, repo_root: Path, path: str) -> bool:
+        """True if `path` has tracked-file modifications
+        (staged, unstaged, or both) in `repo_root`'s working
+        tree.
+
+        argv: `git -C <repo_root> status --porcelain=v1
+              -- <path>`.
+
+        Returns False if the path is clean OR present only
+        as untracked (`??`-prefixed lines). Untracked files
+        at the path are the operator's business, not Turma's
+        — we don't refuse to start on them.
+
+        Failure surfaces as `PlanningError("git status
+        failed: ...")` with stderr preserved, rather than
+        being silently treated as clean.
+
+        Used by the preflight check at the top of
+        `run_swarm` to refuse on a pre-existing dirty
+        `.beads/issues.jsonl`.
+        """
+        argv = [
+            "git", "-C", str(repo_root),
+            "status", "--porcelain=v1", "--", path,
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (
+                (result.stderr or "").strip()
+                or (result.stdout or "").strip()
+                or "unknown error"
+            )
+            raise PlanningError(
+                f"git status failed: exit {result.returncode}\n{detail}"
+            )
+        for line in (result.stdout or "").splitlines():
+            if not line:
+                continue
+            if line.startswith("??"):
+                continue
+            return True
+        return False
+
     @staticmethod
     def _run(
         argv: list[str],
