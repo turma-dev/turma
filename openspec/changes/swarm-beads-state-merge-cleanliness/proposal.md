@@ -41,26 +41,45 @@ actual state) is **local-only**, gitignored. The
 which is a text export written by bd's hooks on every
 `bd update`.
 
-bd looks for `.beads/` by walking up from cwd. Worktrees
-don't get their own `embeddeddolt/` (it's gitignored, so
-nothing's checked out there); a `bd` invocation from
-inside a worktree walks up and finds the main repo's
-`.beads/embeddeddolt/`. **There is exactly one dolt db per
-repository, shared across the main checkout and all
-worktrees.** Mutations from any cwd land in that one db.
+bd looks for `.beads/` by walking up from cwd. Per Task 0
+empirical investigation (2026-04-26), worktrees DO get
+their own `.beads/` directory checked out from main's
+HEAD (sans `embeddeddolt/`, which is gitignored), and bd
+invoked from inside a worktree walks up and finds the
+**worktree's own** `.beads/`. Each worktree has its own
+bd db that bd's pre-commit hook bootstraps lazily on
+first invocation.
 
-This means:
+What this means for Turma's `turma run` and
+`turma status`, which only invoke bd commands from
+main's working tree:
 
-- `bd ready`, `bd list`, `bd show` always read from the
-  one shared dolt db. They reflect the latest mutation
-  regardless of what `.beads/issues.jsonl` looks like.
-- `turma status` reads via `bd list` → reads the dolt db
-  → sees in-flight state immediately after `claim_task`.
-- A second `turma run` invocation reads `bd ready` →
-  same dolt db → won't re-claim an already-claimed task.
-- `.beads/issues.jsonl` is a derived export. Its
-  working-tree state is regenerable; the dolt db is the
-  source of truth.
+- `bd ready`, `bd list`, `bd show` invoked from main
+  read from main's bd db. They reflect the latest
+  Turma mutation immediately. This is the canonical
+  state for Turma's view.
+- `turma status` reads via `bd list` from main → reads
+  main's dolt db → sees in-flight state immediately
+  after `claim_task`.
+- A second `turma run` invocation from main reads
+  `bd ready` → same main db → won't re-claim an
+  already-claimed task.
+- `.beads/issues.jsonl` in main's working tree is a
+  derived export. Its working-tree state is
+  regenerable; main's dolt db is the source of truth
+  for Turma's view of state.
+
+Worker-side propagation (workers committing inside
+worktrees, with bd's pre-commit hook firing) follows
+bd's own internal mechanism for keeping worktree bd
+state aligned with main's at commit time. Turma does
+NOT model bd's internal worktree-handling logic;
+empirically, the smoke iter-1 worker commit captured
+the post-`claim_task` `in_progress` state correctly
+(set by `claim_task` from main, captured by the
+worker's pre-commit hook in the worktree). This arc
+takes that as given and only addresses the dirty-tree
+problem on main's working tree.
 
 ## Why "commit at point of creation" was the wrong direction
 
@@ -101,10 +120,11 @@ to move.
   update` runs, a crashed prior `turma run`, or hand
   edits), Turma must NOT silently revert them. Instead,
   the orchestrator halts with a typed `PlanningError`
-  naming the file and giving the operator three triage
-  commands (`git diff`, `git stash push --`,
-  `git checkout --`). Skipped under `--dry-run` (which
-  doesn't mutate bd state).
+  naming the file and giving the operator triage
+  commands (`git diff`, `git diff --cached`,
+  `git stash push --`, `git restore --staged --worktree
+  --`). Skipped under `--dry-run` (which doesn't mutate
+  bd state).
 - **The orchestrator owns the working-tree state of
   `.beads/issues.jsonl` on main.** After each Turma-
   initiated `bd update` mutation in the main checkout

@@ -72,29 +72,57 @@ and local-only**. The only tracked bd-state file is
 text export on every `bd update`.
 
 bd locates `.beads/` by walking up from cwd. From inside
-a git worktree, walking up traverses the worktree root
-(no `embeddeddolt/` because it's gitignored) and finds
-the main repo's `.beads/embeddeddolt/`. **There is one
-dolt db per repository, shared across the main checkout
-and all worktrees.** Every `bd update`, regardless of
-cwd, lands in that one db.
+a git worktree, walking up traverses the worktree root.
+**Empirically (Task 0, 2026-04-26)**: the worktree has
+its own `.beads/` directory checked out from main's
+HEAD, with `embeddeddolt/` initially absent (gitignored,
+not checked out). bd from inside the worktree walks up
+and finds the WORKTREE's `.beads/`, not main's, and
+lazily creates an `embeddeddolt/` there on first
+invocation. **Each worktree has its own bd db**, not a
+shared one.
+
+(An earlier draft of this design assumed shared-db-via-
+cwd-walkup. That was empirically wrong. See "Wrong-
+direction post-mortem" for what changes when you
+correct that mental model.)
+
+What matters for THIS arc's correctness is narrower:
+Turma's `turma run` and `turma status` invoke bd
+commands only from main's working tree. They never run
+bd from a worktree. So the relevant claim is about
+main's bd db, not a hypothetical shared db.
 
 Implication for `turma status` and `turma run`
 reentrancy:
 
-- `bd ready`, `bd list`, `bd show` always read from the
-  shared dolt db. Their output reflects the latest
-  mutation immediately.
-- `turma status` calls `bd list` → reads dolt → sees
+- `bd ready`, `bd list`, `bd show` invoked from main's
+  working tree read main's dolt db. Their output
+  reflects the latest Turma mutation immediately.
+- `turma status` (which always runs from the operator's
+  shell on the main checkout) → main's bd db → sees
   in-flight state.
-- A second `turma run` invocation calls `bd ready` →
-  reads dolt → sees the in_progress task and won't
-  re-claim.
+- A second `turma run` invocation from main → main's
+  bd db → sees the in_progress task and won't re-claim.
 
-So the dolt db being mutated by `claim_task` is exactly
-what we need for status + reentrancy. The problem is
-purely in the working-tree state of `.beads/issues.jsonl`,
-which is a derived export bd's hook rewrites.
+Worker-side propagation (worker's pre-commit hook firing
+inside a worktree, exporting bd state to the worktree's
+`.beads/issues.jsonl`, getting captured in the worker's
+commit) is handled by **bd's own internal worktree-
+handling logic**, which Turma does not model. Empirical
+verification: the 2026-04-26 smoke iter-1 worker commit
+captured the post-`claim_task` `in_progress` state
+correctly (`claim_task` ran from main; worker's
+pre-commit hook in the worktree exported a matching
+state). Whatever bd does to keep these aligned across
+the main↔worktree boundary, it works for v1's purposes.
+
+So the bd state being mutated by `claim_task` (in main's
+db) is exactly what we need for status + reentrancy.
+The problem is purely in the working-tree state of
+`.beads/issues.jsonl` on main, which is a derived
+export bd's hook rewrites + auto-stages on every bd
+update.
 
 ## Adapter contract
 
@@ -104,15 +132,36 @@ which is a derived export bd's hook rewrites.
 def revert_paths(
     self, repo_root: Path, paths: tuple[str, ...]
 ) -> None:
-    """Restore `paths` in `repo_root`'s working tree to
-    their index version.
+    """Restore `paths` in `repo_root`'s working tree AND
+    index to the HEAD version, discarding both staged
+    and unstaged changes.
 
-    argv: `git -C <repo_root> checkout -- <p1> <p2> ...`.
+    argv: `git -C <repo_root> restore --staged --worktree
+            -- <p1> <p2> ...`.
 
     Empty paths is a no-op (no subprocess call). Failure
     surfaces as `PlanningError` preserving stderr.
     """
 ```
+
+**Why both `--staged` and `--worktree`**: bd's
+`export.git-add=true` config (default true, verified
+empirically in Task 0) means `bd update` doesn't just
+write `.beads/issues.jsonl` — it also `git add`s it.
+After a `bd update`, the file is dirty in the index AND
+the working tree. A simple `git checkout -- <path>`
+(which only restores from index) would leave the index
+still dirty; the next `merge --ff-only` would still
+refuse. `git restore --staged --worktree` clears both.
+
+(An earlier draft of this design said `git checkout --
+<path>`. That was wrong — see "Wrong-direction
+post-mortem" for why and what Task 0 caught.)
+
+`git restore --staged --worktree` requires git 2.23+.
+The smoke runbook's existing `--initial-branch` flag
+on `git init` requires git 2.28+, so 2.23 is a strict
+subset of what Turma already requires. Safe.
 
 `BeadsAdapter` is **unchanged**. No `cwd` param. No new
 methods.
@@ -148,9 +197,10 @@ def _preflight_beads_state_clean(services: SwarmServices) -> None:
             "this file to be clean before starting "
             "because it manages the file's working-tree "
             "state across iterations. Triage with:\n"
-            "  git diff .beads/issues.jsonl\n"
-            "  git stash push -- .beads/issues.jsonl\n"
-            "  git checkout -- .beads/issues.jsonl"
+            "  git diff --cached .beads/issues.jsonl    # staged\n"
+            "  git diff .beads/issues.jsonl             # unstaged\n"
+            "  git stash push -- .beads/issues.jsonl    # save aside\n"
+            "  git restore --staged --worktree -- .beads/issues.jsonl    # discard"
         )
 ```
 
@@ -255,36 +305,97 @@ sweep-phase mutation in a new code path, it needs to
 explicitly opt into the revert — the contract is
 visible, not implicit.
 
-## Wrong-direction post-mortem
+## Wrong-direction post-mortem (two rounds)
 
-A prior draft of this spec proposed moving `claim_task`
-and `mark_pr_open` into per-task worktrees so the bd-
-state changes would land on the task branch. The
-reviewer flagged that this would break `turma status`
-and reentrancy. The mistake was in the mental model:
+Two layers of wrong mental model surfaced during this
+arc's drafting. Logging both because the second one
+nearly slipped past:
 
-- **What the prior draft assumed**: each git worktree
-  has its own dolt db. Mutations in the worktree don't
-  affect main's bd state until merge.
-- **What's actually true**: `.beads/embeddeddolt/` is
-  gitignored, so worktrees don't get their own copy.
-  bd walks up from cwd to find the db, which means
-  worktrees and main share **one** dolt db.
+### Round 1: the worktree-claim draft
 
-If the prior draft had run, `claim_task(cwd=worktree)`
-would have mutated **the same shared dolt db** as
-`claim_task(cwd=main)` would. Status and reentrancy
-would have worked, but the move to worktree wouldn't
-have changed anything semantically — just rearranged
-which path bd's hook re-exports `.beads/issues.jsonl`
-in. The dirty-tree problem on main would be unchanged
-(or moved to a worktree, which is a worse place
-because the worker's commit then needs to deal with
-extra bd-state churn).
+A prior draft proposed moving `claim_task` and
+`mark_pr_open` into per-task worktrees so the bd-state
+changes would land on the task branch. The reviewer
+flagged that this would break `turma status` and
+reentrancy: a `turma status` run from main reads main's
+bd state, but in the proposed model main's state would
+lag (the claim hasn't been merged yet) until PR-merge.
 
-The actual fix is much narrower: revert the export.
-The dolt db never needed to move; only the export
-needed disposal.
+That direction was retired.
+
+### Round 2: the "shared via cwd-walkup" mental model
+### (also wrong)
+
+The retired direction's reasoning leaned on a NEW
+claim: "`.beads/embeddeddolt/` is gitignored, so
+worktrees don't get their own copy. bd walks up from
+cwd to find the db, which means worktrees and main
+share one dolt db." This claim made it into the
+shipped spec as a load-bearing fact.
+
+**Task 0 (2026-04-26) verified this empirically and
+found it was also wrong.** Worktrees DO get their own
+`.beads/` directory checked out from main's HEAD (the
+config files, hooks, README — everything except
+`embeddeddolt/`). bd from inside a worktree walks up,
+finds the WORKTREE's `.beads/`, and lazily creates an
+`embeddeddolt/` there on first invocation. Each
+worktree has its OWN bd db. They are not shared.
+
+If the prior draft had been written and shipped under
+the shared-db assumption, `claim_task(cwd=worktree)`
+would have mutated the WORKTREE's db, NOT main's.
+`turma status` from main would still have read main's
+db and seen the pre-claim state — the same status /
+reentrancy bug the reviewer flagged would have
+manifested, just for a different reason than the
+post-mortem first claimed. The fix-sketch ("worktree
+mutations affect the shared db, so status would have
+been fine if not for the visibility lag") was the
+wrong fix for the wrong reason.
+
+### What's actually true (and what this arc relies on)
+
+- Worktrees have their own `.beads/` directories with
+  their own (separately-bootstrapped) dolt dbs.
+- Turma invokes bd commands ONLY from main's working
+  tree. Mutations land in main's bd db.
+- Main's bd db is the canonical record of Turma's
+  view of state. `turma status`, `bd ready`, `bd list`
+  from main read it; status and reentrancy are
+  preserved.
+- Worker-side state propagation (worker's pre-commit
+  hook in a worktree exporting bd state into the
+  worker's commit, which then propagates via PR
+  merge to origin/main) works through bd's own
+  internal worktree-handling logic. v1 takes this as
+  empirically verified (smoke iter-1 captured the
+  right state) without modeling bd's internals.
+
+This arc's actual fix only addresses the working-tree
+dirtiness on main: `bd update` on main writes AND
+stages `.beads/issues.jsonl`; Turma reverts via `git
+restore --staged --worktree` after each mutation.
+That's it. The dolt db never needed to move; the
+mental-model correction matters only because it
+changed the documentation, not the implementation
+shape of `revert_paths`.
+
+### Process learning
+
+Two arcs in a row (`swarm-fetch-and-ff-base-
+correction` was the first) were saved by Task-0-style
+empirical verification. The pattern: a clean-looking
+spec built on an unverified assumption about a
+subsystem's behavior; live testing reveals the
+assumption is wrong; the spec needs revision before
+implementation.
+
+Future arcs that touch git or bd should treat
+"reach for the actual binary and run the operation
+in a tmpdir" as a Task 0 prerequisite when the spec
+makes a load-bearing claim about either system's
+behavior.
 
 This pattern — "wrong mental model produces wrong
 direction; verifying the model produces a smaller
@@ -354,11 +465,12 @@ refused.
 
 ## Failure modes
 
-- `git checkout -- <paths>` non-zero exit: surfaces
-  as `PlanningError("git checkout failed: ...",
-  stderr_preserved)`. Possible causes: file doesn't
-  exist (operator deleted it), git config issues.
-  Halts the run; operator triages.
+- `git restore --staged --worktree -- <paths>` non-zero
+  exit: surfaces as `PlanningError("git restore failed:
+  ...", stderr_preserved)`. Possible causes: file
+  doesn't exist (operator deleted it), git config
+  issues, or the file isn't tracked. Halts the run;
+  operator triages.
 - The revert is run on main's `repo_root`; if the
   orchestrator is somehow invoked from a non-git dir,
   it would have failed earlier in preflight. v1
@@ -381,19 +493,28 @@ because the prior draft glossed over it.
 Today, Turma's bd-state mutations propagate to git via
 **worker commits**, not via direct commits to main.
 When the worker runs `git commit` inside its worktree,
-bd's pre-commit hook fires, reads the **shared** dolt
-db (the same one Turma's main-cwd mutations have been
-writing to), and exports the current state into the
-worktree's `.beads/issues.jsonl`. The worker's commit
-captures that export. After PR merge, origin/main has
-that snapshot.
+bd's pre-commit hook fires and exports bd state into
+the worktree's `.beads/issues.jsonl`. The worker's
+commit captures that export. After PR merge,
+origin/main has that snapshot.
+
+The export captures "what bd would say is the current
+state at hook-fire time". Crucially, this captured
+state aligns with what Turma's main-cwd mutations
+wrote — verified by the 2026-04-26 smoke iter-1, where
+the worker's commit's issues.jsonl reflected the
+post-`claim_task` `in_progress` status that
+`claim_task` had just set from main's working tree.
+Whatever bd does internally to keep these aligned
+across the main↔worktree boundary, it works for v1's
+purposes; this arc takes that as given.
 
 The set of mutations captured by a given worker commit
-is "everything in the dolt db at the moment the worker
+is "everything bd's hook sees at the moment the worker
 ran `git commit`". This includes mutations made earlier
-in the same `turma run` iteration (e.g.
-`claim_task` fired before the worker started) AND any
-mutations from prior iterations that haven't yet been
+in the same `turma run` iteration (e.g. `claim_task`
+fired before the worker started) AND any mutations
+from prior iterations that haven't yet been
 propagated.
 
 Mutations made AFTER a worker commit (e.g.
@@ -419,7 +540,7 @@ unchanged — the next worker commit still captures them
 ### Concrete consequences
 
 - **Same-operator turma run reentrancy**: works
-  (reads from shared local dolt; sees latest state).
+  (reads from main's local dolt; sees latest state).
 - **Same-operator turma status**: works (same).
 - **Tail mutation persistence across one turma run**:
   unchanged. Still in local dolt; still not in git.
@@ -520,20 +641,24 @@ without re-opening the spec.
 
 ## Open items
 
-- **Whether bd's worktree-redirect mechanism**
-  (`.beads/.gitignore` mentions a "Worktree redirect
-  file (contains relative path to main repo's
-  .beads/)") **changes anything**. From the smoke we
-  already see worktrees inheriting the main repo's bd
-  db via cwd-walkup; the redirect file may be an
-  alternative mechanism. Investigate as Task 0
-  prerequisite.
-- **Whether bd has a flag to disable the post-update
-  hook's re-export**. If bd offers
-  `--no-export` or similar, calling that would obviate
-  the revert entirely. Investigate as Task 0; if it
-  exists, the revert approach is a fallback for older
-  bd versions that don't support it.
+- **bd's worktree-handling internals**. Task 0
+  empirically verified that worktrees have their own
+  `.beads/` directories (NOT shared via cwd-walkup as
+  the prior draft assumed) but that worker commits in
+  worktrees still capture bd state correctly. The
+  exact mechanism — whether bd uses the
+  `.beads/.gitignore`-mentioned "worktree redirect
+  file", whether the pre-commit hook reaches into
+  main's git-dir, or something else — is bd-internal
+  and not modeled by Turma. v1 treats it as opaque
+  machinery that works. If a future change to bd
+  breaks the propagation, this open item gets revisited.
+- **bd `export.auto=false` as a future simplification**
+  is rejected by Task 0: it suppresses the
+  post-update jsonl export AND the pre-commit hook's
+  export, breaking worker-commit propagation. The
+  revert approach is the right shape; not a
+  fallback-for-older-versions.
 - **Sweep-phase mutations on closed tasks** stay on
   main with this approach (no relocation needed). The
   revert handles them. No follow-up arc required for
