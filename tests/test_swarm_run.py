@@ -1652,31 +1652,37 @@ def test_merge_advancement_dry_run_is_read_only(
 def test_chained_feature_post_merge_advances_dependent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**Regression test for Findings 1 + 2 + 3 together.**
+    """**Orchestrator-contract regression for Findings 1 + 2 +
+    fetch-order pin for Finding 3.**
 
-    This is the failure mode the 2026-04-25 smoke surfaced
+    Models the failure shape the 2026-04-25 smoke surfaced
     against `khanhgithead/turma-run-smoke`: a chained feature
     where task A blocks task B; task A's PR was opened by a
-    prior `turma run` and merged on GitHub between runs; the
-    next `turma run` must close task A through merge-advancement
-    and run task B against the merged base.
+    prior `turma run` and merged on GitHub between runs.
 
-    Pre-stabilization, this run produced:
-    - **Finding 1**: reconciliation classified task A as
-      `completion-pending` (no open PR for the branch — the
-      merged PR is no longer OPEN). Repair phase opened a
-      duplicate PR.
-    - **Finding 2**: the duplicate PR's `turma-pr:<M>` label
-      stacked on top of the original `turma-pr:<N>`. The sweep
-      then unmarked only `<N>`, leaving `<M>` as a stale label
-      on the closed task.
-    - **Finding 3**: task B's worktree was set up from local
-      `main` which never picked up the parent's merge.
-      Worker refused.
+    What this test proves at the stub level:
+    - **Finding 1**: reconciliation skips task A's classification
+      because the `turma-pr:<N>` label is present.
+      `find_open_pr_url_for_branch` is NOT called for task A's
+      branch (the call that previously misclassified the task as
+      `completion-pending`).
+    - **Finding 2**: only one `mark_pr_open` entry is recorded
+      across the run (for task B's new PR), with no duplicate
+      from a repair-phase false-positive on task A.
+      Merge-advancement closes task A cleanly via unmark →
+      close → cleanup.
+    - **Finding 3 — fetch-order pin only**: `fetch_and_ff_base`
+      runs once before reconcile. **Not proven here**: that the
+      dependent's worktree was actually built from the
+      post-fetch base. `StubWorktree.setup` doesn't model
+      base-branch freshness; the worker stub would record an
+      invocation regardless of which ref the worktree was
+      derived from. Semantic proof of "dependent runs against
+      merged base" lives in the live smoke (Task 7's manual
+      re-walk), not this stub-level test.
 
-    With Tasks 1-4 in place this test asserts the post-fix
-    behavior holds end-to-end. If any single fix regresses,
-    one of the assertions below fails.
+    If any of Tasks 1-4 regresses the orchestrator-contract
+    behavior, the corresponding assertion below fails.
     """
     _scratch_feature(tmp_path)
 
@@ -1710,7 +1716,11 @@ def test_chained_feature_post_merge_advances_dependent(
 
     run_swarm("oauth", services=services)
 
-    # ----- Finding 3: fetch happens before reconcile. -----
+    # ----- Finding 3 (fetch-order pin): fetch happens once. -----
+    # NOTE: this is an orchestrator-contract pin only. The stubs
+    # do not model whether the post-fetch ref was actually used
+    # to build task B's worktree — that semantic is the live
+    # smoke's job, not this test.
     fetch_calls = [c for c in git.calls if c[0] == "fetch_and_ff_base"]
     assert len(fetch_calls) == 1, (
         "fetch_and_ff_base must run exactly once per invocation "
@@ -1760,13 +1770,15 @@ def test_chained_feature_post_merge_advances_dependent(
         for c in wt.calls
     )
 
-    # ----- Finding 3: task B's worker actually ran. -----
-    # If fetch_and_ff_base hadn't refreshed local main, the
-    # dependent's worktree would have been stale and the worker
-    # would have refused. This test uses stubs so the worker just
-    # records the invocation, but the fact that the orchestrator
-    # got far enough to invoke the worker is the v1-stub-level
-    # equivalent of "the dependent ran cleanly".
+    # ----- Dependent unblocking pin: orchestrator reached the
+    # main loop, claimed task B, and ran its worker. ------
+    # This proves the orchestrator's dispatch logic — sweep
+    # closed task A, bd ready surfaced task B, main_loop
+    # claimed and ran it. It does NOT prove task B's worktree
+    # was set up from the post-fetch base ref; that semantic
+    # is verified by the live smoke (see Task 7 in
+    # `openspec/changes/swarm-merge-advancement-stabilization/
+    # tasks.md`).
     assert len(worker.invocations) == 1
     assert worker.invocations[0].task_id == task_b_id
     # Task B's PR opened.
