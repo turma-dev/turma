@@ -115,46 +115,110 @@ class GitAdapter:
     def fetch_and_ff_base(
         self, repo_root: Path, base_branch: str
     ) -> None:
-        """Fast-forward local `<base_branch>` from origin in one
-        subprocess call.
+        """Fast-forward local `<base_branch>` from origin.
 
-        argv: `git -C <repo_root> fetch origin <base_branch>:<base_branch>`.
+        Three argv calls in order:
 
-        The colon-form refspec fetches `origin/<base_branch>` and
-        fast-forwards local `<base_branch>` to match in a single
-        operation. The operator's current HEAD / checked-out branch
-        is not disturbed, which matters because the orchestrator
-        runs from the operator's shell — they may be on a feature
-        branch with local edits.
+            git -C <repo_root> symbolic-ref --short HEAD
+            git -C <repo_root> fetch origin <base_branch>
+            git -C <repo_root> merge --ff-only origin/<base_branch>
 
-        Without this fetch, a `turma run` claiming a dependent task
-        would `git worktree add` from a stale local
-        `<base_branch>`, missing the merge of the parent's PR
-        that just landed on origin. See
-        `openspec/changes/swarm-merge-advancement-stabilization/
-        design.md` "`GitAdapter.fetch_and_ff_base`" for why this
-        beats a two-call `fetch + merge --ff-only` alternative.
+        The first call reads the current branch name. If it isn't
+        `<base_branch>`, the method raises a typed PlanningError
+        before any remote I/O — closing the silent-feature-FF
+        footgun where `git merge --ff-only origin/<base_branch>`
+        from a feature branch that's an ancestor of origin would
+        silently advance the feature ref to origin's tip. The
+        2026-04-26 chained-flow live smoke proved the prior
+        single-call colon-form
+        (`git fetch origin <base>:<base>`) was broken for the
+        standard `turma run` usage (git refuses to fetch into a
+        checked-out branch), and the design.md follow-up made the
+        colon-form's "doesn't disturb HEAD" justification visibly
+        wrong: git refused precisely because HEAD would be
+        updated.
+
+        See `openspec/changes/swarm-fetch-and-ff-base-correction/
+        design.md` for the full rationale, including why the HEAD
+        precheck was pulled into v1 scope rather than left as a
+        documented precondition.
 
         Failure mapping:
-        - Local `<base_branch>` has diverged from origin →
-          `PlanningError` naming the branch and pointing at the
-          two `git log <a>..<b>` triage commands operators need
-          to compare divergence directions. Triggered by either
-          `non-fast-forward` or `[rejected]` in stderr.
-        - Any other non-zero exit (network, auth, etc.) →
-          `PlanningError` preserving stderr verbatim with a
-          `git fetch failed:` prefix.
+
+        - `git symbolic-ref` returns a name that isn't
+          `<base_branch>` → typed `PlanningError("HEAD is on
+          <current>; turma run must run from a working copy with
+          <base_branch> checked out. cd into the repo's
+          <base_branch> checkout and re-run.")`. Fetch + merge
+          NOT invoked.
+        - `git symbolic-ref` non-zero (detached HEAD, etc.) →
+          typed `PlanningError("HEAD is detached or unreadable:
+          <stderr>; turma run requires <base_branch> checked
+          out.")`. Fetch + merge NOT invoked.
+        - `git fetch` non-zero → `PlanningError("git fetch
+          failed: ...", stderr_preserved)`. Merge NOT invoked.
+        - `git merge --ff-only` non-zero with stderr containing
+          `Not possible to fast-forward` or `non-fast-forward`
+          → typed divergence `PlanningError` naming the branch
+          and pointing at the two `git log <a>..<b>` triage
+          commands.
+        - `git merge --ff-only` non-zero, other → `PlanningError(
+          "git merge --ff-only failed: ...", stderr_preserved)`.
         """
-        argv = [
+        # 1. HEAD precheck — must be on <base_branch>.
+        head_argv = [
             "git", "-C", str(repo_root),
-            "fetch", "origin", f"{base_branch}:{base_branch}",
+            "symbolic-ref", "--short", "HEAD",
         ]
-        result = subprocess.run(argv, capture_output=True, text=True)
-        if result.returncode == 0:
+        head_result = subprocess.run(
+            head_argv, capture_output=True, text=True
+        )
+        if head_result.returncode != 0:
+            stderr = (head_result.stderr or "").strip() or "unknown error"
+            raise PlanningError(
+                f"HEAD is detached or unreadable: {stderr}; "
+                f"turma run requires {base_branch} checked out."
+            )
+        current = (head_result.stdout or "").strip()
+        if current != base_branch:
+            raise PlanningError(
+                f"HEAD is on {current}; turma run must run from a "
+                f"working copy with {base_branch} checked out. "
+                f"cd into the repo's {base_branch} checkout and "
+                f"re-run."
+            )
+
+        # 2. Fetch origin/<base_branch>.
+        fetch_argv = [
+            "git", "-C", str(repo_root),
+            "fetch", "origin", base_branch,
+        ]
+        fetch_result = subprocess.run(
+            fetch_argv, capture_output=True, text=True
+        )
+        if fetch_result.returncode != 0:
+            detail = (
+                (fetch_result.stderr or "").strip()
+                or (fetch_result.stdout or "").strip()
+                or "unknown error"
+            )
+            raise PlanningError(
+                f"git fetch failed: exit {fetch_result.returncode}\n{detail}"
+            )
+
+        # 3. Merge --ff-only origin/<base_branch>.
+        merge_argv = [
+            "git", "-C", str(repo_root),
+            "merge", "--ff-only", f"origin/{base_branch}",
+        ]
+        merge_result = subprocess.run(
+            merge_argv, capture_output=True, text=True
+        )
+        if merge_result.returncode == 0:
             return
 
-        stderr = result.stderr or ""
-        if "non-fast-forward" in stderr or "[rejected]" in stderr:
+        stderr = merge_result.stderr or ""
+        if "Not possible to fast-forward" in stderr or "non-fast-forward" in stderr:
             raise PlanningError(
                 f"local {base_branch} has diverged from "
                 f"origin/{base_branch}; refusing to fast-forward. "
@@ -164,9 +228,13 @@ class GitAdapter:
                 f"to compare directions.\n{stderr.strip()}"
             )
 
-        detail = stderr.strip() or (result.stdout or "").strip() or "unknown error"
+        detail = (
+            stderr.strip()
+            or (merge_result.stdout or "").strip()
+            or "unknown error"
+        )
         raise PlanningError(
-            f"git fetch failed: exit {result.returncode}\n{detail}"
+            f"git merge --ff-only failed: exit {merge_result.returncode}\n{detail}"
         )
 
     @staticmethod
