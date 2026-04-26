@@ -606,18 +606,31 @@ attempt it. A future arc that demonstrates a real need
 (e.g. multi-operator chained-feature workflows) can
 revisit.
 
-A simpler "best effort" alternative: at end of each
-`turma run`, the orchestrator prints a one-line warning
-when there are tail mutations in local dolt that aren't
-in origin/main yet, telling the operator to consider
-running `bd export && git commit -- .beads/issues.jsonl`
-manually. v1 could ship this telemetry without
-committing to the full auto-commit model.
+**v1 ships a "best effort" warning** (Task 4): at end
+of each `turma run` where bd mutations actually fired,
+the orchestrator prints a one-line warning telling the
+operator that local mutations haven't been propagated
+to origin yet and pointing at
+`bd export && git commit -- .beads/issues.jsonl` as
+the manual escape hatch. This converts the silent
+contract change into an explicit one — operators see
+the lag, decide whether to manually capture state, or
+rely on the next `turma run` worker commit to
+propagate.
 
-This arc deliberately ships without the warning to
-keep scope narrow. If the smoke validation shows the
-need, the warning can land as a small follow-up
-without re-opening the spec.
+The warning is intentionally lightweight (one line,
+end of run) and doesn't change the propagation model
+itself. The full Turma-driven push to origin/main is
+still deferred (see "Deferred: stricter shareability
+via explicit Turma commits" below).
+
+A prior draft of this design deferred the warning
+itself. The reviewer flagged that this left the
+shareability tradeoff invisible at runtime — operators
+could ship Turma into a multi-clone deployment and
+silently lose tail mutations without ever seeing a
+warning that the lag existed. Pulling the warning
+into v1 scope addresses that visibility gap.
 
 ## Migration notes
 

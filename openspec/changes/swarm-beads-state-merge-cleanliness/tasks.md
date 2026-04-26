@@ -207,7 +207,69 @@ flag-based simplifications available.
         scope stays the same; the new behavior is
         layered onto the existing fixture.
 
-### 4. Real-git integration test
+### 4. Tail-mutation telemetry: warn operators about local-only bd state
+
+This task converts the shareability product decision
+from a silent contract change into a visible one. The
+revert approach makes Turma's bd mutations local-only
+until a future worker commit captures them; if no
+future worker commit happens (turma run finishes its
+workload, operator walks away), the tail mutations
+stay in local dolt only. Operators need a runtime
+signal that this happened so they can decide whether
+to manually `bd export && git commit` the state.
+
+- [ ] At the end of `run_swarm` (after `_main_loop`
+      returns successfully, after any final
+      mutation point), the orchestrator detects
+      whether local main's bd db is ahead of
+      origin/main's last-committed `.beads/issues.
+      jsonl` snapshot. Implementation sketch:
+      `bd export` writes the current dolt state to
+      a temp file; compare to the committed
+      `.beads/issues.jsonl`; if they differ, warn.
+      Or simpler: track whether any
+      `_revert_beads_export` calls fired during the
+      run and warn unconditionally on yes.
+- [ ] The warning is a single line printed to stdout
+      after the existing `swarm: no ready tasks
+      remain; done` (or whatever final orchestrator
+      log line fires):
+      ```
+      bd-state: local mutations not yet propagated
+      to origin. Run `bd export && git commit -- .beads/issues.jsonl`
+      to capture them, or rely on the next `turma
+      run` worker commit to propagate.
+      ```
+      Format pinned by tests so operator log filters
+      can match it.
+- [ ] Skipped on the failure path (preflight error,
+      fetch error, etc.). The warning only fires on
+      successful run completion where bd mutations
+      actually fired.
+- [ ] Tests in `tests/test_swarm_run.py`:
+      - New
+        `test_run_swarm_warns_on_unpropagated_tail_mutations`:
+        run a happy-path turma run; capsys captures
+        the warning line; assert the line appears
+        after the final swarm log line.
+      - New
+        `test_run_swarm_skips_warning_when_no_mutations`:
+        a no-op run (empty ready_queue, no
+        in_progress, no merge-advancement work)
+        triggers no mutations → no warning printed.
+      - Dry-run: warning never fires (dry-run skips
+        all mutation paths). Existing dry-run test
+        extended to assert the warning is absent.
+- [ ] Docs: include the warning line in
+      `docs/smoke-turma-run.md` Step 3a's expected
+      output so operators know to expect it. Brief
+      explanation paragraph: "This warning is the v1
+      tradeoff for keeping main's working tree
+      clean — see CHANGELOG / spec for the
+      shareability contract."
+
+### 5. Real-git integration test
 
 - [ ] Add a new case to
       `tests/test_swarm_git_integration.py`
@@ -238,7 +300,7 @@ flag-based simplifications available.
       locally, gets reverted, fetch+merge proceeds
       cleanly. Real git, not mocks.
 
-### 5. Docs + CHANGELOG amendment
+### 6. Docs + CHANGELOG amendment
 
 - [ ] `docs/architecture.md` Execution section: add a
       short "bd-state ownership" subsection between
@@ -304,7 +366,7 @@ flag-based simplifications available.
         the rest of the chained-flow output looks
         right."
 
-### 6. Validation
+### 7. Validation
 
 - [ ] `uv run pytest` green. Current baseline before
       this arc: 541 tests (after
@@ -341,7 +403,7 @@ flag-based simplifications available.
         residue; task B's worktree LADDER.txt has
         both lines; task B's PR opened cleanly.
 - [ ] On smoke success: tick the manual-smoke `[ ]`
-      box on this arc's tasks.md (Task 6) AND on
+      box on this arc's tasks.md (Task 7) AND on
       `swarm-fetch-and-ff-base-correction` (Task 4)
       AND on `swarm-merge-advancement-stabilization`
       (Task 7). All three were waiting on this arc.
@@ -349,7 +411,7 @@ flag-based simplifications available.
       gap, stop, wait for direction. Do not start
       another fix branch autonomously.
 
-### 7. Release gate
+### 8. Release gate
 
 - [ ] After smoke passes and tasks.md is updated, the
       three correction arcs
