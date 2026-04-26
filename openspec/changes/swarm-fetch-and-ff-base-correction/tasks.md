@@ -1,18 +1,29 @@
 ## Tasks
 
-### 1. Adapter: flip to two-call fetch + merge --ff-only
+### 1. Adapter: flip to three-call symbolic-ref + fetch + merge --ff-only
 
 - [ ] In `src/turma/swarm/git.py`, replace
       `fetch_and_ff_base`'s single colon-form subprocess
-      with two subprocess.run calls in order:
+      with three subprocess.run calls in order:
       ```
+      git -C <repo_root> symbolic-ref --short HEAD
       git -C <repo_root> fetch origin <base_branch>
       git -C <repo_root> merge --ff-only origin/<base_branch>
       ```
 - [ ] Failure mapping at the call boundary:
+      - symbolic-ref returns a branch name (stdout) that
+        is NOT `<base_branch>` → typed
+        `PlanningError("HEAD is on <current>; turma run
+        must run from a working copy with <base_branch>
+        checked out. cd into the repo's <base_branch>
+        checkout and re-run.")`. Fetch + merge NOT invoked.
+      - symbolic-ref non-zero exit (detached HEAD,
+        missing repo, etc.) → typed
+        `PlanningError("HEAD is detached or unreadable:
+        <stderr>; turma run requires <base_branch>
+        checked out.")`. Fetch + merge NOT invoked.
       - Fetch non-zero exit → `PlanningError("git fetch
-        failed: exit <N>\n<stderr>")`. Merge step is NOT
-        invoked.
+        failed: exit <N>\n<stderr>")`. Merge NOT invoked.
       - Merge non-zero exit with stderr containing
         `Not possible to fast-forward` or
         `non-fast-forward` → typed
@@ -23,57 +34,50 @@
         reverse.")`
       - Merge non-zero exit, other → `PlanningError("git
         merge --ff-only failed: exit <N>\n<stderr>")`.
-- [ ] HEAD-on-`<base_branch>` is documented as a
-      precondition in the docstring; v1 does NOT
-      explicitly check it. See `design.md`
-      "HEAD-on-<base_branch> is a documented
-      precondition, not a checked one" for why
-      (`git merge --ff-only` has no clean detection
-      signal for HEAD-on-feature; would require a third
-      subprocess call to `git symbolic-ref`, deferred).
 - [ ] Update the method's docstring to spell out the
-      two-call argv, the HEAD-on-`<base_branch>`
-      precondition (with explicit "v1 does not check"
-      caveat), and the three-way error mapping. Cross-
-      reference `swarm-fetch-and-ff-base-correction/
-      design.md` "`Adapter contract`" subsection.
+      three-call argv, the HEAD-precheck behavior (refuses
+      with explicit `cd` instruction when HEAD is on
+      anything other than `<base_branch>`), and the
+      five-way error mapping. Cross-reference
+      `swarm-fetch-and-ff-base-correction/design.md`
+      "`Adapter contract`" and "Why the HEAD precheck is
+      in scope" subsections.
 - [ ] Update existing subprocess-mock tests in
       `tests/test_swarm_git.py`:
       - `test_fetch_and_ff_base_pins_argv_shape`: assert
-        TWO `subprocess.run` calls in order (fetch then
-        merge) with the new argvs.
+        THREE `subprocess.run` calls in order (symbolic-
+        ref, fetch, merge) with the new argvs.
       - `test_fetch_and_ff_base_happy_path_returns_none`:
-        both calls return zero exit; method returns None.
+        all three calls return zero exit (symbolic-ref
+        stdout = `<base_branch>`); method returns None.
       - `test_fetch_and_ff_base_typed_error_on_non_fast_forward`:
-        fetch returns 0; merge returns non-zero with
-        `Not possible to fast-forward` in stderr →
-        typed divergence error.
+        symbolic-ref + fetch return 0; merge returns
+        non-zero with `Not possible to fast-forward` in
+        stderr → typed divergence error.
       - `test_fetch_and_ff_base_typed_error_on_rejected_substring`:
         **delete**. The colon-form's `[rejected]` phrasing
         no longer applies; merge --ff-only does not emit
         that string.
       - `test_fetch_and_ff_base_generic_error_preserves_stderr`:
-        split into a fetch-network-failure case (merge
-        never runs — assert fetch was the only call) and
-        a merge-generic-failure case.
+        split into a fetch-network-failure case (assert
+        merge never runs) and a merge-generic-failure
+        case.
       - `test_fetch_and_ff_base_branch_name_interpolated_into_typed_error`:
         retained against merge-step stderr.
-- [ ] One new subprocess-mock test:
+- [ ] Three new subprocess-mock tests:
+      - `test_fetch_and_ff_base_typed_error_on_head_not_on_base`:
+        symbolic-ref stdout is `feature-x` (not
+        `<base_branch>`) → typed `cd`-instructing
+        PlanningError; fetch + merge subprocess.run never
+        called (assert exactly ONE call total).
+      - `test_fetch_and_ff_base_typed_error_on_detached_head`:
+        symbolic-ref non-zero exit with stderr `fatal:
+        ref HEAD is not a symbolic ref` → typed detached-
+        HEAD PlanningError; fetch + merge never called.
       - `test_fetch_and_ff_base_skips_merge_when_fetch_fails`:
-        fetch raises non-zero → assert exactly ONE
-        `subprocess.run` call. Pin the ordering.
-
-      The earlier draft of this task added a second new
-      test for HEAD-not-on-base detection via
-      `merge: <base> - not something we can merge` stderr
-      — that test is dropped because git's actual behavior
-      doesn't emit that signal for HEAD-on-feature (it
-      either silently FFs the feature ref or surfaces the
-      same `Not possible to fast-forward` signal as
-      divergence). v1 documents HEAD-on-`<base_branch>`
-      as an unchecked precondition. See `design.md`
-      "HEAD-on-<base_branch> is a documented precondition,
-      not a checked one" for the rationale.
+        symbolic-ref ok; fetch raises non-zero → assert
+        exactly TWO calls (symbolic-ref + fetch); merge
+        not invoked.
 
 ### 2. Real-git integration test
 
@@ -82,7 +86,7 @@
       Skip-if-git-missing guard at module level so the file
       is robust to environments without git (CI almost
       always has git; documented for completeness).
-- [ ] Two tests:
+- [ ] Three tests:
       - **Happy path** (the case the live smoke caught):
         helper builds a tmpdir bare remote + a working
         clone with `main` checked out. A second working
@@ -101,20 +105,19 @@
         `fetch_and_ff_base` raises typed `PlanningError`
         with "diverged" in the message and the branch
         name interpolated.
-
-      A HEAD-on-feature-branch test was originally
-      planned here too. It's dropped because git's
-      actual behavior in that case is split (silent FF
-      of the feature ref vs. divergence error), neither
-      of which gives a clean "HEAD not on base"
-      assertion to write — see Task 1's note on the
-      same. Validating that v1 does NOT silently corrupt
-      a feature branch when HEAD is on it would require
-      either checking the feature ref unchanged (an
-      indirect test) or adding the deferred
-      `git symbolic-ref` precheck (out of scope for this
-      arc).
-- [ ] Helpers shared across the two tests: a small
+      - **HEAD on feature branch** (the silent-corruption
+        case the precheck closes): working clone, check
+        out a new branch off main (no commits required —
+        the ancestor case is what would silently FF
+        without the precheck). `fetch_and_ff_base("main")`
+        raises typed `PlanningError` naming the current
+        branch and pointing the operator at `cd`.
+        Critically: assert the feature branch ref is
+        unchanged after the failed call (compare
+        `git rev-parse <feature>` before and after).
+        That's the safety the precheck buys us; the
+        assertion makes it a regression contract.
+- [ ] Helpers shared across the three tests: a small
       `_make_bare_and_clone(tmp_path) -> tuple[Path, Path]`
       that returns `(bare_remote_path, working_clone_path)`
       with main initialized to a single committed file. Use
@@ -126,16 +129,20 @@
 
 - [ ] `docs/architecture.md` Execution section:
       replace the `fetch_and_ff_base` paragraph's "single-
-      call colon-form" wording with "two-call
-      `fetch + merge --ff-only`". One additional sentence
-      naming the colon-form's checkout-protection
-      rejection as the reason for the correction.
+      call colon-form" wording with "three-call
+      `symbolic-ref` + `fetch` + `merge --ff-only`". Add
+      sentences naming the colon-form's checkout-
+      protection rejection as the reason for the
+      correction AND the silent-feature-FF footgun the
+      precheck closes.
 - [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: amend the prior
-      arc's Finding 3 paragraph to name the two-call form
-      and reference this correction arc. Add one sentence
-      about the live-smoke discovery so the changelog
-      audit trail captures why the implementation flipped
-      between versions.
+      arc's Finding 3 paragraph to name the three-call
+      form (HEAD precheck + fetch + merge --ff-only) and
+      reference this correction arc. Add one sentence
+      about the live-smoke discovery and one about the
+      silent-feature-FF footgun the precheck prevents so
+      the changelog audit trail captures why the
+      implementation flipped between versions.
 - [ ] No README changes required. The "Base-branch sync"
       subsection's user-facing description (HEAD must be
       on the base branch, fetch fails loudly on
@@ -146,10 +153,11 @@
 
 - [ ] `uv run pytest` green. Current baseline: 536 tests
       (after `swarm-merge-advancement-stabilization`).
-      Expected net delta: roughly 0 to +2 (one mock test
-      deleted, two mock tests added, one mock test split
-      into two, three integration tests added; nets to
-      around +5 minus the deletion).
+      Expected net delta: around +6 to +8 (one mock test
+      deleted, three mock tests added for HEAD-precheck
+      cases + the fetch-skip-on-failure ordering test,
+      one mock test split into two, three integration
+      tests added).
 - [ ] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
 - [ ] Live re-run of the chained smoke against
