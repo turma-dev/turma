@@ -169,6 +169,7 @@ class StubGit:
     commit_raises: PlanningError | None = None
     push_raises: PlanningError | None = None
     fetch_raises: PlanningError | None = None
+    dirty_paths: set[str] = field(default_factory=set)
     calls: list[tuple] = field(default_factory=list)
 
     def status_is_dirty(self, worktree: Path) -> bool:
@@ -194,6 +195,15 @@ class StubGit:
         )
         if self.fetch_raises is not None:
             raise self.fetch_raises
+
+    def path_is_dirty(self, repo_root: Path, path: str) -> bool:
+        self.calls.append(("path_is_dirty", str(repo_root), path))
+        return path in self.dirty_paths
+
+    def revert_paths(self, repo_root: Path, paths: tuple[str, ...]) -> None:
+        self.calls.append(
+            ("revert_paths", str(repo_root), tuple(paths))
+        )
 
 
 @dataclass
@@ -417,8 +427,12 @@ def test_run_swarm_calls_fetch_before_reconcile(tmp_path: Path) -> None:
     with pytest.raises(PlanningError, match="Could not read from remote"):
         run_swarm("oauth", services=services)
 
-    # Fetch was attempted exactly once.
-    assert [c[0] for c in git.calls] == ["fetch_and_ff_base"]
+    # bd-state preflight (path_is_dirty) ran first (clean → no
+    # raise), then fetch was attempted exactly once.
+    assert [c[0] for c in git.calls] == [
+        "path_is_dirty",
+        "fetch_and_ff_base",
+    ]
     # Reconcile never ran (its first read is list_in_progress_tasks).
     assert not any(
         c[0] == "list_in_progress_tasks" for c in beads.calls
@@ -499,6 +513,88 @@ def test_fetch_failure_does_not_print_advance_line(
 
 
 # ---------------------------------------------------------------------
+# Beads-state preflight (swarm-beads-state-merge-cleanliness Task 2)
+# ---------------------------------------------------------------------
+
+
+def test_run_swarm_refuses_when_beads_state_dirty(tmp_path: Path) -> None:
+    """Pre-existing operator changes to `.beads/issues.jsonl`
+    must halt the run BEFORE any Turma mutation fires.
+    Turma's revert-after-mutation invariant only holds from a
+    clean baseline; pre-existing dirty state must be triaged
+    by the operator (commit, stash, or discard) before Turma
+    takes ownership of the file's working-tree state."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
+    git = StubGit(dirty_paths={".beads/issues.jsonl"})
+    services, _, git_stub, _, _ = _make_services(
+        tmp_path, beads=beads, git=git
+    )
+
+    with pytest.raises(PlanningError) as exc:
+        run_swarm("oauth", services=services)
+
+    msg = str(exc.value)
+    assert ".beads/issues.jsonl" in msg
+    assert "uncommitted changes" in msg
+    # Triage commands present.
+    assert "git diff" in msg
+    assert "git stash push" in msg
+    assert "git restore --staged --worktree" in msg
+
+    # path_is_dirty WAS called (the preflight ran).
+    assert any(
+        c[0] == "path_is_dirty" and c[2] == ".beads/issues.jsonl"
+        for c in git_stub.calls
+    )
+    # No further phases ran: fetch + reconcile + repair + sweep
+    # + main_loop all skipped.
+    assert not any(
+        c[0] == "fetch_and_ff_base" for c in git_stub.calls
+    )
+    assert not any(
+        c[0] == "list_in_progress_tasks" for c in beads.calls
+    )
+
+
+def test_dry_run_skips_beads_state_preflight(tmp_path: Path) -> None:
+    """`--dry-run` doesn't mutate bd state, so a dirty
+    `.beads/issues.jsonl` doesn't matter for safety. Skipping
+    the preflight here lets operators run `turma status`-
+    style readouts against a dirty bd-state working tree
+    without first triaging the dirtiness — the readout is
+    safe."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
+    git = StubGit(dirty_paths={".beads/issues.jsonl"})
+    services, *_ = _make_services(tmp_path, beads=beads, git=git)
+
+    # Should NOT raise.
+    run_swarm("oauth", services=services, dry_run=True)
+
+
+def test_preflight_clean_bd_state_proceeds(tmp_path: Path) -> None:
+    """Sanity pin: with `.beads/issues.jsonl` clean (the
+    default StubGit state), preflight passes and the run
+    proceeds normally."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])
+    services, _, git_stub, _, _ = _make_services(tmp_path, beads=beads)
+
+    run_swarm("oauth", services=services)
+
+    # path_is_dirty was called (preflight ran).
+    assert any(
+        c[0] == "path_is_dirty" and c[2] == ".beads/issues.jsonl"
+        for c in git_stub.calls
+    )
+    # AND fetch fired (preflight passed, run continued).
+    assert any(
+        c[0] == "fetch_and_ff_base" for c in git_stub.calls
+    )
+
+
+# ---------------------------------------------------------------------
 # Happy paths
 # ---------------------------------------------------------------------
 
@@ -532,11 +628,14 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     assert worker.invocations[0].description == "Subtask body here."
     assert worker.invocations[0].task_id == "bd-1"
 
-    # Git path: fetch (top of run) → dirty check → commit → push.
-    # No retry. fetch_and_ff_base is added by
+    # Git path: bd-state preflight → fetch → dirty check →
+    # commit → push. No retry. `path_is_dirty` (preflight) is
+    # added by swarm-beads-state-merge-cleanliness Task 2;
+    # `fetch_and_ff_base` is from
     # swarm-merge-advancement-stabilization Task 4.
     git_steps = [c[0] for c in git.calls]
     assert git_steps == [
+        "path_is_dirty",
         "fetch_and_ff_base",
         "status_is_dirty",
         "commit_all",

@@ -192,6 +192,16 @@ def run_swarm(
 
     _preflight(feature, services.repo_root)
 
+    # Refuse to start if `.beads/issues.jsonl` is already dirty
+    # in main's working tree. Turma's revert-after-mutation
+    # invariant (see swarm-beads-state-merge-cleanliness)
+    # only holds from a clean baseline; pre-existing operator
+    # changes must be triaged before Turma takes ownership of
+    # the file's working-tree state. Skipped under --dry-run
+    # since dry-run doesn't mutate bd state.
+    if not dry_run:
+        _preflight_beads_state_clean(services)
+
     # Fast-forward local <base_branch> from origin once per
     # invocation so dependent tasks claim against the merged base.
     # Skipped under --dry-run because the FF mutates a local ref.
@@ -258,6 +268,44 @@ def _preflight(feature: str, repo_root: Path) -> None:
         raise PlanningError(
             f"feature {feature!r} has not been transcribed to Beads. "
             f"Run `turma plan-to-beads --feature {feature}` first."
+        )
+
+
+_BEADS_EXPORT_PATH = ".beads/issues.jsonl"
+
+
+def _preflight_beads_state_clean(services: SwarmServices) -> None:
+    """Refuse to start if Turma's owned bd-state file is
+    already dirty in main's working tree.
+
+    Turma's revert-after-mutation invariant (see
+    `openspec/changes/swarm-beads-state-merge-cleanliness/`)
+    only holds from a clean baseline. If the operator has
+    pre-existing uncommitted changes (from a manual `bd
+    update`, a crashed prior `turma run`, or hand edits),
+    Turma must NOT silently revert them.
+
+    The message names the file and gives the operator
+    triage commands so they can choose between committing,
+    stashing, or discarding the pre-existing changes.
+
+    Skipped under `--dry-run` (dry-run doesn't mutate bd
+    state, so a dirty bd-state file is safe to ignore for
+    a readout).
+    """
+    if services.git.path_is_dirty(
+        services.repo_root, _BEADS_EXPORT_PATH
+    ):
+        raise PlanningError(
+            f"{_BEADS_EXPORT_PATH} has uncommitted changes "
+            "in main's working tree. turma run requires this "
+            "file to be clean before starting because it "
+            "manages the file's working-tree state across "
+            "iterations. Triage with:\n"
+            f"  git diff --cached {_BEADS_EXPORT_PATH}    # staged\n"
+            f"  git diff {_BEADS_EXPORT_PATH}             # unstaged\n"
+            f"  git stash push -- {_BEADS_EXPORT_PATH}    # save aside\n"
+            f"  git restore --staged --worktree -- {_BEADS_EXPORT_PATH}    # discard"
         )
 
 
