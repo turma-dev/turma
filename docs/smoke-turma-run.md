@@ -425,7 +425,10 @@ hook bypass regressed and Turma is generating wrong-
 shaped worker commits again.** See
 `openspec/changes/swarm-worker-commit-bd-ownership/` for
 the contract and the no-agent shell-only reproducer for
-the upstream bd defect this protocol works around.
+the upstream bd defect this protocol works around. The
+upstream defect is filed as
+[steveyegge/beads#3311](https://github.com/steveyegge/beads/issues/3311)
+and fixed in bd 1.0.3.
 
 Verify:
 

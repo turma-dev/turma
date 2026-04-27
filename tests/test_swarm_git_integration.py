@@ -510,14 +510,19 @@ def test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug(
     root-level `issues.jsonl` added AND `.beads/issues.jsonl`
     deleted from the tree.
 
-    If this test starts FAILING, upstream bd has likely fixed
-    the pre-commit hook path-resolution defect this workaround
-    was written for. See
-    `openspec/changes/swarm-worker-commit-bd-ownership/design.md`
-    and re-evaluate whether the hook bypass in
-    `commit_all_with_bd_export` is still needed. Do NOT silence
-    this test — read the triage chain and consider removing or
-    simplifying the workaround.
+    If this test starts FAILING, the operator's bd version is
+    likely 1.0.3+ (the upstream fix landed there as
+    `steveyegge/beads#3311`, "scrub git hook env and skip
+    cross-worktree git-add"). See
+    `openspec/changes/swarm-worker-commit-bd-ownership/tasks.md`
+    Task 5 for the recorded version-sensitivity follow-up:
+    the protocol's hook bypass remains load-bearing on 1.0.3+
+    for a different reason (1.0.3 deliberately skips cross-
+    worktree git-add, so Turma's explicit export is what
+    captures bd state into worker commits). Do NOT silence
+    this test on 1.0.3 — reshape it (skipif on bd version,
+    convert to regression-on-fixed-version, or remove) per
+    the spec's Task 5 follow-up guidance.
 
     No other test in the suite references the buggy shape; this
     is the single source of truth on what an unexpected pass

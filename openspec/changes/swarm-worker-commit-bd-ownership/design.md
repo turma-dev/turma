@@ -14,8 +14,10 @@
 
 ## Non-goals
 
-- Fix the upstream bd defect. The reproducer is drafted for
-  filing; the fix is not on this PR's path.
+- Fix the upstream bd defect. The defect is filed as
+  [steveyegge/beads#3311](https://github.com/steveyegge/beads/issues/3311)
+  and fixed in bd 1.0.3; this arc's workaround stays
+  harmless against the fixed bd.
 - Touch any code outside the worker-commit step or the
   preflight. The orchestrator's main loop, repair phase,
   reconciliation, and merge-advancement remain unchanged.

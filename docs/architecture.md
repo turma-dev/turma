@@ -262,18 +262,41 @@ main's repo root (where Turma's bd db with the claim-side
 mutations lives), asserts the destination file exists, then
 commits the worker's tree with `core.hooksPath=/dev/null`
 to bypass bd's pre-commit hook for that single invocation.
-This sidesteps an upstream bd defect where bd's pre-commit
-hook, fired against an index containing
-`D .beads/issues.jsonl` (the state `bd prime` itself
-creates inside a registered worktree), misroutes the export
-to the worktree's repo root and stages the move — corrupting
-main's HEAD on PR merge. The bypass is scoped to the one
-git invocation; bd's other hooks (post-checkout, post-merge,
-prepare-commit-msg) still fire normally. See
-`openspec/changes/swarm-worker-commit-bd-ownership/` for
-the full contract, including the no-agent shell-only
-reproducer for the upstream bd defect this protocol works
-around.
+The bypass is scoped to the one git invocation; bd's other
+hooks (post-checkout, post-merge, prepare-commit-msg) still
+fire normally.
+
+The protocol is load-bearing on every bd version Turma
+supports, but for two different reasons:
+
+- **bd 1.0.2 (still on Homebrew at the time of this
+  writing).** Bd's pre-commit hook, fired against an index
+  containing `D .beads/issues.jsonl` (the state `bd prime`
+  itself creates inside a registered worktree), misroutes
+  the export to the worktree's repo root and stages the
+  move — corrupting main's HEAD on PR merge. Filed as
+  [steveyegge/beads#3311][bd-3311]. Without the bypass +
+  explicit export, the worker commit captures the wrong
+  shape.
+- **bd 1.0.3+ (fix shipped 2026-04-24, PR `#3347`: "scrub
+  git hook env and skip cross-worktree git-add").** The
+  wrong-path defect is fixed, but 1.0.3 also deliberately
+  declines to do cross-worktree git-add at all — bd's hook
+  exports correctly but does NOT stage the export into the
+  worktree's commit. Without Turma's explicit export +
+  add, Turma's claim-side bd mutations would never reach
+  origin/main on PR merge. The hook bypass therefore
+  remains correct and necessary on 1.0.3+, just for a
+  state-propagation reason rather than a bug-avoidance
+  reason.
+
+See `openspec/changes/swarm-worker-commit-bd-ownership/`
+for the full contract, including the no-agent shell-only
+reproducer for the upstream bd defect on 1.0.2 and the
+recorded follow-up for the negative-control integration
+test that becomes version-sensitive on 1.0.3+.
+
+[bd-3311]: https://github.com/steveyegge/beads/issues/3311
 
 ### Authority model
 

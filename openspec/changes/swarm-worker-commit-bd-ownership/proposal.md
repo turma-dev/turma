@@ -51,9 +51,16 @@ itself caused). bd's hook stdout claims it exported to
 `.beads/issues.jsonl`, but the staged path lands at the repo
 root.
 
-This is **upstream bd's defect**, with a separate
-upstream-issue filing prepared (operator-driven; see Task
-5 below for the gating).
+This is **upstream bd's defect**, filed as
+[steveyegge/beads#3311](https://github.com/steveyegge/beads/issues/3311)
+("export.git-add=true recreates issues.jsonl at project root
+in worktrees without redirect") and fixed in bd 1.0.3
+(released 2026-04-24, fix PR `#3347`: "scrub git hook env
+and skip cross-worktree git-add"). Turma's commit-boundary
+protocol stays harmless against the fixed bd; see Task 5
+below for the version-sensitivity follow-up the
+negative-control integration test will need once 1.0.3+ is
+the operator's bd.
 
 Finding 1's mechanism is unrelated: bd's
 `export.interval=60s` throttle defers writes; the next bd
