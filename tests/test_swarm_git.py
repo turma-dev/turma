@@ -752,3 +752,268 @@ def test_path_is_dirty_failure_surfaces_stderr(
     msg = str(exc.value)
     assert "git status failed" in msg
     assert "not a git repository" in msg
+
+
+# ---------------------------------------------------------------------
+# commit_all_with_bd_export
+# (swarm-worker-commit-bd-ownership Task 2)
+# ---------------------------------------------------------------------
+
+
+class _FakeBeads:
+    """Minimal stand-in for `BeadsAdapter` exposing only `export`.
+
+    Records each `export` call as `(output_path, cwd)` and writes
+    a placeholder file at `output_path` so the destination-exists
+    check after the export sees a real file. `export_raises` lets
+    a test simulate a failing bd export. `export_skips_writing`
+    simulates the upstream-fix edge case where bd's path
+    resolution lands the export somewhere else and exits zero.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, Path | None]] = []
+        self.export_raises: PlanningError | None = None
+        self.export_skips_writing: bool = False
+
+    def export(
+        self, *, output_path: Path, cwd: Path | None = None
+    ) -> None:
+        self.calls.append((output_path, cwd))
+        if self.export_raises is not None:
+            raise self.export_raises
+        if not self.export_skips_writing:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text('{"id":"placeholder"}\n')
+
+
+def _commit_message() -> str:
+    return "[impl] worker test commit"
+
+
+def test_commit_all_with_bd_export_pins_full_sequence(
+    tmp_path: Path,
+) -> None:
+    """Happy commit-boundary protocol: bd export → status check
+    → git add -A → git commit (with hook bypass) → rev-parse.
+    Exact order, exact argv, returns the new SHA.
+
+    The hook-bypass flag (`-c core.hooksPath=/dev/null`) is the
+    arc's load-bearing regression contract: removing it
+    re-introduces the upstream bd defect's wrong-path commit.
+    """
+    seen: list[list[str]] = []
+
+    def run(argv, *, step):
+        seen.append(argv)
+        if argv[3:5] == ["status", "--porcelain=v1"]:
+            return _completed(argv, stdout=" M file.py\n")
+        if argv[3:5] == ["add", "-A"]:
+            return _completed(argv)
+        if argv[3] == "-c" and argv[5:7] == ["commit", "-m"]:
+            return _completed(argv)
+        if argv[3:5] == ["rev-parse", "HEAD"]:
+            return _completed(argv, stdout="cafebabe1234\n")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    adapter = _make_adapter_with_run(run)
+    beads = _FakeBeads()
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    sha = adapter.commit_all_with_bd_export(
+        worktree,
+        _commit_message(),
+        beads=beads,
+        repo_root=repo_root,
+    )
+
+    assert sha == "cafebabe1234"
+
+    # bd export ran exactly once, against the worktree's
+    # `.beads/issues.jsonl` absolute path, with cwd pinned to
+    # repo_root.
+    assert beads.calls == [
+        (worktree / ".beads" / "issues.jsonl", repo_root),
+    ]
+
+    # git calls in order: status → add → commit → rev-parse.
+    assert [a[3:5] for a in seen if a[3:5] != []] == [
+        ["status", "--porcelain=v1"],
+        ["add", "-A"],
+        # commit's argv shape is `git -C <wt> -c core.hooksPath=
+        # /dev/null commit -m <msg>` — argv[3:5] is
+        # ["-c", "core.hooksPath=/dev/null"] for that one.
+        ["-c", "core.hooksPath=/dev/null"],
+        ["rev-parse", "HEAD"],
+    ]
+    # commit's full argv pinned, including the message.
+    commit_argv = next(a for a in seen if "commit" in a)
+    assert commit_argv == [
+        "git", "-C", str(worktree),
+        "-c", "core.hooksPath=/dev/null",
+        "commit", "-m", _commit_message(),
+    ]
+
+
+def test_commit_all_with_bd_export_export_failure_halts_before_commit(
+    tmp_path: Path,
+) -> None:
+    """If bd export raises, the protocol must NOT advance to
+    `git add` or `git commit`. The contract is binary: either
+    all four steps run or zero git mutations do.
+    """
+    seen: list[list[str]] = []
+
+    def run(argv, *, step):
+        seen.append(argv)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    beads = _FakeBeads()
+    beads.export_raises = PlanningError(
+        "bd export failed: exit 1\nError: db unavailable"
+    )
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    with pytest.raises(PlanningError, match="db unavailable"):
+        adapter.commit_all_with_bd_export(
+            worktree,
+            _commit_message(),
+            beads=beads,
+            repo_root=repo_root,
+        )
+
+    # No git subprocess fired. Specifically: no status, no add,
+    # no commit, no rev-parse.
+    assert seen == [], (
+        "no-partial-commit contract violated: a git command "
+        "fired after bd export raised. Recorded git argv: "
+        f"{seen!r}"
+    )
+
+
+def test_commit_all_with_bd_export_missing_destination_halts_before_commit(
+    tmp_path: Path,
+) -> None:
+    """If bd export reports zero exit but the destination file
+    does NOT exist afterwards (the upstream-fix edge case),
+    the protocol must raise PlanningError naming the path AND
+    perform zero git mutations. This catches the failure mode
+    where bd's path resolution silently lands the export at a
+    different location.
+    """
+    seen: list[list[str]] = []
+
+    def run(argv, *, step):
+        seen.append(argv)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    beads = _FakeBeads()
+    beads.export_skips_writing = True  # no-op export
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    with pytest.raises(PlanningError) as exc:
+        adapter.commit_all_with_bd_export(
+            worktree,
+            _commit_message(),
+            beads=beads,
+            repo_root=repo_root,
+        )
+
+    msg = str(exc.value)
+    assert "destination path is missing" in msg
+    assert ".beads/issues.jsonl" in msg
+
+    # No git subprocess fired.
+    assert seen == [], (
+        "no-partial-commit contract violated after missing-"
+        f"destination check: {seen!r}"
+    )
+
+
+def test_commit_all_with_bd_export_empty_commit_guard_preserved(
+    tmp_path: Path,
+) -> None:
+    """Empty-commit guard from `commit_all` is preserved. Even
+    after a successful bd export, if `git status --porcelain=v1`
+    reports a clean tree, the protocol refuses to commit.
+    """
+    seen: list[list[str]] = []
+
+    def run(argv, *, step):
+        seen.append(argv)
+        if argv[3:5] == ["status", "--porcelain=v1"]:
+            return _completed(argv, stdout="")  # clean
+        raise AssertionError(
+            "must not advance past status on a clean tree: "
+            f"{argv}"
+        )
+
+    adapter = _make_adapter_with_run(run)
+    beads = _FakeBeads()
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    with pytest.raises(PlanningError, match="nothing to commit"):
+        adapter.commit_all_with_bd_export(
+            worktree,
+            _commit_message(),
+            beads=beads,
+            repo_root=repo_root,
+        )
+
+    # bd export DID fire (it ran first; the clean-tree refusal
+    # comes from the status check after).
+    assert len(beads.calls) == 1
+    # Only `status --porcelain=v1` ran on the git side. No add,
+    # no commit, no rev-parse.
+    assert [a[3:5] for a in seen] == [
+        ["status", "--porcelain=v1"],
+    ]
+
+
+def test_commit_all_with_bd_export_uses_absolute_destination_path(
+    tmp_path: Path,
+) -> None:
+    """The destination passed to bd export MUST be absolute —
+    no cwd-relative ambiguity, since cwd-relative resolution
+    is the exact upstream defect this arc works around.
+    """
+    def run(argv, *, step):
+        if argv[3:5] == ["status", "--porcelain=v1"]:
+            return _completed(argv, stdout=" M f\n")
+        if argv[3:5] == ["rev-parse", "HEAD"]:
+            return _completed(argv, stdout="abc\n")
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    beads = _FakeBeads()
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    adapter.commit_all_with_bd_export(
+        worktree,
+        _commit_message(),
+        beads=beads,
+        repo_root=repo_root,
+    )
+
+    (out_path, cwd) = beads.calls[0]
+    assert out_path.is_absolute(), (
+        f"bd export destination must be absolute, got: {out_path!r}"
+    )
+    assert out_path == worktree / ".beads" / "issues.jsonl"

@@ -734,7 +734,12 @@ def _run_single_task(
 
     try:
         message = _render_commit_message(task, feature)
-        services.git.commit_all(ref.path, message)
+        services.git.commit_all_with_bd_export(
+            ref.path,
+            message,
+            beads=services.beads,
+            repo_root=services.repo_root,
+        )
         services.git.push_branch(ref.path, ref.branch)
     except PlanningError as exc:
         return _handle_failure(services, task.id, str(exc))
@@ -861,7 +866,12 @@ def _complete_pending_task(
     task = _lookup_task(services.beads, feature, task_id)
     description = services.beads.get_task_body(task_id)
     message = _render_commit_message(task, feature)
-    services.git.commit_all(ref.path, message)
+    services.git.commit_all_with_bd_export(
+        ref.path,
+        message,
+        beads=services.beads,
+        repo_root=services.repo_root,
+    )
     services.git.push_branch(ref.path, ref.branch)
     pr_url = services.pr.open_pr(
         branch=ref.branch,
