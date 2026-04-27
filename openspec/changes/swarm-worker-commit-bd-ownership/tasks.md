@@ -2,11 +2,29 @@
 
 ### 0. Investigate the wrong-path bd commit (DONE)
 
-**Completed 2026-04-26b during the smoke triage.** Pinned in
-`docs/upstream-bd-worktree-precommit-bug.md` (planning
-repo). Reproducer is shell-only, no agent involved. The
-defect is upstream bd; Turma's commit-boundary fix is the
-local workaround.
+**Completed 2026-04-26b during the smoke triage.** The
+shell-only reproducer below pins the upstream bd defect;
+no agent is involved. The defect is upstream bd; Turma's
+commit-boundary fix is the local workaround.
+
+The reproducer (run from any git repo with bd initialized
+and `.beads/issues.jsonl` tracked at HEAD):
+
+```bash
+git worktree add -b probe .worktrees/probe HEAD
+cd .worktrees/probe
+bd prime                                    # silently deletes .beads/issues.jsonl
+echo "stage one complete" > STAGE.txt
+git add -A
+git commit -m "[impl] reproducer"
+git show --stat HEAD                         # observe wrong shape
+```
+
+The resulting commit's tree contains `issues.jsonl` at
+the repo root AND a deletion of `.beads/issues.jsonl` —
+the buggy shape this arc's commit-boundary protocol works
+around. Tasks 1-3 below close it; Task 5 carries the
+prepared upstream bug report for filing.
 
 - [x] Static probe of Turma's worker contract (worker.py,
       worktree.py, ClaudeCodeWorker.run, render_worker_prompt):
@@ -169,9 +187,7 @@ exactly one place when it ships.
       Skipif `bd` is not on PATH (alongside the existing
       `git`-skipif).
       
-      The test mirrors the
-      `docs/upstream-bd-worktree-precommit-bug.md`
-      reproducer:
+      The test mirrors the Task 0 reproducer above:
       
       1. Build a tmpdir bare remote + working clone with
          a `.beads/issues.jsonl` at HEAD (use
@@ -239,9 +255,8 @@ exactly one place when it ships.
         canonical path keeps worker-commit propagation
         intact. See
         `openspec/changes/swarm-worker-commit-bd-ownership/`
-        for the contract; the upstream defect is
-        documented in the planning repo at
-        `docs/upstream-bd-worktree-precommit-bug.md`.
+        for the full contract and the no-agent shell-only
+        reproducer that pins the upstream defect.
 - [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: amend with one
       bullet naming the wrong-path worker-commit defect,
       Turma's commit-boundary ownership response, and the
@@ -268,16 +283,21 @@ exactly one place when it ships.
 
 ### 5. File the upstream bd issue (operator-driven)
 
-- [ ] Walk
-      `docs/upstream-bd-worktree-precommit-bug.md` against
-      the latest bd release before filing in case 1.0.3+
-      ships a fix.
+The bug report body is prepared in operator-private
+material (outside this public spec) and is ready to file.
+The Task 0 reproducer above is the canonical reference for
+what an upstream maintainer needs.
+
+- [ ] Walk the prepared bug report against the latest bd
+      release before filing in case 1.0.3+ ships a fix.
 - [ ] If still reproducible: file at the bd upstream
       tracker. This is operator-driven; not in scope of
       this PR.
 - [ ] On filing, link the upstream issue URL into this
       arc's `proposal.md` "Key insight" section so future
-      readers can cross-reference.
+      readers can cross-reference, and replace the Task 0
+      reproducer's standalone shape with a pointer to the
+      filed issue.
 
 ### 6. Validation
 

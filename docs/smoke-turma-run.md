@@ -66,6 +66,16 @@ cp "$TURMA_REPO/.agents/critic.md" .agents/
 # Beads database (non-interactive skips bd init's wizard).
 BD_NON_INTERACTIVE=1 bd init --prefix smoke
 
+# Required Turma contract: `export.interval=0` disables bd's
+# default 60s auto-export throttle. Without this, the next bd
+# command (read or write) between `turma run` iterations
+# flushes a deferred export and dirties `.beads/issues.jsonl`,
+# breaking the bd-state-clean preflight on the following run.
+# Persists in `.beads/config.yaml`. See
+# `openspec/changes/swarm-worker-commit-bd-ownership/` for
+# the full rationale.
+bd config set export.interval 0
+
 # Gitignore entries the orchestrator expects.
 cat >> .gitignore <<'EOF'
 .beads/*.db
@@ -387,12 +397,40 @@ the two `turma run` invocations should report zero changes
 reverted cleanly). If anything shows up there, the
 revert-after-mutation contract regressed.
 
+**Critical regression check** for
+`swarm-worker-commit-bd-ownership`: the worker commits
+opened by both iterations must contain the *canonical*
+shape — `STAGE.txt` (the worker's task file) added,
+`.beads/issues.jsonl` modified at the canonical path, and
+**no rogue `issues.jsonl` at the repo root, no deletion of
+`.beads/issues.jsonl`**. Inspect with:
+
+```bash
+git fetch origin "refs/heads/task/smoke-merge/$TASK_A":refs/remotes/origin/task/smoke-merge/$TASK_A
+git show --stat "origin/task/smoke-merge/$TASK_A"
+
+TASK_B=$(bd list --label feature:smoke-merge --status in_progress \
+           --json --limit 0 | jq -er '.[0].id')
+git fetch origin "refs/heads/task/smoke-merge/$TASK_B":refs/remotes/origin/task/smoke-merge/$TASK_B
+git show --stat "origin/task/smoke-merge/$TASK_B"
+```
+
+Each should list `STAGE.txt | 1 +` (or `+1 -0` after a
+later iteration appends to it) and a `.beads/issues.jsonl
+| N +` line at the canonical `.beads/` path. **Either of
+the buggy-shape signals — `issues.jsonl | N +` (no
+`.beads/` prefix) OR `.beads/issues.jsonl | N -` (the
+file deleted from the tree) — means the bd-pre-commit
+hook bypass regressed and Turma is generating wrong-
+shaped worker commits again.** See
+`openspec/changes/swarm-worker-commit-bd-ownership/` for
+the contract and the no-agent shell-only reproducer for
+the upstream bd defect this protocol works around.
+
 Verify:
 
 ```bash
 bd show "$TASK_A"                                 # status: closed
-TASK_B=$(bd list --label feature:smoke-merge --status in_progress \
-           --json --limit 0 | jq -er '.[0].id')
 bd show "$TASK_B" | grep -i 'turma-pr:'           # exactly one label
 cat ".worktrees/smoke-merge/$TASK_B/STAGE.txt"    # both lines present
 ```

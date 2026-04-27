@@ -51,9 +51,9 @@ itself caused). bd's hook stdout claims it exported to
 `.beads/issues.jsonl`, but the staged path lands at the repo
 root.
 
-This is **upstream bd's defect**, drafted as a separate
-filing in the planning repo at
-`docs/upstream-bd-worktree-precommit-bug.md`.
+This is **upstream bd's defect**, with a separate
+upstream-issue filing prepared (operator-driven; see Task
+5 below for the gating).
 
 Finding 1's mechanism is unrelated: bd's
 `export.interval=60s` throttle defers writes; the next bd
@@ -98,10 +98,9 @@ papering over it after the fact. Two layered changes:
 
 ## Out of scope
 
-- **The bd upstream issue** is drafted separately in the
-  planning repo. Filing it is a public/visible action that
-  needs explicit operator confirmation and is not bundled
-  with this PR.
+- **The bd upstream issue** is prepared separately. Filing
+  it is a public/visible action that needs explicit operator
+  confirmation and is not bundled with this PR.
 - **Other bd hook bypasses.** Only `commit_all` (the
   worker's per-task commit) is affected; bd's other hooks
   (post-checkout, post-merge, prepare-commit-msg) are not in

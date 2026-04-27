@@ -243,6 +243,38 @@ Turma's revert-after-mutation invariant only holds from a
 clean baseline, so pre-existing operator changes must be
 triaged before Turma takes ownership.
 
+A second preflight refuses to start if
+`bd config get export.interval` is anything other than 0.
+bd's default 60s throttle defers auto-exports across
+commands; the next bd command (read or write) flushes the
+deferred export, dirtying `.beads/issues.jsonl` between
+iterations and breaking the bd-state-clean preflight on
+the following run. Turma's contract is `export.interval=0`
+so writes export immediately and reads never trigger an
+export. Operators set the knob once via
+`bd config set export.interval 0` (persisted in
+`.beads/config.yaml`).
+
+At the worker-commit boundary, Turma owns the bd-state
+write end-to-end. `commit_all_with_bd_export` runs an
+explicit `bd export -o <worktree>/.beads/issues.jsonl` from
+main's repo root (where Turma's bd db with the claim-side
+mutations lives), asserts the destination file exists, then
+commits the worker's tree with `core.hooksPath=/dev/null`
+to bypass bd's pre-commit hook for that single invocation.
+This sidesteps an upstream bd defect where bd's pre-commit
+hook, fired against an index containing
+`D .beads/issues.jsonl` (the state `bd prime` itself
+creates inside a registered worktree), misroutes the export
+to the worktree's repo root and stages the move — corrupting
+main's HEAD on PR merge. The bypass is scoped to the one
+git invocation; bd's other hooks (post-checkout, post-merge,
+prepare-commit-msg) still fire normally. See
+`openspec/changes/swarm-worker-commit-bd-ownership/` for
+the full contract, including the no-agent shell-only
+reproducer for the upstream bd defect this protocol works
+around.
+
 ### Authority model
 
 When reconciling interrupted state, sources are walked in order of

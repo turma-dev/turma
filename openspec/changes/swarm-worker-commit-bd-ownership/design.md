@@ -27,9 +27,8 @@
 ## Empirical model behind the design
 
 Two findings, two failure paths, two corresponding fixes.
-The exact mechanisms — pinned in
-`docs/upstream-bd-worktree-precommit-bug.md` and the smoke
-triage — are:
+The exact mechanisms — pinned by the smoke triage and the
+no-agent shell-only reproducer Task 0 below documents — are:
 
 ### Finding 1 timeline (read-side)
 
