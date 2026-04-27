@@ -339,6 +339,64 @@ def _revert_beads_export(services: SwarmServices) -> None:
     services._bd_mutations_during_run += 1
 
 
+_BEADS_CONFIG_VALUE_PATTERN = re.compile(r"^([\w.-]+)\s*:\s*(.*)$")
+
+
+def _read_beads_config_value(repo_root: Path, key: str) -> str:
+    """Read a top-level scalar from `.beads/config.yaml` directly,
+    without spawning bd.
+
+    Why this exists: every bd subprocess startup runs an auto-
+    export-on-startup check that re-writes `.beads/issues.jsonl`
+    whenever it thinks the on-disk file is out of sync with
+    dolt. Turma's revert-after-mutation contract from
+    `swarm-beads-state-merge-cleanliness` leaves the file in
+    exactly that out-of-sync state at the end of each run, so
+    *any* bd subprocess Turma fires before the bd-state-clean
+    preflight (including a read-only `bd config get`) trips bd's
+    auto-export and breaks the preflight on the very next
+    iteration. Reading `.beads/config.yaml` directly keeps bd
+    out of the smoke-critical path. This was identified in the
+    Task-6 follow-up via writer-attribution traces against the
+    bd 1.0.2 reproducer.
+
+    bd writes `config.yaml` as a flat top-level mapping with
+    dotted keys (e.g. `export.interval: 0`). Comment lines
+    (`#`-prefixed) are ignored. Surrounding double or single
+    quotes on the value are stripped.
+
+    Returns the raw stripped value, or empty string if the key
+    is not present in the file. Raises `PlanningError` if the
+    file does not exist (bd not initialized).
+    """
+    config_path = repo_root / ".beads" / "config.yaml"
+    if not config_path.exists():
+        raise PlanningError(
+            f"{config_path} does not exist. Run `bd init` in the "
+            "repo root before invoking `turma run`."
+        )
+    for line in config_path.read_text().splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _BEADS_CONFIG_VALUE_PATTERN.match(stripped)
+        if match is None:
+            continue
+        if match.group(1) != key:
+            continue
+        value = match.group(2).strip()
+        # Strip a single layer of surrounding matching quotes,
+        # consistent with how YAML scalars are commonly written.
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in ('"', "'")
+        ):
+            value = value[1:-1]
+        return value
+    return ""
+
+
 def _preflight_bd_export_interval(services: SwarmServices) -> None:
     """Refuse to start if bd's `export.interval` is not 0.
 
@@ -356,11 +414,19 @@ def _preflight_bd_export_interval(services: SwarmServices) -> None:
     command. The setting persists in `.beads/config.yaml` and
     is committed alongside the project's bd setup.
 
+    The check reads `.beads/config.yaml` directly rather than
+    invoking `bd config get`. See `_read_beads_config_value` for
+    why; in short, every bd subprocess startup fires bd's auto-
+    export-on-startup writer, which would itself dirty the next
+    preflight.
+
     See `openspec/changes/swarm-worker-commit-bd-ownership/`
     for the full rationale and the empirical model behind the
     knob's behavior.
     """
-    value = services.beads.config_get("export.interval")
+    value = _read_beads_config_value(
+        services.repo_root, "export.interval"
+    )
     if value != "0":
         observed = value or "(unset)"
         raise PlanningError(

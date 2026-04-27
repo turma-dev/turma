@@ -655,21 +655,6 @@ class BeadsAdapter:
             step="bd dep add",
         )
 
-    def config_get(self, key: str) -> str:
-        """Read a single bd config key, returning its stripped value.
-
-        Used by the swarm orchestrator's preflight that pins
-        `export.interval=0` as a Turma contract (see
-        `openspec/changes/swarm-worker-commit-bd-ownership/`).
-        Trailing newlines from bd's CLI are stripped so callers
-        can compare directly. An unset key yields an empty string.
-        """
-        result = self._run(
-            ["bd", "config", "get", key],
-            step="bd config get",
-        )
-        return result.stdout.strip()
-
     def export(
         self,
         *,

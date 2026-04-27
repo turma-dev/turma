@@ -49,19 +49,6 @@ class StubBeads:
     closed: list[str] = field(default_factory=list)
     pr_marked: list[tuple[str, int]] = field(default_factory=list)
     pr_unmarked: list[tuple[str, int]] = field(default_factory=list)
-    # `config_get` returns whatever's in this dict; default
-    # `export.interval=0` matches the Turma contract so existing
-    # tests don't need to opt in. Set to "60" (or anything non-zero)
-    # in a test that exercises the preflight refusal.
-    config_values: dict[str, str] = field(
-        default_factory=lambda: {"export.interval": "0"}
-    )
-    # Optional shared log for tests that need to pin call ordering
-    # ACROSS stubs (e.g. "config_get fires before path_is_dirty").
-    # Each entry is (stub_name, op, *args). Tests that don't care
-    # about cross-stub ordering leave this `None` and continue to
-    # use the per-stub `calls` list as before.
-    event_log: list[tuple] | None = None
 
     # read-only surfaces --------------------------------------------------
 
@@ -85,12 +72,6 @@ class StubBeads:
     def retries_so_far(self, task_id: str) -> int:
         self.calls.append(("retries_so_far", task_id))
         return self.retries.get(task_id, 0)
-
-    def config_get(self, key: str) -> str:
-        self.calls.append(("config_get", key))
-        if self.event_log is not None:
-            self.event_log.append(("beads", "config_get", key))
-        return self.config_values.get(key, "")
 
     # mutation surfaces ---------------------------------------------------
 
@@ -190,8 +171,6 @@ class StubGit:
     fetch_raises: PlanningError | None = None
     dirty_paths: set[str] = field(default_factory=set)
     calls: list[tuple] = field(default_factory=list)
-    # Optional shared log; see StubBeads.event_log for rationale.
-    event_log: list[tuple] | None = None
 
     def status_is_dirty(self, worktree: Path) -> bool:
         self.calls.append(("status_is_dirty", str(worktree)))
@@ -239,15 +218,11 @@ class StubGit:
         self.calls.append(
             ("fetch_and_ff_base", str(repo_root), base_branch)
         )
-        if self.event_log is not None:
-            self.event_log.append(("git", "fetch_and_ff_base", base_branch))
         if self.fetch_raises is not None:
             raise self.fetch_raises
 
     def path_is_dirty(self, repo_root: Path, path: str) -> bool:
         self.calls.append(("path_is_dirty", str(repo_root), path))
-        if self.event_log is not None:
-            self.event_log.append(("git", "path_is_dirty", path))
         return path in self.dirty_paths
 
     def revert_paths(self, repo_root: Path, paths: tuple[str, ...]) -> None:
@@ -331,6 +306,18 @@ def _scratch_feature(tmp_path: Path, feature: str = "oauth") -> Path:
     change_dir.mkdir(parents=True)
     (change_dir / "APPROVED").write_text("approved\n")
     (change_dir / "TRANSCRIBED.md").write_text("# transcribed\n")
+    # Default `.beads/config.yaml` with `export.interval: 0` so
+    # the orchestrator's bd-export-interval preflight passes by
+    # default. Tests that exercise the refusal path call
+    # `_write_beads_config` to overwrite, or `unlink` the file
+    # for the missing-file refusal test. See the
+    # swarm-worker-commit-bd-ownership Task-6 follow-up for why
+    # the preflight reads this file directly instead of spawning
+    # `bd config get`.
+    (tmp_path / ".beads").mkdir(exist_ok=True)
+    (tmp_path / ".beads" / "config.yaml").write_text(
+        "export.interval: 0\n"
+    )
     return change_dir
 
 
@@ -654,6 +641,21 @@ def test_preflight_clean_bd_state_proceeds(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------
 
 
+def _write_beads_config(tmp_path: Path, lines: str) -> None:
+    """Test helper: write `.beads/config.yaml` directly so the
+    preflight has a real file to read.
+
+    The Task-6 follow-up replaced `bd config get` with a direct
+    file read because every bd subprocess startup fires bd's
+    auto-export-on-startup logic, which dirties
+    `.beads/issues.jsonl` and breaks the bd-state-clean
+    preflight. See
+    `openspec/changes/swarm-worker-commit-bd-ownership/`.
+    """
+    (tmp_path / ".beads").mkdir(exist_ok=True)
+    (tmp_path / ".beads" / "config.yaml").write_text(lines)
+
+
 def test_run_swarm_refuses_when_export_interval_nonzero(
     tmp_path: Path,
 ) -> None:
@@ -661,12 +663,15 @@ def test_run_swarm_refuses_when_export_interval_nonzero(
     bd commands, so any operator-side bd read between iterations
     re-dirties `.beads/issues.jsonl` and the next preflight
     refuses. Turma's contract is `export.interval=0`; preflight
-    refuses any other value with an actionable remediation."""
+    refuses any other value with an actionable remediation.
+
+    The preflight reads `.beads/config.yaml` directly — NO bd
+    subprocess fires — so the preflight itself can't trigger
+    bd's auto-export-on-startup writer that this very arc
+    works around."""
     _scratch_feature(tmp_path)
-    beads = StubBeads(
-        ready_queue=[(_ref("bd-1"),)],
-        config_values={"export.interval": "60"},
-    )
+    _write_beads_config(tmp_path, 'export.interval: 60\n')
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
     services, _, git_stub, _, _ = _make_services(tmp_path, beads=beads)
 
     with pytest.raises(PlanningError) as exc:
@@ -679,8 +684,23 @@ def test_run_swarm_refuses_when_export_interval_nonzero(
     assert "0" in msg
     assert "bd config set export.interval 0" in msg
 
-    # config_get WAS called for export.interval (the preflight ran).
-    assert ("config_get", "export.interval") in beads.calls
+    # Adapter-boundary regression contract: the preflight MUST
+    # NOT call a bd-side adapter method. Catches a future refactor
+    # that re-adds `BeadsAdapter.config_get` or any other bd
+    # adapter call to the preflight path. The companion
+    # subprocess-boundary test below pins the stronger contract
+    # that the preflight calls no subprocess at all.
+    assert not any(
+        c[0] in {"config_get", "claim_task", "list_ready_tasks"}
+        for c in beads.calls
+    ), (
+        "preflight regression: a bd-side method fired during "
+        "the export.interval preflight. Don't reintroduce bd "
+        "adapter calls into the preflight — see the Task-6 "
+        "follow-up in swarm-worker-commit-bd-ownership for the "
+        "rationale."
+    )
+
     # No further phases ran: the bd-state-clean preflight must NOT
     # fire, fetch must NOT fire, reconcile must NOT fire.
     assert not any(
@@ -694,52 +714,78 @@ def test_run_swarm_refuses_when_export_interval_nonzero(
     )
 
 
+def test_run_swarm_refuses_when_config_yaml_missing(
+    tmp_path: Path,
+) -> None:
+    """If `.beads/config.yaml` doesn't exist (bd not initialized
+    in this repo), the preflight refuses with an actionable
+    `bd init` message."""
+    _scratch_feature(tmp_path)
+    # Remove the default config the fixture created.
+    (tmp_path / ".beads" / "config.yaml").unlink()
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
+    services, *_ = _make_services(tmp_path, beads=beads)
+
+    with pytest.raises(PlanningError) as exc:
+        run_swarm("oauth", services=services)
+
+    msg = str(exc.value)
+    assert ".beads/config.yaml" in msg
+    assert "bd init" in msg
+
+
+def test_run_swarm_refuses_when_export_interval_unset(
+    tmp_path: Path,
+) -> None:
+    """Config file exists but doesn't set `export.interval`. The
+    bd default is 60, which is non-zero. Preflight refuses with
+    the same actionable remediation as the explicit-non-zero
+    case."""
+    _scratch_feature(tmp_path)
+    _write_beads_config(
+        tmp_path,
+        'sync.remote: "git+ssh://git@example.com/foo.git"\n',
+    )
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
+    services, *_ = _make_services(tmp_path, beads=beads)
+
+    with pytest.raises(PlanningError) as exc:
+        run_swarm("oauth", services=services)
+
+    msg = str(exc.value)
+    assert "export.interval" in msg
+    assert "bd config set export.interval 0" in msg
+
+
 def test_run_swarm_proceeds_when_export_interval_zero(
     tmp_path: Path,
 ) -> None:
-    """With `export.interval=0` the preflight passes silently
-    and the run continues to the bd-state-clean preflight, then
-    fetch, then reconcile.
+    """With `export.interval=0` in `.beads/config.yaml` the
+    preflight passes silently and the run continues to the
+    bd-state-clean preflight, then fetch, then reconcile.
 
-    Pins the cross-stub ordering contract:
-    `config_get(export.interval)` must run BEFORE
-    `path_is_dirty(.beads/issues.jsonl)` must run BEFORE
-    `fetch_and_ff_base`. Both preflights are bd-aware and
-    feed the same operator decision tree; if they swap order,
-    operators see the wrong-symptom message first
-    (`.beads/issues.jsonl is dirty` instead of
-    `export.interval is 60`)."""
+    Pins the preflight ordering contract: the export.interval
+    check fires BEFORE path_is_dirty, which fires BEFORE
+    fetch_and_ff_base. Order matters because operators see the
+    most actionable failure message first."""
     _scratch_feature(tmp_path)
-    event_log: list[tuple] = []
-    beads = StubBeads(
-        ready_queue=[],
-        config_values={"export.interval": "0"},
-        event_log=event_log,
-    )
-    git = StubGit(event_log=event_log)
-    services, *_ = _make_services(tmp_path, beads=beads, git=git)
+    _write_beads_config(tmp_path, 'export.interval: 0\n')
+    beads = StubBeads(ready_queue=[])
+    services, _, git_stub, _, _ = _make_services(tmp_path, beads=beads)
 
     run_swarm("oauth", services=services)
 
-    # Filter to the three ordering-relevant events.
-    relevant = [
-        e for e in event_log
-        if e in (
-            ("beads", "config_get", "export.interval"),
-            ("git", "path_is_dirty", ".beads/issues.jsonl"),
-            ("git", "fetch_and_ff_base", "main"),
-        )
-    ]
-    # Each event fires exactly once during a single non-dry-run
-    # invocation.
-    assert relevant == [
-        ("beads", "config_get", "export.interval"),
-        ("git", "path_is_dirty", ".beads/issues.jsonl"),
-        ("git", "fetch_and_ff_base", "main"),
-    ], (
+    # path_is_dirty (bd-state-clean preflight) fires BEFORE
+    # fetch_and_ff_base. The export.interval check runs even
+    # earlier but is invisible to git_stub since it's now a
+    # pure file read with no subprocess call.
+    git_steps = [c[0] for c in git_stub.calls]
+    path_dirty_idx = git_steps.index("path_is_dirty")
+    fetch_idx = git_steps.index("fetch_and_ff_base")
+    assert path_dirty_idx < fetch_idx, (
         "preflight ordering regressed; expected "
-        "config_get → path_is_dirty → fetch_and_ff_base, "
-        f"observed {relevant!r}"
+        "path_is_dirty → fetch_and_ff_base, observed "
+        f"{git_steps!r}"
     )
 
 
@@ -749,23 +795,124 @@ def test_dry_run_skips_export_interval_preflight(
     """`--dry-run` doesn't mutate bd state, so the
     export.interval throttle is irrelevant for safety. Dry-run
     skips this preflight (consistent with how it skips the
-    bd-state-clean preflight)."""
+    bd-state-clean preflight).
+
+    Pin: even when `.beads/config.yaml` says `export.interval:
+    60` (which would refuse a non-dry-run), dry-run completes
+    without raising."""
     _scratch_feature(tmp_path)
-    beads = StubBeads(
-        ready_queue=[(_ref("bd-1"),)],
-        config_values={"export.interval": "60"},
-    )
+    _write_beads_config(tmp_path, 'export.interval: 60\n')
+    beads = StubBeads(ready_queue=[(_ref("bd-1"),)])
     services, *_ = _make_services(tmp_path, beads=beads)
 
     # Should NOT raise — dry-run bypasses both bd-aware
     # preflights.
     run_swarm("oauth", services=services, dry_run=True)
 
-    # The config_get call MUST NOT have fired in the dry-run path
-    # — skipped means "did not run", not "ran and ignored result".
-    assert not any(
-        c[0] == "config_get" for c in beads.calls
+
+def test_run_swarm_export_interval_handles_quoted_value(
+    tmp_path: Path,
+) -> None:
+    """bd writes some values with quotes (sync.remote). Defensive
+    contract: if export.interval ever ends up quoted ('0' or
+    \"0\"), the preflight strips the surrounding quotes before
+    comparing. A bare 0 is the canonical form bd 1.0.2 writes."""
+    _scratch_feature(tmp_path)
+    _write_beads_config(tmp_path, 'export.interval: "0"\n')
+    beads = StubBeads(ready_queue=[])
+    services, *_ = _make_services(tmp_path, beads=beads)
+
+    # Should proceed past preflight without raising.
+    run_swarm("oauth", services=services)
+
+
+def _no_subprocess(*args, **kwargs):
+    """Drop-in for `subprocess.<entrypoint>` that fails any
+    invocation. Used by the preflight subprocess-boundary tests
+    below to catch ANY shell-out — bd, git, gh, anything. The
+    Task-6 follow-up's whole point is keeping the preflight
+    subprocess-free; this drop-in is the contract."""
+    raise AssertionError(
+        f"subprocess invoked from the preflight: argv={args!r} "
+        f"kwargs={kwargs!r}. The preflight MUST stay subprocess-"
+        "free — adding any shell-out here re-introduces bd's "
+        "auto-export-on-startup writer that broke the live "
+        "smoke. See the Task-6 follow-up in "
+        "swarm-worker-commit-bd-ownership for the rationale."
     )
+
+
+def test_export_interval_preflight_spawns_no_subprocess_on_proceed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subprocess-boundary regression contract for the Task-6
+    follow-up: `_preflight_bd_export_interval` and anything it
+    transitively calls MUST NOT invoke any subprocess.
+
+    The bug this follow-up addresses was that a single
+    `bd config get` subprocess in the preflight tripped bd's
+    auto-export-on-startup writer and dirtied
+    `.beads/issues.jsonl`. Replacing `bd config get` with a
+    direct file read fixed it. This test pins the contract at
+    the actual subprocess boundary — not at the StubBeads
+    boundary — so a future refactor that adds
+    `subprocess.run(["bd", ...])` or `subprocess.run(["git",
+    ...])` directly in the preflight's call tree fails loud
+    here, even though such code wouldn't touch StubBeads.
+    """
+    import subprocess as _subp
+
+    from turma.swarm._orchestrator import (
+        SwarmServices,
+        _preflight_bd_export_interval,
+    )
+
+    for entry in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(_subp, entry, _no_subprocess)
+
+    (tmp_path / ".beads").mkdir(exist_ok=True)
+    (tmp_path / ".beads" / "config.yaml").write_text(
+        "export.interval: 0\n"
+    )
+
+    class _MiniServices:
+        # The preflight only reads `services.repo_root`; building
+        # a tiny anonymous shape here keeps the test focused on
+        # the subprocess contract instead of the SwarmServices
+        # construction surface.
+        repo_root = tmp_path
+
+    # Must not raise. Any subprocess invocation along the call
+    # path triggers the AssertionError above with a clear message.
+    _preflight_bd_export_interval(_MiniServices())
+
+
+def test_export_interval_preflight_spawns_no_subprocess_on_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Companion to the proceed-path test: the refusal branch
+    also runs subprocess-free. A future refactor that falls
+    back to `bd config get` on, say, "file not found" or
+    "value not parseable" would still trip this test."""
+    import subprocess as _subp
+
+    from turma.swarm._orchestrator import (
+        _preflight_bd_export_interval,
+    )
+
+    for entry in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(_subp, entry, _no_subprocess)
+
+    (tmp_path / ".beads").mkdir(exist_ok=True)
+    (tmp_path / ".beads" / "config.yaml").write_text(
+        "export.interval: 60\n"
+    )
+
+    class _MiniServices:
+        repo_root = tmp_path
+
+    with pytest.raises(PlanningError, match="export.interval"):
+        _preflight_bd_export_interval(_MiniServices())
 
 
 # ---------------------------------------------------------------------

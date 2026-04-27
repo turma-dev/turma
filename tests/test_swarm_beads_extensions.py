@@ -425,59 +425,6 @@ def test_close_task_still_usable_for_swarm_success_path() -> None:
 
 
 # -----------------------------------------------------------------------
-# config_get (swarm-worker-commit-bd-ownership Task 1)
-# -----------------------------------------------------------------------
-
-
-def test_config_get_pins_argv() -> None:
-    seen: list[list[str]] = []
-
-    def run(argv, *, step):
-        seen.append(argv)
-        return _completed(argv, stdout="0\n")
-
-    adapter = _make_adapter_with_run(run)
-    adapter.config_get("export.interval")
-
-    assert seen == [["bd", "config", "get", "export.interval"]]
-
-
-def test_config_get_returns_stripped_stdout() -> None:
-    """bd's CLI typically appends a trailing newline; the adapter
-    must strip it so callers can compare against `'0'` directly."""
-    def run(argv, *, step):
-        return _completed(argv, stdout="60\n")
-
-    adapter = _make_adapter_with_run(run)
-    assert adapter.config_get("export.interval") == "60"
-
-
-def test_config_get_returns_empty_string_for_unset_key() -> None:
-    """An unset config key prints an empty value (or nothing). The
-    adapter normalizes to a stripped string; callers see `''` and
-    can decide whether to treat that as a refusal."""
-    def run(argv, *, step):
-        return _completed(argv, stdout="")
-
-    adapter = _make_adapter_with_run(run)
-    assert adapter.config_get("export.interval") == ""
-
-
-def test_config_get_failure_surfaces_stderr() -> None:
-    """Non-zero exit raises PlanningError with bd's stderr verbatim
-    so operators can read the actual bd error."""
-    def run(argv, *, step):
-        raise PlanningError(
-            "bd config get failed: exit 1\n"
-            "Error: unknown config key 'export.bogus'"
-        )
-
-    adapter = _make_adapter_with_run(run)
-    with pytest.raises(PlanningError, match="unknown config key"):
-        adapter.config_get("export.bogus")
-
-
-# -----------------------------------------------------------------------
 # export (swarm-worker-commit-bd-ownership Task 2)
 # -----------------------------------------------------------------------
 
