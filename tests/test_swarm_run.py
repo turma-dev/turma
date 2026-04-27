@@ -595,6 +595,83 @@ def test_preflight_clean_bd_state_proceeds(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
+# Beads-state revert wiring (swarm-beads-state-merge-cleanliness Task 3)
+# ---------------------------------------------------------------------
+
+
+def test_revert_paths_called_after_claim_task(tmp_path: Path) -> None:
+    """`claim_task` runs from main's working tree (the bd db lives
+    there); bd's auto-export hook dirties `.beads/issues.jsonl` on
+    every update. The orchestrator must revert immediately after
+    `claim_task` succeeds to keep main's working tree clean for
+    the next iteration's `fetch_and_ff_base`."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)])
+    services, _, git, _, _ = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+    run_swarm("oauth", services=services)
+
+    # Find the index of the claim_task call in beads.calls and the
+    # first revert_paths call in git.calls. claim_task is on bd, not
+    # git, so we can't just look at git.calls ordering; we walk both
+    # call lists by call-time.
+    claim_count = sum(1 for c in beads.calls if c[0] == "claim_task")
+    assert claim_count == 1
+    # At least two reverts: one after claim, one after mark_pr_open.
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) == 2
+    # All target the bd export path.
+    for c in revert_calls:
+        assert c[2] == (".beads/issues.jsonl",)
+
+
+def test_revert_paths_called_after_mark_pr_open(tmp_path: Path) -> None:
+    """Pinned via `pr_marked` + final revert order."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)])
+    services, _, git, _, _ = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+    run_swarm("oauth", services=services)
+
+    # mark_pr_open fired exactly once.
+    assert len(beads.pr_marked) == 1
+    # The LAST git.calls entry is a revert (post-mark, end of run
+    # before the no-ready-tasks-remain log).
+    last_git_call = git.calls[-1]
+    assert last_git_call[0] == "revert_paths"
+    assert last_git_call[2] == (".beads/issues.jsonl",)
+
+
+def test_revert_paths_called_after_failure(tmp_path: Path) -> None:
+    """`fail_task` also dirties main's working tree via bd's hook.
+    `_handle_failure` wraps `fail_task` and must revert after."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)])
+    # Worker fails → _handle_failure fires → fail_task → revert.
+    services, _, git, _, _ = _make_services(
+        tmp_path,
+        beads=beads,
+        worker_results=[_failure("worker hit a problem")],
+        max_retries=1,
+    )
+    run_swarm("oauth", services=services)
+
+    # fail_task fired.
+    assert len(beads.failed) == 1
+    # A revert fired AFTER claim and AFTER fail_task. We can't
+    # easily interleave bd + git call orders, but we can check the
+    # number of reverts: at least 2 (one after claim, one after
+    # fail).
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) >= 2
+
+
+# ---------------------------------------------------------------------
 # Happy paths
 # ---------------------------------------------------------------------
 
@@ -628,19 +705,28 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     assert worker.invocations[0].description == "Subtask body here."
     assert worker.invocations[0].task_id == "bd-1"
 
-    # Git path: bd-state preflight → fetch → dirty check →
-    # commit → push. No retry. `path_is_dirty` (preflight) is
-    # added by swarm-beads-state-merge-cleanliness Task 2;
+    # Git path: bd-state preflight → fetch → revert (after
+    # claim_task) → dirty check → commit → push → revert
+    # (after mark_pr_open). `path_is_dirty` (preflight) +
+    # `revert_paths` (after each bd mutation) are added by
+    # swarm-beads-state-merge-cleanliness Tasks 2+3;
     # `fetch_and_ff_base` is from
     # swarm-merge-advancement-stabilization Task 4.
     git_steps = [c[0] for c in git.calls]
     assert git_steps == [
         "path_is_dirty",
         "fetch_and_ff_base",
+        "revert_paths",       # after claim_task
         "status_is_dirty",
         "commit_all",
         "push_branch",
+        "revert_paths",       # after mark_pr_open
     ]
+    # Both revert calls target `.beads/issues.jsonl` exactly.
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) == 2
+    for c in revert_calls:
+        assert c[2] == (".beads/issues.jsonl",)
 
     # PR opened with the rendered template.
     assert len(pr.calls) == 1
@@ -1455,6 +1541,13 @@ def test_merge_advancement_merged_path(tmp_path: Path) -> None:
     assert any(c[0] == "cleanup" for c in wt.calls)
     # No fail_task fired.
     assert beads.failed == []
+    # MERGED dispatch fires unmark + close back-to-back; one
+    # revert at the end of the arm clears bd's exports for both
+    # mutations (swarm-beads-state-merge-cleanliness Task 3).
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) >= 1
+    for c in revert_calls:
+        assert c[2] == (".beads/issues.jsonl",)
 
 
 def test_merge_advancement_open_leaves_alone(tmp_path: Path) -> None:
