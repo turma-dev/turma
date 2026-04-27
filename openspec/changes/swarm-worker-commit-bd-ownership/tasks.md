@@ -54,14 +54,14 @@ prepared upstream bug report for filing.
 
 ### 1. Preflight: refuse on `export.interval` ≠ 0
 
-- [ ] In `src/turma/swarm/_orchestrator.py`, add
+- [x] In `src/turma/swarm/_orchestrator.py`, add
       `_preflight_bd_export_interval(services)` helper
       that runs `bd config get export.interval` (or the
       equivalent config-read command) via a new
       `BeadsAdapter.config_get(key)` method. Refuses with
       a typed `PlanningError` if the value is anything
       other than `"0"`.
-- [ ] The error message names the key, the expected value,
+- [x] The error message names the key, the expected value,
       the rationale, and the exact remediation:
       ```
       turma run requires `bd config get export.interval`
@@ -77,13 +77,13 @@ prepared upstream bug report for filing.
       
       The setting persists in .beads/config.yaml.
       ```
-- [ ] Call site in `run_swarm`: invoke
+- [x] Call site in `run_swarm`: invoke
       `_preflight_bd_export_interval(services)` after the
       existing `_preflight(...)` and BEFORE
       `_preflight_beads_state_clean(services)`. **Skipped
       under `--dry-run`** consistent with the other
       preflights.
-- [ ] In `src/turma/swarm/beads.py` (or wherever the
+- [x] In `src/turma/swarm/beads.py` (or wherever the
       BeadsAdapter lives), add `config_get(key: str) ->
       str`. argv pinned:
       ```
@@ -91,7 +91,7 @@ prepared upstream bug report for filing.
       ```
       Returns stdout stripped. Failure → `PlanningError(
       "bd config get failed: exit <N>\n<stderr>")`.
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - New `test_run_swarm_refuses_when_export_interval_nonzero`:
         stub `BeadsAdapter.config_get("export.interval")`
         returns `"60"` → run_swarm raises typed
@@ -104,13 +104,13 @@ prepared upstream bug report for filing.
       - New `test_dry_run_skips_export_interval_preflight`:
         stub returns `"60"` → dry-run completes without
         raising.
-- [ ] Tests in `tests/test_swarm_beads_extensions.py` (or
+- [x] Tests in `tests/test_swarm_beads_extensions.py` (or
       wherever BeadsAdapter argv is pinned): argv-pin for
       `config_get`; failure-surfaces test.
 
 ### 2. Worker-commit boundary: explicit bd export + hook bypass
 
-- [ ] In `src/turma/swarm/git.py`, modify `commit_all` to
+- [x] In `src/turma/swarm/git.py`, modify `commit_all` to
       take an optional pre-stage callback. Or simpler: add
       a new `commit_all_with_bd_export(worktree, message,
       *, services)` method that owns the four-step
@@ -124,7 +124,7 @@ prepared upstream bug report for filing.
          commit -m <message>`
       
       Returning the commit SHA, same as today.
-- [ ] In `src/turma/swarm/beads.py`, add
+- [x] In `src/turma/swarm/beads.py`, add
       `BeadsAdapter.export(output_path: Path) -> None`.
       argv pinned:
       ```
@@ -133,7 +133,7 @@ prepared upstream bug report for filing.
       cwd: `self._repo_root` (NOT the worktree).
       Failure → `PlanningError("bd export failed: exit <N>
       \n<stderr>")`.
-- [ ] Switch the orchestrator's worker-commit call site
+- [x] Switch the orchestrator's worker-commit call site
       (in `_run_single_task`, after `worker.run` returns
       success) to use the new `commit_all_with_bd_export`
       method instead of plain `commit_all`. The plain
@@ -141,7 +141,7 @@ prepared upstream bug report for filing.
       use case (today there is none in `turma run`'s
       worker flow, but keeping the method doesn't cost
       anything).
-- [ ] Unit tests for `commit_all_with_bd_export` in
+- [x] Unit tests for `commit_all_with_bd_export` in
       `tests/test_swarm_git.py`:
       - argv-pin for the four subprocess calls in order
         (bd export, git add -A, git commit with
@@ -171,7 +171,7 @@ prepared upstream bug report for filing.
         success but destination path is missing: <path>");
         no commit follows.
       - git commit failure → PlanningError surfaces stderr.
-- [ ] Unit tests for `BeadsAdapter.export` in
+- [x] Unit tests for `BeadsAdapter.export` in
       `tests/test_swarm_beads_extensions.py`:
       - argv-pin: `bd export -o <abs-path>`.
       - cwd-pin: respects the adapter's repo_root.
@@ -187,7 +187,7 @@ correctness, not the absence of bugness in upstream bd. This
 isolation makes the eventual upstream-bd-fix observable in
 exactly one place when it ships.
 
-- [ ] Happy-path test:
+- [x] Happy-path test:
       `test_commit_all_with_bd_export_against_real_git_and_real_bd`.
       Skipif `bd` is not on PATH (alongside the existing
       `git`-skipif).
@@ -216,7 +216,7 @@ exactly one place when it ships.
            matches `bd export` from main's repo root at
            commit time (canonical state propagation
            preserved)
-- [ ] **Negative control test** (the SOLE place that
+- [x] **Negative control test** (the SOLE place that
       asserts the upstream buggy shape):
       `test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug`.
       Same setup as the happy-path test, but uses plain
@@ -244,7 +244,7 @@ exactly one place when it ships.
 
 ### 4. Docs + CHANGELOG amendment
 
-- [ ] `docs/architecture.md` "bd-state ownership" section
+- [x] `docs/architecture.md` "bd-state ownership" section
       (added by the prior arc): append a short paragraph
       documenting the worker-commit boundary contract. New
       sentences:
@@ -262,15 +262,15 @@ exactly one place when it ships.
         `openspec/changes/swarm-worker-commit-bd-ownership/`
         for the full contract and the no-agent shell-only
         reproducer that pins the upstream defect.
-- [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: amend with one
+- [x] `CHANGELOG.md` `[Unreleased]/Fixed`: amend with one
       bullet naming the wrong-path worker-commit defect,
       Turma's commit-boundary ownership response, and the
       `export.interval=0` preflight contract.
-- [ ] `docs/smoke-turma-run.md` Prerequisites: add the
+- [x] `docs/smoke-turma-run.md` Prerequisites: add the
       `bd config set export.interval 0` step to the bd
       init flow, with a one-line rationale referencing this
       arc.
-- [ ] `docs/smoke-turma-run.md` Step 3a: add a third
+- [x] `docs/smoke-turma-run.md` Step 3a: add a third
       regression check after the existing two:
       ```bash
       git show --stat HEAD       # latest worker commit
@@ -282,7 +282,7 @@ exactly one place when it ships.
       deleted. Either condition means the bd hook bypass
       regressed and Turma is generating bd-state-corrupt
       worker commits again."
-- [ ] No README changes. The "Base-branch sync" and "Swarm
+- [x] No README changes. The "Base-branch sync" and "Swarm
       Execution" sections' user-facing prose are
       unaffected.
 
@@ -328,11 +328,11 @@ counterproductive; this arc references bd#3311 directly.
 
 ### 6. Validation
 
-- [ ] `uv run pytest` green. Baseline before this arc:
+- [x] `uv run pytest` green. Baseline before this arc:
       562 tests. Expected delta: roughly +10 to +15.
-- [ ] No new runtime deps in `pyproject.toml`. `bd` is
+- [x] No new runtime deps in `pyproject.toml`. `bd` is
       already a prerequisite.
-- [ ] Re-run the chained-flow smoke against
+- [x] Re-run the chained-flow smoke against
       `khanhgithead/turma-run-smoke-2` (or a fresh
       disposable repo). Walk Step 3a end-to-end.
       **Critical regression checks** in addition to the
@@ -344,7 +344,7 @@ counterproductive; this arc references bd#3311 directly.
         commit.
       - After both iters: `git status --short` is empty
         (the prior arc's contract still holds).
-- [ ] On smoke success: tick all manual-smoke `[ ]` boxes
+- [x] On smoke success: tick all manual-smoke `[ ]` boxes
       across the four correction arcs
       (`swarm-merge-advancement-stabilization`,
       `swarm-fetch-and-ff-base-correction`,
