@@ -4,8 +4,13 @@
 
 **Completed 2026-04-26b during the smoke triage.** The
 shell-only reproducer below pins the upstream bd defect;
-no agent is involved. The defect is upstream bd; Turma's
-commit-boundary fix is the local workaround.
+no agent is involved. The defect is filed as
+[steveyegge/beads#3311](https://github.com/steveyegge/beads/issues/3311)
+and fixed in bd 1.0.3 (release 2026-04-24, fix PR `#3347`:
+"scrub git hook env and skip cross-worktree git-add").
+Turma's commit-boundary fix is the local workaround that
+keeps `turma run` correct on bd 1.0.2 (still on Homebrew at
+the time of this writing) AND stays harmless on 1.0.3+.
 
 The reproducer (run from any git repo with bd initialized
 and `.beads/issues.jsonl` tracked at HEAD):
@@ -281,23 +286,45 @@ exactly one place when it ships.
       Execution" sections' user-facing prose are
       unaffected.
 
-### 5. File the upstream bd issue (operator-driven)
+### 5. Upstream filing (no-op — already filed and fixed)
 
-The bug report body is prepared in operator-private
-material (outside this public spec) and is ready to file.
-The Task 0 reproducer above is the canonical reference for
-what an upstream maintainer needs.
+**Completed 2026-04-26 during the verification walk.** The
+upstream defect was already filed as
+[steveyegge/beads#3311](https://github.com/steveyegge/beads/issues/3311)
+by `jacob-ablowitz` (closed 2026-04-21) and fixed in bd
+1.0.3 (released 2026-04-24, fix PR `#3347`). Confirmed
+empirically against a downloaded 1.0.3 binary: the
+no-agent shell reproducer no longer produces the buggy
+shape under 1.0.3. Filing a duplicate would be
+counterproductive; this arc references bd#3311 directly.
 
-- [ ] Walk the prepared bug report against the latest bd
-      release before filing in case 1.0.3+ ships a fix.
-- [ ] If still reproducible: file at the bd upstream
-      tracker. This is operator-driven; not in scope of
-      this PR.
-- [ ] On filing, link the upstream issue URL into this
-      arc's `proposal.md` "Key insight" section so future
-      readers can cross-reference, and replace the Task 0
-      reproducer's standalone shape with a pointer to the
-      filed issue.
+- [x] Verify the prepared reproducer against the latest bd
+      release before filing → 1.0.3 fixes the wrong-path
+      defect (verified 2026-04-26 with the GitHub-release
+      binary at `/tmp/bd-1.0.3-probe/bd`).
+- [x] Don't file a duplicate. bd#3311 already covers it.
+- [x] Link the upstream issue URL into this arc's
+      `proposal.md` "Key insight" section (done in the
+      same commit that lands this checkbox tick).
+- [ ] **Follow-up — version sensitivity of the
+      negative-control test.** Once bd 1.0.3 lands in the
+      operator's PATH (currently still on Homebrew 1.0.2
+      at the time of this writing), the
+      `test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug`
+      test in `tests/test_swarm_git_integration.py` will
+      start failing because the buggy shape no longer
+      reproduces. That is the signal the test was
+      designed to surface; the docstring already tells
+      future readers what to do. The decision of how to
+      RESHAPE that test (skipif on bd version? convert to
+      a regression-on-fixed-version? remove?) is an
+      explicit follow-up outside this arc — the
+      maintainer who runs the smoke against 1.0.3+ should
+      decide based on whether the protocol is still
+      load-bearing for non-bug reasons (it is: bd 1.0.3
+      deliberately skips cross-worktree git-add, so
+      Turma's explicit export still ensures bd state
+      lands in worker commits).
 
 ### 6. Validation
 
