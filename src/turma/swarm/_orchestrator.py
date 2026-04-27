@@ -108,6 +108,11 @@ class SwarmServices:
     base_branch: str = "main"
     max_retries: int = 1
     worker_timeout: int = 1800
+    # Run-scoped mutable counter — reset at run_swarm start,
+    # incremented in `_revert_beads_export`, read at run_swarm end
+    # to decide whether to print the tail-mutation warning.
+    # See `swarm-beads-state-merge-cleanliness` Task 4.
+    _bd_mutations_during_run: int = 0
 
 
 def default_swarm_services(
@@ -192,6 +197,10 @@ def run_swarm(
 
     _preflight(feature, services.repo_root)
 
+    # Reset the run-scoped tail-mutation counter so the end-of-run
+    # warning reflects only this invocation's bd updates.
+    services._bd_mutations_during_run = 0
+
     # Refuse to start if `.beads/issues.jsonl` is already dirty
     # in main's working tree. Turma's revert-after-mutation
     # invariant (see swarm-beads-state-merge-cleanliness)
@@ -240,6 +249,25 @@ def run_swarm(
     _advance_merged_prs(feature, services, dry_run=False)
     _main_loop(feature, services, max_tasks)
 
+    # Tail-mutation telemetry: if any Turma bd update fired during
+    # this run, the dolt db now holds mutations that origin/main's
+    # `.beads/issues.jsonl` snapshot doesn't. Same-clone reentrancy
+    # is preserved, but cross-clone visibility lags until a future
+    # worker commit's pre-commit hook captures the state — and if no
+    # future worker run happens, the lag is unbounded until manual
+    # action. Surface this so operators can decide between manually
+    # `bd export && git commit`-ing now or waiting for the cycle to
+    # propagate. See
+    # `openspec/changes/swarm-beads-state-merge-cleanliness/
+    # design.md` "Shareability contract" for the v1 acceptance.
+    if services._bd_mutations_during_run > 0:
+        print(
+            "bd-state: local mutations not yet propagated to "
+            "origin. Run `bd export && git commit -- "
+            ".beads/issues.jsonl` to capture them, or rely on "
+            "the next `turma run` worker commit to propagate."
+        )
+
 
 # ---------------------------------------------------------------------
 # Preflight
@@ -286,6 +314,10 @@ def _revert_beads_export(services: SwarmServices) -> None:
     working tree stays clean for the next iteration's
     `fetch_and_ff_base`.
 
+    Increments the run-scoped tail-mutation counter on the
+    services container so the end-of-run warning (Task 4) can
+    surface when bd state is local-only.
+
     See `openspec/changes/swarm-beads-state-merge-cleanliness/
     design.md` "Adapter contract" for why this targets
     `restore --staged --worktree` (NOT `git checkout --`) and
@@ -293,6 +325,7 @@ def _revert_beads_export(services: SwarmServices) -> None:
     export is regenerable).
     """
     services.git.revert_paths(services.repo_root, _BEADS_EXPORT)
+    services._bd_mutations_during_run += 1
 
 
 def _preflight_beads_state_clean(services: SwarmServices) -> None:

@@ -595,6 +595,80 @@ def test_preflight_clean_bd_state_proceeds(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
+# Tail-mutation telemetry (swarm-beads-state-merge-cleanliness Task 4)
+# ---------------------------------------------------------------------
+
+
+_TAIL_WARNING_PREFIX = "bd-state: local mutations not yet propagated"
+
+
+def test_run_swarm_warns_on_unpropagated_tail_mutations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When bd mutations fired during the run (claim, mark_pr_open,
+    etc.), Turma's revert-after-mutation contract leaves them in
+    local dolt only — origin/main won't see them until a future
+    worker commit captures them. The warning surfaces this lag at
+    the moment of decision so the operator can choose to manually
+    `bd export && git commit` or rely on the next run."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)])
+    services, *_ = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    assert _TAIL_WARNING_PREFIX in captured.out
+    # Operator-actionable: name the manual escape-hatch command.
+    assert "bd export" in captured.out
+    assert ".beads/issues.jsonl" in captured.out
+    # Order: warning comes after the final swarm log line.
+    swarm_done_idx = captured.out.find("swarm: no ready tasks remain")
+    warning_idx = captured.out.find(_TAIL_WARNING_PREFIX)
+    assert swarm_done_idx >= 0 and warning_idx >= 0
+    assert warning_idx > swarm_done_idx
+
+
+def test_run_swarm_skips_warning_when_no_mutations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A no-op run (empty ready_queue, no in_progress tasks, no
+    merge-advancement work) fires zero bd mutations → zero reverts
+    → no warning. Without this filter, every `turma run` would
+    print the warning, defeating the purpose."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(ready_queue=[])  # empty
+    services, *_ = _make_services(tmp_path, beads=beads)
+
+    run_swarm("oauth", services=services)
+
+    captured = capsys.readouterr()
+    assert _TAIL_WARNING_PREFIX not in captured.out
+
+
+def test_dry_run_skips_tail_mutation_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dry-run skips all bd-mutation paths, so by definition no
+    tail mutations exist. The warning is a real-run-only signal;
+    don't fire it under dry-run."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)])
+    services, *_ = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+
+    run_swarm("oauth", services=services, dry_run=True)
+
+    captured = capsys.readouterr()
+    assert _TAIL_WARNING_PREFIX not in captured.out
+
+
+# ---------------------------------------------------------------------
 # Beads-state revert wiring (swarm-beads-state-merge-cleanliness Task 3)
 # ---------------------------------------------------------------------
 
