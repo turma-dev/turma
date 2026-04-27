@@ -1637,7 +1637,7 @@ def test_merge_advancement_closed_without_merge_with_budget_remaining(
         }
     )
     pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
-    services, _, _, _, _ = _make_services(
+    services, _, git, _, _ = _make_services(
         tmp_path, beads=beads, pr=pr, max_retries=1
     )
 
@@ -1654,6 +1654,15 @@ def test_merge_advancement_closed_without_merge_with_budget_remaining(
     # Not closed (just labelled fail; budget remaining returns to
     # open via fail_task).
     assert beads.closed == []
+    # CLOSED dispatch fires unmark + _handle_failure (which fires
+    # fail_task with its own revert at the end). The single revert
+    # at the end of _handle_failure clears bd's exports for both
+    # mutations together (swarm-beads-state-merge-cleanliness
+    # Task 3).
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) >= 1
+    for c in revert_calls:
+        assert c[2] == (".beads/issues.jsonl",)
 
 
 def test_merge_advancement_closed_without_merge_exhausted_halts(
@@ -1678,7 +1687,7 @@ def test_merge_advancement_closed_without_merge_exhausted_halts(
         }
     )
     pr.find_open_pr_url_for_branch = lambda branch: "https://github.com/o/r/pull/5"  # type: ignore[assignment]
-    services, _, _, _, _ = _make_services(
+    services, _, git, _, _ = _make_services(
         tmp_path, beads=beads, pr=pr, max_retries=1
     )
 
@@ -1689,6 +1698,16 @@ def test_merge_advancement_closed_without_merge_exhausted_halts(
         run_swarm("oauth", services=services)
 
     assert beads.pr_unmarked == [("bd-1", 5)]
+    # Even on the exhausted-budget halt, the dispatch still fired
+    # both bd mutations (unmark + fail_task via _handle_failure)
+    # before raising the terminal PlanningError. The revert at the
+    # end of _handle_failure must have fired so the operator's
+    # main working tree is clean post-halt — operators triaging an
+    # exhausted-budget halt expect a clean tree.
+    revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
+    assert len(revert_calls) >= 1
+    for c in revert_calls:
+        assert c[2] == (".beads/issues.jsonl",)
 
 
 def test_merge_advancement_multi_task_sweep(tmp_path: Path) -> None:
