@@ -203,6 +203,31 @@ class StubGit:
             raise self.commit_raises
         return "deadbeef"
 
+    def commit_all_with_bd_export(
+        self,
+        worktree: Path,
+        message: str,
+        *,
+        beads,
+        repo_root: Path,
+    ) -> str:
+        # Tracks the worker-commit-boundary protocol introduced by
+        # swarm-worker-commit-bd-ownership. Records the call as
+        # `commit_all_with_bd_export` so existing assertions that
+        # match on the recorded op name surface clearly when they
+        # rely on the old `commit_all` shape.
+        self.calls.append(
+            (
+                "commit_all_with_bd_export",
+                str(worktree),
+                message,
+                str(repo_root),
+            )
+        )
+        if self.commit_raises is not None:
+            raise self.commit_raises
+        return "deadbeef"
+
     def push_branch(
         self, worktree: Path, branch: str, *, remote: str = "origin"
     ) -> None:
@@ -415,7 +440,12 @@ def test_dry_run_never_calls_any_mutation(tmp_path: Path) -> None:
     # `fetch_and_ff_base` mutates a local ref (the fast-forward),
     # so dry-run must NOT call it. Added by
     # swarm-merge-advancement-stabilization Task 4.
-    mutating_git = {"commit_all", "push_branch", "fetch_and_ff_base"}
+    mutating_git = {
+        "commit_all",
+        "commit_all_with_bd_export",
+        "push_branch",
+        "fetch_and_ff_base",
+    }
     assert not any(c[0] in mutating_git for c in git.calls)
     mutating_pr = {"open_pr"}
     assert not any(c[0] in mutating_pr for c in pr.calls)
@@ -924,21 +954,24 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     assert worker.invocations[0].task_id == "bd-1"
 
     # Git path: bd-state preflight → fetch → revert (after
-    # claim_task) → dirty check → commit → push → revert
-    # (after mark_pr_open). `path_is_dirty` (preflight) +
-    # `revert_paths` (after each bd mutation) are added by
-    # swarm-beads-state-merge-cleanliness Tasks 2+3;
-    # `fetch_and_ff_base` is from
-    # swarm-merge-advancement-stabilization Task 4.
+    # claim_task) → dirty check → commit (the worker-commit
+    # boundary protocol from swarm-worker-commit-bd-ownership)
+    # → push → revert (after mark_pr_open).
+    # `path_is_dirty` (preflight) + `revert_paths` (after each
+    # bd mutation) are added by swarm-beads-state-merge-
+    # cleanliness Tasks 2+3; `fetch_and_ff_base` is from swarm-
+    # merge-advancement-stabilization Task 4;
+    # `commit_all_with_bd_export` is from swarm-worker-commit-
+    # bd-ownership Task 2.
     git_steps = [c[0] for c in git.calls]
     assert git_steps == [
         "path_is_dirty",
         "fetch_and_ff_base",
-        "revert_paths",       # after claim_task
+        "revert_paths",                # after claim_task
         "status_is_dirty",
-        "commit_all",
+        "commit_all_with_bd_export",
         "push_branch",
-        "revert_paths",       # after mark_pr_open
+        "revert_paths",                # after mark_pr_open
     ]
     # Both revert calls target `.beads/issues.jsonl` exactly.
     revert_calls = [c for c in git.calls if c[0] == "revert_paths"]
@@ -1063,8 +1096,13 @@ def test_clean_tree_after_success_triggers_fail_task(tmp_path: Path) -> None:
         "worker reported success but left the tree clean",
         "worker reported success but left the tree clean",
     ]
-    # No commit, no push, no PR.
-    assert not any(c[0] == "commit_all" for c in git.calls)
+    # No commit, no push, no PR. Match either the legacy
+    # `commit_all` or the new worker-commit-boundary protocol
+    # `commit_all_with_bd_export`; this test pins "no commit
+    # path fired", which must hold regardless of which method
+    # the orchestrator uses.
+    commit_ops = {"commit_all", "commit_all_with_bd_export"}
+    assert not any(c[0] in commit_ops for c in git.calls)
     assert pr.calls == []
 
 
@@ -1170,7 +1208,10 @@ def test_repair_missing_worktree_path(tmp_path: Path) -> None:
 
     assert [e[0] for e in beads.failed] == ["bd-gone"]
     # No commit/push/PR from the repair phase for this finding.
-    assert not any(c[0] == "commit_all" for c in git.calls)
+    # Match either legacy `commit_all` or the new
+    # `commit_all_with_bd_export`.
+    commit_ops = {"commit_all", "commit_all_with_bd_export"}
+    assert not any(c[0] in commit_ops for c in git.calls)
     assert pr.calls == [] or all(
         c[0] != "open_pr" for c in pr.calls
     )
@@ -1212,9 +1253,14 @@ def test_repair_completion_pending_runs_commit_push_pr_label(
     )
     run_swarm("oauth", services=services)
 
-    # Repair tail ran commit + push + open_pr.
+    # Repair tail ran commit + push + open_pr. The repair path
+    # uses the worker-commit-boundary protocol from
+    # swarm-worker-commit-bd-ownership Task 2 — same defect
+    # surface (bd's pre-commit hook misroutes the export) as
+    # the main worker flow, so the repair callsite was migrated
+    # to `commit_all_with_bd_export` alongside the main one.
     git_steps = [c[0] for c in git.calls]
-    assert "commit_all" in git_steps
+    assert "commit_all_with_bd_export" in git_steps
     assert "push_branch" in git_steps
     assert any(c[0] == "open_pr" for c in pr.calls)
     # Task labelled; not closed; worktree NOT cleaned up.

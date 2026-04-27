@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from typing import Callable
 from unittest.mock import patch
 
@@ -474,3 +475,71 @@ def test_config_get_failure_surfaces_stderr() -> None:
     adapter = _make_adapter_with_run(run)
     with pytest.raises(PlanningError, match="unknown config key"):
         adapter.config_get("export.bogus")
+
+
+# -----------------------------------------------------------------------
+# export (swarm-worker-commit-bd-ownership Task 2)
+# -----------------------------------------------------------------------
+
+
+def test_export_pins_argv_with_absolute_output_path(tmp_path) -> None:
+    """The export adapter pins `bd export -o <path>` with the
+    output path passed verbatim. Absolute-path argument is the
+    Turma contract — no cwd-relative ambiguity, which is the
+    exact failure mode in the upstream bd defect this arc works
+    around."""
+    seen: list[list[str]] = []
+
+    def run(argv, *, step, cwd=None):
+        seen.append(argv)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    out = tmp_path / ".beads" / "issues.jsonl"
+    adapter.export(output_path=out)
+
+    assert seen == [["bd", "export", "-o", str(out)]]
+    # absolute-path contract: the argv-pinned path must be
+    # absolute. If a future caller passes a relative path, the
+    # adapter must NOT silently make it relative-to-cwd because
+    # that is exactly the upstream defect's failure mode.
+    assert seen[0][3] == str(out)
+    assert Path(seen[0][3]).is_absolute()
+
+
+def test_export_runs_with_explicit_cwd_at_repo_root(tmp_path) -> None:
+    """The export must run from `repo_root`'s cwd, not from the
+    worktree's. Main's bd db has Turma's claim/mark mutations;
+    the worktree's bd db (post-`bd prime`) is a separate, lazily-
+    populated db that reports `Exported 0 issues`. The cwd pin
+    is what makes the export capture canonical state.
+
+    The adapter takes `cwd` as a kwarg so callers can pin it
+    explicitly; tests assert the cwd reaches `_run`."""
+    seen_cwds: list = []
+
+    def run(argv, *, step, cwd=None):
+        seen_cwds.append(cwd)
+        return _completed(argv)
+
+    adapter = _make_adapter_with_run(run)
+    repo_root = tmp_path / "main-repo"
+    repo_root.mkdir()
+    out = repo_root / ".beads" / "issues.jsonl"
+    adapter.export(output_path=out, cwd=repo_root)
+
+    assert seen_cwds == [repo_root]
+
+
+def test_export_failure_surfaces_stderr(tmp_path) -> None:
+    """Non-zero exit raises PlanningError with bd's stderr
+    verbatim so operators can read the actual bd error."""
+    def run(argv, *, step, cwd=None):
+        raise PlanningError(
+            "bd export failed: exit 1\n"
+            "Error: database not initialized"
+        )
+
+    adapter = _make_adapter_with_run(run)
+    with pytest.raises(PlanningError, match="database not initialized"):
+        adapter.export(output_path=tmp_path / ".beads" / "issues.jsonl")
