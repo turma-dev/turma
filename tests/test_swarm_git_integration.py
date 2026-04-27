@@ -1,20 +1,25 @@
-"""Real-git integration tests for `GitAdapter.fetch_and_ff_base`.
+"""Real-git integration tests for `GitAdapter` — the parts where
+behavior depends on actual git (and, for the worker-commit boundary
+protocol, actual bd) rather than the adapter's claimed contract.
 
 Shells out to the actual `git` binary against tmpdir bare remote +
 working clone fixtures. The subprocess-mock tests in
 `test_swarm_git.py` validate the adapter's claimed contract against
-itself; these tests validate git's actual behavior — exactly the
-gap that let the prior colon-form contract ship past code review
-before the 2026-04-26 live smoke caught it (the colon-form is
-refused by git when the destination ref is the checked-out
-branch, which is the standard `turma run` setup).
+itself; these tests validate the underlying tools' actual behavior
+— exactly the gap that let the prior colon-form `fetch_and_ff_base`
+contract ship past code review before the 2026-04-26 live smoke
+caught it, and exactly where the wrong-path worker commit
+(swarm-worker-commit-bd-ownership) hides if the unit tests alone
+are trusted.
 
-See `openspec/changes/swarm-fetch-and-ff-base-correction/` for the
-contract this module backs with real-git evidence.
+See `openspec/changes/swarm-fetch-and-ff-base-correction/` and
+`openspec/changes/swarm-worker-commit-bd-ownership/` for the
+contracts this module backs with real-tool evidence.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,6 +28,7 @@ import pytest
 
 from turma.errors import PlanningError
 from turma.swarm.git import GitAdapter
+from turma.transcription.beads import BeadsAdapter
 
 
 pytestmark = pytest.mark.skipif(
@@ -283,3 +289,291 @@ def test_path_is_dirty_against_real_git(tmp_path: Path) -> None:
     # Staged modification (`M ` prefix in porcelain).
     _git(clone, "add", ".beads/issues.jsonl")
     assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is True
+
+
+# ---------------------------------------------------------------------
+# commit_all_with_bd_export — real git + real bd
+# (swarm-worker-commit-bd-ownership Task 3)
+# ---------------------------------------------------------------------
+
+
+needs_bd = pytest.mark.skipif(
+    shutil.which("bd") is None,
+    reason="bd binary not on PATH",
+)
+
+
+_BD_PRE_COMMIT_HOOK_SHIM = """\
+#!/usr/bin/env sh
+# Test fixture — minimal bd pre-commit shim that mimics what
+# `bd init` installs. Used by the negative-control test to
+# reproduce the upstream bd defect's wrong-path commit shape.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-30}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+    if [ $_bd_exit -eq 124 ]; then
+      _bd_exit=0
+    fi
+  else
+    bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    _bd_exit=0
+  fi
+  exit $_bd_exit
+fi
+exit 0
+"""
+
+
+def _make_bd_init_clone(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a tmpdir bare remote + working clone with bd
+    initialized AND `.beads/issues.jsonl` tracked at HEAD.
+
+    Uses `bd init --skip-hooks` so bd's own auto-commit at init
+    time does not fire the bd pre-commit hook (avoiding the
+    documented `bd init` deadlock where the hook re-acquires
+    bd's own lock). With `--skip-hooks`, bd init's auto-commit
+    succeeds cleanly because no hook is installed to fire.
+
+    bd init does NOT auto-create `.beads/issues.jsonl` (the
+    JSONL export is generated lazily on the first bd write or
+    via explicit `bd export`). The reproducer's bug shape
+    requires `.beads/issues.jsonl` to be tracked at HEAD — so
+    after init this helper runs `bd export` and commits the
+    resulting file.
+
+    Returns (bare_remote_path, working_clone_path).
+    """
+    bare, clone = _make_bare_and_clone(tmp_path)
+
+    # Run `bd init --skip-hooks` non-interactively from inside
+    # the clone so bd creates its `.beads/` directory there.
+    env = {
+        **os.environ,
+        "BD_NON_INTERACTIVE": "1",
+    }
+    subprocess.run(
+        [
+            "bd", "init",
+            "--skip-hooks",
+            "--prefix", "probe",
+        ],
+        cwd=clone,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # bd init auto-commits its initial artifacts but NOT
+    # `.beads/issues.jsonl` (the JSONL export is created by
+    # bd's first write or by an explicit `bd export`, and bd
+    # `export` from an empty db skips writing the file when
+    # there are zero issues). Create one bd issue so the
+    # auto-export populates `.beads/issues.jsonl`, then commit
+    # it so HEAD tracks the file — the upstream defect's
+    # reproducer requires that.
+    subprocess.run(
+        [
+            "bd", "create",
+            "--type", "task",
+            "--priority", "2",
+            "--description", "fixture seed",
+            "--silent",
+            "fixture seed",
+        ],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    _git(clone, "add", ".beads/issues.jsonl")
+    _git(
+        clone,
+        "-c", "core.hooksPath=/dev/null",
+        "commit", "-m", "track .beads/issues.jsonl",
+    )
+
+    return bare, clone
+
+
+def _install_bd_pre_commit_hook(clone: Path) -> None:
+    """Install bd's pre-commit hook shim into the clone's
+    `.git/hooks/pre-commit`. Used by the negative-control test
+    to reproduce the upstream bd defect's wrong-path commit
+    shape — the defect requires the pre-commit hook to fire on
+    a `git commit` that's running against an index already
+    containing `D .beads/issues.jsonl` (the state `bd prime`
+    leaves)."""
+    hook_path = clone / ".git" / "hooks" / "pre-commit"
+    hook_path.write_text(_BD_PRE_COMMIT_HOOK_SHIM)
+    hook_path.chmod(0o755)
+
+
+@needs_bd
+def test_commit_all_with_bd_export_against_real_git_and_real_bd(
+    tmp_path: Path,
+) -> None:
+    """Happy commit-boundary protocol against real git + real bd.
+
+    Walks the exact reproducer setup from the upstream bd
+    defect document and asserts that
+    `commit_all_with_bd_export` produces the CORRECT commit
+    shape:
+
+    - the worker's task file added
+    - `.beads/issues.jsonl` updated (NOT deleted) at the right
+      path
+    - no rogue `issues.jsonl` at the worktree root
+
+    The negative-control test below pins that the SAME setup
+    using a plain `git commit` does produce the buggy shape;
+    these two tests together prove the workaround is what
+    fixes it (not some unrelated detail of the fixture)."""
+    bare, clone = _make_bd_init_clone(tmp_path)
+
+    # Cut a registered worktree from main, the same way Turma's
+    # WorktreeManager does.
+    worktree = tmp_path / "worktree"
+    _git(clone, "worktree", "add", "-b", "task/probe/x", str(worktree), "main")
+
+    # Run `bd prime` inside the worktree — this is the trigger
+    # that leaves `D .beads/issues.jsonl` staged in subsequent
+    # `git status`. The protocol's first step (bd export from
+    # repo_root) must overwrite that with a correct file at
+    # the right path.
+    subprocess.run(
+        ["bd", "prime"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    # Worker-side write — any non-bd change so the commit has
+    # something to capture besides the bd export.
+    (worktree / "STAGE.txt").write_text("stage one complete\n")
+
+    # Run the protocol.
+    adapter = GitAdapter()
+    beads = BeadsAdapter()
+    sha = adapter.commit_all_with_bd_export(
+        worktree,
+        "[impl] integration: worker-commit-boundary happy path",
+        beads=beads,
+        repo_root=clone,
+    )
+
+    # Inspect the commit's tree.
+    tree_listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", sha],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    # The worker file is present.
+    assert "STAGE.txt" in tree_listing, (
+        f"STAGE.txt missing from commit {sha}; tree: {tree_listing}"
+    )
+    # `.beads/issues.jsonl` is present at the canonical path.
+    assert ".beads/issues.jsonl" in tree_listing, (
+        f".beads/issues.jsonl missing from commit {sha}; "
+        f"tree: {tree_listing}"
+    )
+    # And critically: NO rogue `issues.jsonl` at the repo root.
+    assert "issues.jsonl" not in tree_listing, (
+        f"rogue root-level issues.jsonl in commit {sha}; "
+        f"tree: {tree_listing}"
+    )
+
+
+@needs_bd
+def test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug(
+    tmp_path: Path,
+) -> None:
+    """Negative control — the SOLE test in the suite that
+    asserts the upstream bd buggy shape.
+
+    Same setup as the happy-path test above, but uses plain
+    `git -C <worktree> add -A && git commit` (no hook bypass,
+    no Turma-driven explicit export). Asserts the BUGGY shape:
+    root-level `issues.jsonl` added AND `.beads/issues.jsonl`
+    deleted from the tree.
+
+    If this test starts FAILING, upstream bd has likely fixed
+    the pre-commit hook path-resolution defect this workaround
+    was written for. See
+    `openspec/changes/swarm-worker-commit-bd-ownership/design.md`
+    and re-evaluate whether the hook bypass in
+    `commit_all_with_bd_export` is still needed. Do NOT silence
+    this test — read the triage chain and consider removing or
+    simplifying the workaround.
+
+    No other test in the suite references the buggy shape; this
+    is the single source of truth on what an unexpected pass
+    means and how to triage it."""
+    bare, clone = _make_bd_init_clone(tmp_path)
+
+    # Install bd's pre-commit hook so plain `git commit` fires
+    # it. This is what the upstream defect needs to reproduce.
+    _install_bd_pre_commit_hook(clone)
+
+    # Same registered-worktree + bd prime + non-bd write setup
+    # as the happy-path test.
+    worktree = tmp_path / "worktree"
+    _git(clone, "worktree", "add", "-b", "task/probe/x", str(worktree), "main")
+    subprocess.run(
+        ["bd", "prime"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    (worktree / "STAGE.txt").write_text("stage one complete\n")
+
+    # Plain commit path — no hook bypass, no explicit export.
+    _git(worktree, "add", "-A")
+    _git(
+        worktree,
+        "commit", "-m", "[impl] integration: plain commit reproducer",
+    )
+    sha = _rev_parse(worktree, "HEAD")
+
+    # Inspect the commit's tree for the BUGGY shape.
+    tree_listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", sha],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    # If upstream is still broken, both of these assertions
+    # hold: the root file appears AND the canonical path is
+    # gone.
+    assert "issues.jsonl" in tree_listing, (
+        "Expected upstream bd defect: rogue root-level "
+        "`issues.jsonl` in the plain-commit tree. If this "
+        "assertion fails, see the docstring — upstream may "
+        "have fixed the defect and the hook-bypass workaround "
+        "in commit_all_with_bd_export may be removable. "
+        f"Tree: {tree_listing}"
+    )
+    assert ".beads/issues.jsonl" not in tree_listing, (
+        "Expected upstream bd defect: `.beads/issues.jsonl` "
+        "deleted from the plain-commit tree. If this "
+        "assertion fails, see the docstring — upstream may "
+        "have fixed the defect. "
+        f"Tree: {tree_listing}"
+    )
