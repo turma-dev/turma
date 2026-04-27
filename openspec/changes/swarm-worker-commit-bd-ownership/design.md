@@ -83,6 +83,15 @@ disabled.
 
 ## The new commit-boundary protocol
 
+The export Turma performs in this protocol is **commit-boundary
+state**, not worker state. It runs once, immediately before the
+worker commit lands, exactly because that is the one moment the
+broken upstream hook would otherwise inject corrupt state. The
+implementation must not drift into "sync bd whenever convenient"
+shapes (pre-task, post-task, mid-loop). Any future use case
+that wants more bd-state syncing should propose its own arc;
+this one stays scoped to the commit boundary.
+
 `GitAdapter.commit_all` (today: `git add -A` then `git commit
 -m <msg>`) is replaced with this five-step sequence per worker
 commit:
@@ -153,6 +162,36 @@ Running the export from main's cwd sidesteps both issues.
 Main's bd db is the canonical source. The output path is
 absolute (the worktree's `.beads/issues.jsonl`), so cwd
 ambiguity doesn't matter for the destination.
+
+### Failure behavior — hard fail before commit
+
+Each step in the protocol is an independent failure boundary;
+none degrade. If the export step (1) fails, the commit MUST
+NOT run — `commit_all_with_bd_export` raises `PlanningError`
+and propagates up through `_run_single_task`'s normal
+failure path. Specifically:
+
+- bd export non-zero exit → `PlanningError("bd export failed:
+  exit <N>\n<stderr>")`. No `git add`, no `git commit`. The
+  worktree is left in whatever state it was before the call;
+  the orchestrator's existing failure path handles cleanup
+  (sentinel detection, `_handle_failure`, etc.).
+- bd export returns zero but the destination file does not
+  exist at `<worktree>/.beads/issues.jsonl` afterwards →
+  `PlanningError("bd export reported success but destination
+  path is missing: <path>")`. This catches the upstream-fix
+  edge case where bd's path resolution lands the file
+  somewhere else and exits zero.
+- `git add -A` non-zero exit → `PlanningError`, no commit.
+- `git commit ... -c core.hooksPath=/dev/null` non-zero
+  exit → `PlanningError`, propagates the existing
+  empty-commit guard.
+
+The contract is binary: the worker commit either reflects
+all four steps (export ran AND staged AND committed
+successfully) or it doesn't run. There is no partial-commit
+intermediate state where some files are staged but the
+export wasn't.
 
 ### Why hook bypass alone is not enough
 
