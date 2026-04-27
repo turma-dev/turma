@@ -165,3 +165,118 @@ def test_fetch_and_ff_base_head_on_feature_does_not_corrupt_feature_ref(
     # regression contract for the silent-corruption case.
     post_feature_sha = _rev_parse(clone, "feature")
     assert post_feature_sha == pre_feature_sha
+
+
+def test_revert_then_fetch_and_ff_base_against_real_git(
+    tmp_path: Path,
+) -> None:
+    """The regression contract for the 2026-04-26 iter-2 smoke
+    finding (swarm-beads-state-merge-cleanliness): a tracked
+    file gets dirty locally (simulating bd's post-update hook
+    writing AND staging `.beads/issues.jsonl`); the orchestrator
+    reverts; `fetch_and_ff_base` then succeeds even though the
+    incoming origin commit modifies the same file.
+
+    Without the revert, `merge --ff-only` would refuse with
+    `Your local changes to the following files would be
+    overwritten by merge`. This test pins the
+    revert-fetch-merge sequence end-to-end against actual git.
+    """
+    bare, clone = _make_bare_and_clone(tmp_path)
+
+    # Place a `.beads/issues.jsonl` at version V0 in both clone
+    # and bare remote. Use a placeholder shape — doesn't have to
+    # be real bd output; we're testing git's response to a
+    # tracked file's working-tree state, not bd semantics.
+    (clone / ".beads").mkdir()
+    (clone / ".beads" / "issues.jsonl").write_text(
+        '{"id":"task-A","status":"open"}\n'
+    )
+    _git(clone, "add", ".beads/issues.jsonl")
+    _git(clone, "commit", "-m", "seed bd state V0")
+    _git(clone, "push", "origin", "main")
+
+    # Locally modify AND stage the file (simulating bd's
+    # `export.auto=true` + `export.git-add=true` behavior on a
+    # `bd update`).
+    (clone / ".beads" / "issues.jsonl").write_text(
+        '{"id":"task-A","status":"in_progress"}\n'
+    )
+    _git(clone, "add", ".beads/issues.jsonl")
+    # Deliberately NOT commit. Tree now has a staged change.
+
+    # Push a new commit to bare remote that ALSO touches
+    # .beads/issues.jsonl with a DIFFERENT content (simulating
+    # a worker commit captured in a PR merge).
+    other = tmp_path / "other-remote"
+    other.mkdir()
+    _git(other, "clone", str(bare), ".")
+    (other / ".beads" / "issues.jsonl").write_text(
+        '{"id":"task-A","status":"in_progress","labels":["turma-pr:7"]}\n'
+    )
+    _git(other, "add", ".beads/issues.jsonl")
+    _git(other, "commit", "-m", "worker commit V1")
+    _git(other, "push", "origin", "main")
+
+    # PRECONDITION: working clone's tree is dirty for
+    # .beads/issues.jsonl. Without the revert, the next step's
+    # `fetch_and_ff_base` would refuse. We've reproduced the
+    # exact iter-2 smoke failure setup.
+    pre_status = _git(clone, "status", "--porcelain=v1").stdout
+    assert ".beads/issues.jsonl" in pre_status
+
+    # STEP 1: orchestrator reverts the bd-state export.
+    GitAdapter().revert_paths(clone, (".beads/issues.jsonl",))
+
+    # Working tree clean now.
+    post_revert_status = _git(clone, "status", "--porcelain=v1").stdout
+    assert post_revert_status == ""
+
+    # STEP 2: fetch_and_ff_base succeeds against real git.
+    GitAdapter().fetch_and_ff_base(clone, "main")
+
+    # Local main's HEAD matches origin's tip.
+    post_fetch_head = _rev_parse(clone, "HEAD")
+    post_fetch_origin = _rev_parse(clone, "origin/main")
+    assert post_fetch_head == post_fetch_origin
+
+    # Working tree still clean (the merge applied origin's V1
+    # cleanly).
+    post_fetch_status = _git(clone, "status", "--porcelain=v1").stdout
+    assert post_fetch_status == ""
+
+    # AND the file content reflects origin's V1 (the worker's
+    # version), not the locally-discarded "in_progress" version.
+    final_content = (clone / ".beads" / "issues.jsonl").read_text()
+    assert "turma-pr:7" in final_content
+
+
+def test_path_is_dirty_against_real_git(tmp_path: Path) -> None:
+    """Companion to the revert + fetch test: pin that
+    `path_is_dirty` correctly distinguishes clean / unstaged-
+    modified / staged-modified / untracked against real git's
+    `status --porcelain=v1` output."""
+    _, clone = _make_bare_and_clone(tmp_path)
+    adapter = GitAdapter()
+
+    # Clean baseline: file exists, no changes.
+    (clone / ".beads").mkdir()
+    (clone / ".beads" / "issues.jsonl").write_text("V0\n")
+    _git(clone, "add", ".beads/issues.jsonl")
+    _git(clone, "commit", "-m", "seed")
+    assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is False
+
+    # Unstaged modification.
+    (clone / ".beads" / "issues.jsonl").write_text("V1\n")
+    assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is True
+
+    # Staged modification.
+    _git(clone, "add", ".beads/issues.jsonl")
+    assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is True
+
+    # Untracked file at a different path → False (not Turma's
+    # concern).
+    _git(clone, "restore", "--staged", "--worktree",
+         ".beads/issues.jsonl")
+    (clone / "scratch.txt").write_text("untracked\n")
+    assert adapter.path_is_dirty(clone, "scratch.txt") is False
