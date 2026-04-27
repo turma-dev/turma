@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-27
+
 ### Added
 - Added `turma run --feature <name> [--max-tasks N] [--backend <id>] [--dry-run]` — a single-feature sequential swarm orchestrator that drives one Beads task at a time from `ready` to `closed` (or `failed` with a retry-budget decision). Each iteration runs `fetch_ready → claim → setup_worktree → run_worker → (sentinel dispatch) → commit → push → open_pr → close_task` against per-task git worktrees under `.worktrees/<feature>/<bd-id>/`, opens one PR per task against a configured base branch, and stops. Review, merge, and release remain human-driven.
 - Added the swarm adapter stack under `src/turma/swarm/`: `BeadsAdapter` extensions (`list_ready_tasks`, `list_in_progress_tasks`, `claim_task`, `retries_so_far`, `fail_task`, `get_task_body`), `WorktreeManager` for per-task worktree lifecycle, `WorkerBackend` protocol + `ClaudeCodeWorker` + a named backend registry, `GitAdapter` for the commit/push boundary, and `PullRequestAdapter` for `gh pr create` (including a read-only `find_open_pr_url_for_branch` for reconciliation).
