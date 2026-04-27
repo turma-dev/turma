@@ -369,8 +369,17 @@ The `bd-state:` warning fires because this iteration ran
 multiple bd mutations (sweep's unmark+close on task A, plus
 claim+mark on task B). The dolt db has all of them; main's
 working tree is clean (the revert ran after each); origin's
-`.beads/issues.jsonl` snapshot lags until task B's PR
-merges and the next `turma run` worker commit propagates.
+`.beads/issues.jsonl` snapshot does **not** include them yet.
+Per the v1 product decision documented in
+`docs/architecture.md` ("bd-state ownership"), tail mutations
+after the last worker commit have **no propagation guarantee**:
+a future `turma run` may produce a worker commit that captures
+them, but if no future worker run happens (e.g. the feature
+ships and the operator stops running Turma), task B's
+`mark_pr_open` stays in the local dolt db indefinitely. The
+escape hatch the warning points at — `bd export && git commit
+-- .beads/issues.jsonl` — is the manual fallback when an
+operator wants origin's snapshot caught up immediately.
 **Critical regression check** for
 `swarm-beads-state-merge-cleanliness`: `git status` between
 the two `turma run` invocations should report zero changes
