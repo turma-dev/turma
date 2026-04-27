@@ -49,6 +49,19 @@ class StubBeads:
     closed: list[str] = field(default_factory=list)
     pr_marked: list[tuple[str, int]] = field(default_factory=list)
     pr_unmarked: list[tuple[str, int]] = field(default_factory=list)
+    # `config_get` returns whatever's in this dict; default
+    # `export.interval=0` matches the Turma contract so existing
+    # tests don't need to opt in. Set to "60" (or anything non-zero)
+    # in a test that exercises the preflight refusal.
+    config_values: dict[str, str] = field(
+        default_factory=lambda: {"export.interval": "0"}
+    )
+    # Optional shared log for tests that need to pin call ordering
+    # ACROSS stubs (e.g. "config_get fires before path_is_dirty").
+    # Each entry is (stub_name, op, *args). Tests that don't care
+    # about cross-stub ordering leave this `None` and continue to
+    # use the per-stub `calls` list as before.
+    event_log: list[tuple] | None = None
 
     # read-only surfaces --------------------------------------------------
 
@@ -72,6 +85,12 @@ class StubBeads:
     def retries_so_far(self, task_id: str) -> int:
         self.calls.append(("retries_so_far", task_id))
         return self.retries.get(task_id, 0)
+
+    def config_get(self, key: str) -> str:
+        self.calls.append(("config_get", key))
+        if self.event_log is not None:
+            self.event_log.append(("beads", "config_get", key))
+        return self.config_values.get(key, "")
 
     # mutation surfaces ---------------------------------------------------
 
@@ -171,6 +190,8 @@ class StubGit:
     fetch_raises: PlanningError | None = None
     dirty_paths: set[str] = field(default_factory=set)
     calls: list[tuple] = field(default_factory=list)
+    # Optional shared log; see StubBeads.event_log for rationale.
+    event_log: list[tuple] | None = None
 
     def status_is_dirty(self, worktree: Path) -> bool:
         self.calls.append(("status_is_dirty", str(worktree)))
@@ -193,11 +214,15 @@ class StubGit:
         self.calls.append(
             ("fetch_and_ff_base", str(repo_root), base_branch)
         )
+        if self.event_log is not None:
+            self.event_log.append(("git", "fetch_and_ff_base", base_branch))
         if self.fetch_raises is not None:
             raise self.fetch_raises
 
     def path_is_dirty(self, repo_root: Path, path: str) -> bool:
         self.calls.append(("path_is_dirty", str(repo_root), path))
+        if self.event_log is not None:
+            self.event_log.append(("git", "path_is_dirty", path))
         return path in self.dirty_paths
 
     def revert_paths(self, repo_root: Path, paths: tuple[str, ...]) -> None:
@@ -591,6 +616,125 @@ def test_preflight_clean_bd_state_proceeds(tmp_path: Path) -> None:
     # AND fetch fired (preflight passed, run continued).
     assert any(
         c[0] == "fetch_and_ff_base" for c in git_stub.calls
+    )
+
+
+# ---------------------------------------------------------------------
+# bd export.interval preflight (swarm-worker-commit-bd-ownership Task 1)
+# ---------------------------------------------------------------------
+
+
+def test_run_swarm_refuses_when_export_interval_nonzero(
+    tmp_path: Path,
+) -> None:
+    """bd's default `export.interval=60s` defers exports across
+    bd commands, so any operator-side bd read between iterations
+    re-dirties `.beads/issues.jsonl` and the next preflight
+    refuses. Turma's contract is `export.interval=0`; preflight
+    refuses any other value with an actionable remediation."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        ready_queue=[(_ref("bd-1"),)],
+        config_values={"export.interval": "60"},
+    )
+    services, _, git_stub, _, _ = _make_services(tmp_path, beads=beads)
+
+    with pytest.raises(PlanningError) as exc:
+        run_swarm("oauth", services=services)
+
+    msg = str(exc.value)
+    assert "export.interval" in msg
+    # Names the expected value AND the remediation command so
+    # operators can fix it without reading the spec.
+    assert "0" in msg
+    assert "bd config set export.interval 0" in msg
+
+    # config_get WAS called for export.interval (the preflight ran).
+    assert ("config_get", "export.interval") in beads.calls
+    # No further phases ran: the bd-state-clean preflight must NOT
+    # fire, fetch must NOT fire, reconcile must NOT fire.
+    assert not any(
+        c[0] == "path_is_dirty" for c in git_stub.calls
+    )
+    assert not any(
+        c[0] == "fetch_and_ff_base" for c in git_stub.calls
+    )
+    assert not any(
+        c[0] == "list_in_progress_tasks" for c in beads.calls
+    )
+
+
+def test_run_swarm_proceeds_when_export_interval_zero(
+    tmp_path: Path,
+) -> None:
+    """With `export.interval=0` the preflight passes silently
+    and the run continues to the bd-state-clean preflight, then
+    fetch, then reconcile.
+
+    Pins the cross-stub ordering contract:
+    `config_get(export.interval)` must run BEFORE
+    `path_is_dirty(.beads/issues.jsonl)` must run BEFORE
+    `fetch_and_ff_base`. Both preflights are bd-aware and
+    feed the same operator decision tree; if they swap order,
+    operators see the wrong-symptom message first
+    (`.beads/issues.jsonl is dirty` instead of
+    `export.interval is 60`)."""
+    _scratch_feature(tmp_path)
+    event_log: list[tuple] = []
+    beads = StubBeads(
+        ready_queue=[],
+        config_values={"export.interval": "0"},
+        event_log=event_log,
+    )
+    git = StubGit(event_log=event_log)
+    services, *_ = _make_services(tmp_path, beads=beads, git=git)
+
+    run_swarm("oauth", services=services)
+
+    # Filter to the three ordering-relevant events.
+    relevant = [
+        e for e in event_log
+        if e in (
+            ("beads", "config_get", "export.interval"),
+            ("git", "path_is_dirty", ".beads/issues.jsonl"),
+            ("git", "fetch_and_ff_base", "main"),
+        )
+    ]
+    # Each event fires exactly once during a single non-dry-run
+    # invocation.
+    assert relevant == [
+        ("beads", "config_get", "export.interval"),
+        ("git", "path_is_dirty", ".beads/issues.jsonl"),
+        ("git", "fetch_and_ff_base", "main"),
+    ], (
+        "preflight ordering regressed; expected "
+        "config_get → path_is_dirty → fetch_and_ff_base, "
+        f"observed {relevant!r}"
+    )
+
+
+def test_dry_run_skips_export_interval_preflight(
+    tmp_path: Path,
+) -> None:
+    """`--dry-run` doesn't mutate bd state, so the
+    export.interval throttle is irrelevant for safety. Dry-run
+    skips this preflight (consistent with how it skips the
+    bd-state-clean preflight)."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        ready_queue=[(_ref("bd-1"),)],
+        config_values={"export.interval": "60"},
+    )
+    services, *_ = _make_services(tmp_path, beads=beads)
+
+    # Should NOT raise — dry-run bypasses both bd-aware
+    # preflights.
+    run_swarm("oauth", services=services, dry_run=True)
+
+    # The config_get call MUST NOT have fired in the dry-run path
+    # — skipped means "did not run", not "ran and ignored result".
+    assert not any(
+        c[0] == "config_get" for c in beads.calls
     )
 
 
