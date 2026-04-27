@@ -272,6 +272,27 @@ def _preflight(feature: str, repo_root: Path) -> None:
 
 
 _BEADS_EXPORT_PATH = ".beads/issues.jsonl"
+_BEADS_EXPORT = (_BEADS_EXPORT_PATH,)
+
+
+def _revert_beads_export(services: SwarmServices) -> None:
+    """Revert main's working-tree state of `.beads/issues.jsonl`
+    after a Turma-initiated bd update.
+
+    bd's `export.auto=true` + `export.git-add=true` (defaults)
+    mean every `bd update` writes AND stages the file. The dolt
+    db (the source of truth for bd state) keeps the mutation;
+    this revert disposes of the export-file dirtiness so main's
+    working tree stays clean for the next iteration's
+    `fetch_and_ff_base`.
+
+    See `openspec/changes/swarm-beads-state-merge-cleanliness/
+    design.md` "Adapter contract" for why this targets
+    `restore --staged --worktree` (NOT `git checkout --`) and
+    why the revert is sound (dolt remains canonical; the
+    export is regenerable).
+    """
+    services.git.revert_paths(services.repo_root, _BEADS_EXPORT)
 
 
 def _preflight_beads_state_clean(services: SwarmServices) -> None:
@@ -367,6 +388,7 @@ def _apply_repairs(
                 # `_run_single_task` adopted in Task 3.
                 pr_number = _pr_number_from_url(pr_url)
                 services.beads.mark_pr_open(task_id, pr_number)
+                _revert_beads_export(services)
                 print(
                     f"repair: {task_id} → labelled "
                     f"(PR already open at {pr_url}; awaiting merge)"
@@ -496,6 +518,9 @@ def _advance_merged_prs(
                 services.beads.close_task(task.id)
                 ref = _ref_for(feature, task.id, services)
                 services.worktree.cleanup(ref)
+                # Both unmark + close fired bd's hook; one revert
+                # at end of arm clears the export-file dirtiness.
+                _revert_beads_export(services)
 
         elif pr_state.state == "CLOSED":
             print(
@@ -575,6 +600,10 @@ def _main_loop(
             print(f"swarm: claim race on {task.id}; skipping ({exc})")
             continue
 
+        # bd's hook dirtied .beads/issues.jsonl on claim_task; revert
+        # to keep main's working tree clean across iterations.
+        _revert_beads_export(services)
+
         iterations += 1
         print(f"swarm: claimed {task.id} — {task.title}")
 
@@ -649,6 +678,7 @@ def _run_single_task(
     # (`_advance_merged_prs`, future task) consumes the label.
     pr_number = _pr_number_from_url(pr_url)
     services.beads.mark_pr_open(task.id, pr_number)
+    _revert_beads_export(services)
     print(
         f"swarm: opened {task.id} (PR: {pr_url}; awaiting merge)"
     )
@@ -707,6 +737,9 @@ def _handle_failure(
         retries_so_far=retries,
         max_retries=services.max_retries,
     )
+    # fail_task fires bd's hook → main's tree dirty. Revert so
+    # the next iteration's fetch_and_ff_base stays clean.
+    _revert_beads_export(services)
     exhausted = (retries + 1) > services.max_retries
     if exhausted:
         print(
@@ -756,6 +789,7 @@ def _complete_pending_task(
     )
     pr_number = _pr_number_from_url(pr_url)
     services.beads.mark_pr_open(task_id, pr_number)
+    _revert_beads_export(services)
     return pr_url
 
 
