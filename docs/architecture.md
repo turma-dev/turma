@@ -208,6 +208,41 @@ matching `close_task` + `cleanup_worktree` only fires once
 the PR has been observed as MERGED by the next run's
 `merge_advancement_phase`.
 
+### bd-state ownership
+
+bd's dolt database (`.beads/embeddeddolt/`) is gitignored
+and is the source of truth for bd state. The tracked file
+`.beads/issues.jsonl` is a derived text export that bd's
+hooks rewrite on every `bd update`.
+
+Turma owns the working-tree state of `.beads/issues.jsonl`
+on main. After each Turma-initiated bd mutation
+(`claim_task`, `mark_pr_open`, `unmark_pr_open`,
+`close_task`, `fail_task`), the orchestrator reverts the
+file to its index version via `GitAdapter.revert_paths`
+(`git restore --staged --worktree -- .beads/issues.jsonl`,
+needed because bd's `export.git-add=true` default also
+stages the file). The dolt db keeps the mutation; the
+export gets regenerated when the next worker commit's
+pre-commit hook fires in a worktree.
+
+This keeps `fetch_and_ff_base`'s `merge --ff-only` step
+able to run cleanly between `turma run` iterations. The
+2026-04-26 chained-flow live smoke caught the dirty-tree
+failure mode that motivated this contract; see
+`openspec/changes/swarm-beads-state-merge-cleanliness/`
+for the full rationale, including the v1 product
+decision to accept weakened cross-clone visibility (tail
+mutations live in local dolt only until a future worker
+commit captures them) and the operator-visible warning
+that surfaces this lag at end of run.
+
+A preflight check at the top of `run_swarm` refuses to
+start if `.beads/issues.jsonl` is already dirty —
+Turma's revert-after-mutation invariant only holds from a
+clean baseline, so pre-existing operator changes must be
+triaged before Turma takes ownership.
+
 ### Authority model
 
 When reconciling interrupted state, sources are walked in order of
