@@ -160,7 +160,7 @@
       tests added).
 - [x] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
-- [ ] Live re-run of the chained smoke against
+- [x] Live re-run of the chained smoke against
       `khanhgithead/turma-run-smoke` (left unchecked
       until the operator walks the runbook end-to-end
       against the live scratch), walking
@@ -180,7 +180,7 @@
       - Verify task A closed without `turma-pr:`
         residue; task B's worktree CHAINED.txt has both
         lines.
-- [ ] On smoke success: tick the manual-smoke `[ ]` box
+- [x] On smoke success: tick the manual-smoke `[ ]` box
       on
       `openspec/changes/swarm-merge-advancement-stabilization/
       tasks.md` (Task 7's last unchecked box) as a

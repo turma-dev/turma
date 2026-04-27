@@ -63,7 +63,7 @@ flag-based simplifications available.
 
 ### 1. GitAdapter: add `revert_paths` and `path_is_dirty`
 
-- [ ] In `src/turma/swarm/git.py`, add
+- [x] In `src/turma/swarm/git.py`, add
       `revert_paths(repo_root: Path, paths: tuple[str,
       ...]) -> None`. argv pinned:
       ```
@@ -78,14 +78,14 @@ flag-based simplifications available.
       the worktree; the index would still be dirty
       from bd's stage and the next `merge --ff-only`
       would still refuse.
-- [ ] Empty paths tuple → no subprocess call, return
+- [x] Empty paths tuple → no subprocess call, return
       None immediately. Don't fire git with zero paths
       (it has surprising defaults).
-- [ ] Failure mapping: non-zero exit → `PlanningError(
+- [x] Failure mapping: non-zero exit → `PlanningError(
       "git restore failed: exit <N>\n<stderr>")`.
       Preserves stderr verbatim so operators can read
       the actual git error.
-- [ ] Also add `path_is_dirty(repo_root: Path, path:
+- [x] Also add `path_is_dirty(repo_root: Path, path:
       str) -> bool`. argv pinned:
       ```
       git -C <repo_root> status --porcelain=v1 -- <path>
@@ -95,7 +95,7 @@ flag-based simplifications available.
       ` M`, `M `, `MM`, `A `, etc.). Returns False on
       empty stdout AND on `??`-prefixed lines (untracked
       files at that path are not Turma's business).
-- [ ] Tests for `revert_paths` in `tests/
+- [x] Tests for `revert_paths` in `tests/
       test_swarm_git.py`:
       - argv-pin: single subprocess.run call with the
         right argv.
@@ -104,7 +104,7 @@ flag-based simplifications available.
       - multi-path: paths passed verbatim in argv
         order.
       - failure surfaces stderr.
-- [ ] Tests for `path_is_dirty` in
+- [x] Tests for `path_is_dirty` in
       `tests/test_swarm_git.py`:
       - argv-pin.
       - clean (empty stdout) returns False.
@@ -119,12 +119,12 @@ flag-based simplifications available.
 
 ### 2. Preflight: refuse to start on dirty bd-state file
 
-- [ ] In `src/turma/swarm/_orchestrator.py`, add
+- [x] In `src/turma/swarm/_orchestrator.py`, add
       `_preflight_beads_state_clean(services)` helper
       that raises `PlanningError` if
       `services.git.path_is_dirty(services.repo_root,
       ".beads/issues.jsonl")` returns True.
-- [ ] The error message names the file and gives the
+- [x] The error message names the file and gives the
       three triage commands operators need:
       ```
       .beads/issues.jsonl has uncommitted changes in
@@ -137,14 +137,14 @@ flag-based simplifications available.
         git stash push -- .beads/issues.jsonl    # save aside
         git restore --staged --worktree -- .beads/issues.jsonl    # discard
       ```
-- [ ] Call site in `run_swarm`: invoke
+- [x] Call site in `run_swarm`: invoke
       `_preflight_beads_state_clean(services)` after
       the existing `_preflight(...)` (spec/APPROVED/
       TRANSCRIBED checks), before `fetch_and_ff_base`.
       **Skipped under `--dry-run`** since dry-run
       doesn't mutate bd state; dry-run readouts
       against a dirty bd-state file are safe.
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - New `test_run_swarm_refuses_when_beads_state_dirty`:
         StubGit reports the file dirty → run_swarm
         raises typed PlanningError with the file name
@@ -162,7 +162,7 @@ flag-based simplifications available.
 
 ### 3. Orchestrator: revert export after each bd mutation
 
-- [ ] In `src/turma/swarm/_orchestrator.py`, add a
+- [x] In `src/turma/swarm/_orchestrator.py`, add a
       module-private constant `_BEADS_EXPORT =
       (".beads/issues.jsonl",)` and a small helper:
       ```python
@@ -171,7 +171,7 @@ flag-based simplifications available.
               services.repo_root, _BEADS_EXPORT
           )
       ```
-- [ ] Call sites — one revert per Turma bd mutation
+- [x] Call sites — one revert per Turma bd mutation
       point:
       1. `_run_single_task` after `claim_task`
       2. `_run_single_task` after `mark_pr_open`
@@ -186,7 +186,7 @@ flag-based simplifications available.
       6. `_advance_merged_prs` CLOSED dispatch after
          the `unmark_pr_open` + `_handle_failure`
          pair (single revert at end of arm)
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - `StubGit.revert_paths` records the call (path
         tuple captured in calls list).
       - `test_single_task_happy_loop` git_steps
@@ -219,7 +219,7 @@ stay in local dolt only. Operators need a runtime
 signal that this happened so they can decide whether
 to manually `bd export && git commit` the state.
 
-- [ ] At the end of `run_swarm` (after `_main_loop`
+- [x] At the end of `run_swarm` (after `_main_loop`
       returns successfully, after any final
       mutation point), the orchestrator detects
       whether local main's bd db is ahead of
@@ -231,7 +231,7 @@ to manually `bd export && git commit` the state.
       Or simpler: track whether any
       `_revert_beads_export` calls fired during the
       run and warn unconditionally on yes.
-- [ ] The warning is a single line printed to stdout
+- [x] The warning is a single line printed to stdout
       after the existing `swarm: no ready tasks
       remain; done` (or whatever final orchestrator
       log line fires):
@@ -243,11 +243,11 @@ to manually `bd export && git commit` the state.
       ```
       Format pinned by tests so operator log filters
       can match it.
-- [ ] Skipped on the failure path (preflight error,
+- [x] Skipped on the failure path (preflight error,
       fetch error, etc.). The warning only fires on
       successful run completion where bd mutations
       actually fired.
-- [ ] Tests in `tests/test_swarm_run.py`:
+- [x] Tests in `tests/test_swarm_run.py`:
       - New
         `test_run_swarm_warns_on_unpropagated_tail_mutations`:
         run a happy-path turma run; capsys captures
@@ -261,7 +261,7 @@ to manually `bd export && git commit` the state.
       - Dry-run: warning never fires (dry-run skips
         all mutation paths). Existing dry-run test
         extended to assert the warning is absent.
-- [ ] Docs: include the warning line in
+- [x] Docs: include the warning line in
       `docs/smoke-turma-run.md` Step 3a's expected
       output so operators know to expect it. Brief
       explanation paragraph: "This warning is the v1
@@ -271,7 +271,7 @@ to manually `bd export && git commit` the state.
 
 ### 5. Real-git integration test
 
-- [ ] Add a new case to
+- [x] Add a new case to
       `tests/test_swarm_git_integration.py`
       exercising the revert + fetch sequence against
       real git:
@@ -295,14 +295,14 @@ to manually `bd export && git commit` the state.
          working_clone, "main")`.
       7. Assert local main's HEAD matches origin's
          tip; working tree clean.
-- [ ] This is the regression contract for the iter-2
+- [x] This is the regression contract for the iter-2
       smoke finding: a tracked file gets dirty
       locally, gets reverted, fetch+merge proceeds
       cleanly. Real git, not mocks.
 
 ### 6. Docs + CHANGELOG amendment
 
-- [ ] `docs/architecture.md` Execution section: add a
+- [x] `docs/architecture.md` Execution section: add a
       short "bd-state ownership" subsection between
       the state-machine block and the authority-model
       block. Three sentences:
@@ -320,15 +320,15 @@ to manually `bd export && git commit` the state.
       - This keeps `fetch_and_ff_base`'s `merge
         --ff-only` step able to run cleanly between
         iterations.
-- [ ] `CHANGELOG.md` `[Unreleased]/Fixed`: amend the
+- [x] `CHANGELOG.md` `[Unreleased]/Fixed`: amend the
       prior arc's roll-up entry with one bullet
       naming the iter-2 dirty-tree finding, the
       orchestrator-side `revert_paths` fix, and the
       bd-state-ownership decision. Reference this
       arc.
-- [ ] No README changes. The "Base-branch sync"
+- [x] No README changes. The "Base-branch sync"
       subsection's user-facing prose is unaffected.
-- [ ] **`docs/smoke-turma-run.md` Step 3a gains two
+- [x] **`docs/smoke-turma-run.md` Step 3a gains two
       `git status --short` regression checks** — these
       are the core regression contract for this arc and
       need to live in the runbook so the smoke is
@@ -376,7 +376,7 @@ to manually `bd export && git commit` the state.
       ordering pin, real-git integration test).
 - [ ] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
-- [ ] Live re-run of the chained smoke against
+- [x] Live re-run of the chained smoke against
       `khanhgithead/turma-run-smoke` (left unchecked
       until the operator walks the runbook end-to-end
       against the live scratch). Walk Step 3a:
@@ -402,7 +402,7 @@ to manually `bd export && git commit` the state.
       - Verify task A closed without `turma-pr:`
         residue; task B's worktree LADDER.txt has
         both lines; task B's PR opened cleanly.
-- [ ] On smoke success: tick the manual-smoke `[ ]`
+- [x] On smoke success: tick the manual-smoke `[ ]`
       box on this arc's tasks.md (Task 7) AND on
       `swarm-fetch-and-ff-base-correction` (Task 4)
       AND on `swarm-merge-advancement-stabilization`

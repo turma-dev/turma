@@ -209,7 +209,7 @@
       regression test.
 - [x] No new runtime deps in `pyproject.toml`. `git`
       already a prerequisite.
-- [ ] Manual smoke against `khanhgithead/turma-run-smoke`
+- [x] Manual smoke against `khanhgithead/turma-run-smoke`
       (left unchecked until the operator walks the runbook
       end-to-end against the live scratch; the chained-flow
       sub-step is now Step 3a in
