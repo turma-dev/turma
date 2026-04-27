@@ -201,6 +201,17 @@ def run_swarm(
     # warning reflects only this invocation's bd updates.
     services._bd_mutations_during_run = 0
 
+    # bd export.interval=0 is a Turma contract — see
+    # `swarm-worker-commit-bd-ownership`. The default 60s throttle
+    # defers exports to the next bd command (read or write), so any
+    # operator-side `bd list --json` between iterations re-dirties
+    # `.beads/issues.jsonl` and the next bd-state-clean preflight
+    # refuses. Verifying this knob FIRST surfaces the operator's
+    # config gap before the bd-state-clean preflight blames the
+    # symptom. Skipped under --dry-run.
+    if not dry_run:
+        _preflight_bd_export_interval(services)
+
     # Refuse to start if `.beads/issues.jsonl` is already dirty
     # in main's working tree. Turma's revert-after-mutation
     # invariant (see swarm-beads-state-merge-cleanliness)
@@ -326,6 +337,44 @@ def _revert_beads_export(services: SwarmServices) -> None:
     """
     services.git.revert_paths(services.repo_root, _BEADS_EXPORT)
     services._bd_mutations_during_run += 1
+
+
+def _preflight_bd_export_interval(services: SwarmServices) -> None:
+    """Refuse to start if bd's `export.interval` is not 0.
+
+    bd's default `export.interval=60` (seconds) defers auto-
+    exports across bd commands; the next bd command (read OR
+    write) flushes the deferred export and dirties
+    `.beads/issues.jsonl`. With Turma's revert-after-mutation
+    contract in place, that dirtying surfaces as a refused
+    bd-state-clean preflight at the start of the NEXT run —
+    blaming the operator for a config gap they may not realize
+    they have.
+
+    Pinning the contract here means operators get a clear
+    message naming the exact knob and the exact remediation
+    command. The setting persists in `.beads/config.yaml` and
+    is committed alongside the project's bd setup.
+
+    See `openspec/changes/swarm-worker-commit-bd-ownership/`
+    for the full rationale and the empirical model behind the
+    knob's behavior.
+    """
+    value = services.beads.config_get("export.interval")
+    if value != "0":
+        observed = value or "(unset)"
+        raise PlanningError(
+            "turma run requires `bd config get export.interval` "
+            f"to return 0; observed: {observed}. The default 60s "
+            "throttle defers bd's auto-export across iterations. "
+            "Any bd command between turma runs (including reads "
+            "like `bd list --json`) flushes the deferred export "
+            "and re-dirties .beads/issues.jsonl, causing the next "
+            "preflight to refuse.\n"
+            "Run:\n"
+            "  bd config set export.interval 0\n"
+            "The setting persists in .beads/config.yaml."
+        )
 
 
 def _preflight_beads_state_clean(services: SwarmServices) -> None:
