@@ -106,6 +106,25 @@ For now, use this practical contributor flow:
 4. update docs/config/examples if the public contract changed
 5. keep history legible by separating unrelated concerns into separate commits
 
+## Testing Discipline
+
+This repo expects test-first work when behavior is testable.
+
+Practical rules:
+
+- write the failing test first for behavior changes when the behavior can be
+  exercised in automation
+- pin each acceptance criterion with at least one test, or explicitly mark it
+  as manual-only / operator-verified
+- do not treat "tests added later" as equivalent to test-first unless there is
+  a concrete reason the test had to wait
+- if a behavior change ships without automated coverage, explain the gap in the
+  PR description and in review
+
+This is a repo policy and review standard, not a mechanical git restriction.
+Branch protection, CI, and review enforce it in practice; `AGENTS.md` defines
+the expected contributor behavior.
+
 Current validation baseline:
 
 ```bash
