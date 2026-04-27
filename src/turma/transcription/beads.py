@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 
 from turma.errors import PlanningError
@@ -669,16 +670,45 @@ class BeadsAdapter:
         )
         return result.stdout.strip()
 
+    def export(
+        self,
+        *,
+        output_path: "Path",
+        cwd: "Path | None" = None,
+    ) -> None:
+        """Export bd's current state to `output_path`.
+
+        argv: `bd export -o <output_path>`. The output path is
+        passed verbatim — callers are responsible for passing
+        an absolute path so cwd-relative ambiguity in bd's path
+        resolution can't bite. The `cwd` kwarg pins where the
+        subprocess runs; the worker-commit-boundary protocol
+        passes `cwd=services.repo_root` so main's bd db is the
+        export source (see `openspec/changes/swarm-worker-
+        commit-bd-ownership/design.md`).
+
+        Failure → `PlanningError("bd export failed: exit <N>\\n
+        <stderr>")`. bd's stderr is preserved verbatim so
+        operators can read the actual bd error.
+        """
+        self._run(
+            ["bd", "export", "-o", str(output_path)],
+            step="bd export",
+            cwd=cwd,
+        )
+
     @staticmethod
     def _run(
         argv: list[str],
         *,
         step: str,
+        cwd: "Path | None" = None,
     ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             argv,
             capture_output=True,
             text=True,
+            cwd=cwd,
         )
         if result.returncode != 0:
             detail = (

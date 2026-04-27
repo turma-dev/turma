@@ -96,6 +96,84 @@ class GitAdapter:
             )
         return sha
 
+    def commit_all_with_bd_export(
+        self,
+        worktree: Path,
+        message: str,
+        *,
+        beads,  # type: ignore[no-untyped-def] -- duck-typed; see _FakeBeads in tests
+        repo_root: Path,
+    ) -> str:
+        """Worker-commit boundary protocol — see
+        `openspec/changes/swarm-worker-commit-bd-ownership/`.
+
+        Five-step sequence per worker commit:
+
+        1. `beads.export(output_path=<worktree>/.beads/issues.jsonl,
+           cwd=repo_root)` — captures main's bd db state at the
+           commit boundary. Absolute output path; cwd pinned so
+           there is no cwd-relative ambiguity in bd's path
+           resolution (the upstream defect this protocol works
+           around).
+        2. Assert the destination file exists. If bd reported
+           zero exit but the path does not exist (the upstream-
+           fix edge case), raise PlanningError naming the path
+           BEFORE any git mutation runs.
+        3. `git status --porcelain=v1` empty-commit guard.
+        4. `git -C <worktree> add -A` to stage everything,
+           including the just-exported `.beads/issues.jsonl`.
+        5. `git -C <worktree> -c core.hooksPath=/dev/null commit
+           -m <message>` to commit with bd's pre-commit hook
+           bypassed locally. The hook misroutes the export to
+           the worktree's repo root when fired against the index
+           shape that `bd prime` itself creates; bypassing it for
+           this one commit produces the canonical shape.
+
+        Returns the new commit SHA via a final `rev-parse HEAD`.
+
+        Failure-boundary contract: ANY of the five steps raising
+        means zero git mutations occur after the failing step.
+        Either all steps run (and the commit captures the
+        canonical shape) or no commit is generated. There is no
+        partial-commit intermediate state.
+        """
+        beads_export_path = worktree / ".beads" / "issues.jsonl"
+        beads.export(output_path=beads_export_path, cwd=repo_root)
+        if not beads_export_path.exists():
+            raise PlanningError(
+                "bd export reported success but destination path "
+                f"is missing: {beads_export_path}"
+            )
+
+        if not self.status_is_dirty(worktree):
+            raise PlanningError(
+                "nothing to commit: worktree is clean. "
+                "Did the worker actually modify any tracked files?"
+            )
+
+        self._run(
+            ["git", "-C", str(worktree), "add", "-A"],
+            step="git add",
+        )
+        self._run(
+            [
+                "git", "-C", str(worktree),
+                "-c", "core.hooksPath=/dev/null",
+                "commit", "-m", message,
+            ],
+            step="git commit",
+        )
+        result = self._run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            step="git rev-parse",
+        )
+        sha = result.stdout.strip()
+        if not sha:
+            raise PlanningError(
+                "git rev-parse HEAD returned empty stdout"
+            )
+        return sha
+
     def push_branch(
         self,
         worktree: Path,
