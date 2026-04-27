@@ -358,7 +358,7 @@ counterproductive; this arc references bd#3311 directly.
 
 ### 7. Release gate
 
-- [ ] After smoke passes and tasks.md is updated, the
+- [x] After smoke passes and tasks.md is updated, the
       four correction arcs together with the original
       `swarm-orchestration` arc satisfy the 0.3.0 release
       prerequisites. Cutting 0.3.0 is a separate
