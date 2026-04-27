@@ -255,28 +255,31 @@ def test_path_is_dirty_against_real_git(tmp_path: Path) -> None:
     """Companion to the revert + fetch test: pin that
     `path_is_dirty` correctly distinguishes clean / unstaged-
     modified / staged-modified / untracked against real git's
-    `status --porcelain=v1` output."""
+    `status --porcelain=v1` output. All four cases query the
+    SAME path (`.beads/issues.jsonl`) — the contract is
+    specifically about how this path's working-tree state maps
+    to True/False, including the case where the path exists
+    untracked rather than as a tracked file."""
     _, clone = _make_bare_and_clone(tmp_path)
     adapter = GitAdapter()
 
-    # Clean baseline: file exists, no changes.
+    # Untracked: file exists at the path but was never `git
+    # add`-ed. `git status --porcelain=v1` emits `?? <path>`.
+    # Per the contract, an untracked file at the bd-state path
+    # is the operator's business, not Turma's — returns False.
     (clone / ".beads").mkdir()
-    (clone / ".beads" / "issues.jsonl").write_text("V0\n")
-    _git(clone, "add", ".beads/issues.jsonl")
-    _git(clone, "commit", "-m", "seed")
+    (clone / ".beads" / "issues.jsonl").write_text("untracked\n")
     assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is False
 
-    # Unstaged modification.
+    # Tracked + clean: commit it. No changes since HEAD.
+    _git(clone, "add", ".beads/issues.jsonl")
+    _git(clone, "commit", "-m", "seed bd state")
+    assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is False
+
+    # Unstaged modification (` M` prefix in porcelain).
     (clone / ".beads" / "issues.jsonl").write_text("V1\n")
     assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is True
 
-    # Staged modification.
+    # Staged modification (`M ` prefix in porcelain).
     _git(clone, "add", ".beads/issues.jsonl")
     assert adapter.path_is_dirty(clone, ".beads/issues.jsonl") is True
-
-    # Untracked file at a different path → False (not Turma's
-    # concern).
-    _git(clone, "restore", "--staged", "--worktree",
-         ".beads/issues.jsonl")
-    (clone / "scratch.txt").write_text("untracked\n")
-    assert adapter.path_is_dirty(clone, "scratch.txt") is False
