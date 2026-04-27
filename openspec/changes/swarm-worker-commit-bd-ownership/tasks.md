@@ -133,7 +133,20 @@ local workaround.
         flag re-introduce Finding 2).
       - Empty `git add -A` → status_is_dirty refusal (the
         existing empty-commit guard still applies).
+      - **Failure-boundary contract — no partial commits.**
+        When bd export raises, no `git add -A` and no
+        `git commit` subprocess fires (assert via the
+        stub recorder's call list). Same for the
+        post-export "destination missing" check: when
+        the destination assertion fails, no `git add` /
+        `git commit` follows. The protocol is binary —
+        either all four steps run or zero git mutations
+        do.
       - bd export failure → PlanningError surfaces stderr.
+      - bd export reports zero exit but destination file
+        does not exist → PlanningError("bd export reported
+        success but destination path is missing: <path>");
+        no commit follows.
       - git commit failure → PlanningError surfaces stderr.
 - [ ] Unit tests for `BeadsAdapter.export` in
       `tests/test_swarm_beads_extensions.py`:
@@ -143,8 +156,15 @@ local workaround.
 
 ### 3. Real-git integration test: the reproducer shape
 
-- [ ] Add a new case to
-      `tests/test_swarm_git_integration.py`:
+The buggy-shape assumption lives in **exactly one** dedicated
+integration test (the negative control below). Other tests in
+this arc — including the happy-path integration test and all
+unit tests — must NOT encode the buggy shape; they assert
+correctness, not the absence of bugness in upstream bd. This
+isolation makes the eventual upstream-bd-fix observable in
+exactly one place when it ships.
+
+- [ ] Happy-path test:
       `test_commit_all_with_bd_export_against_real_git_and_real_bd`.
       Skipif `bd` is not on PATH (alongside the existing
       `git`-skipif).
@@ -160,12 +180,7 @@ local workaround.
          avoid the documented `bd init` hang on macOS).
       2. Create a registered worktree via plain
          `git worktree add`.
-      3. Run `bd prime` inside the worktree (pin: this
-         step deletes the worktree's
-         `.beads/issues.jsonl` from the working tree —
-         assert the deletion explicitly so a future bd
-         release that fixes this surfaces the assertion
-         failure).
+      3. Run `bd prime` inside the worktree.
       4. Write a non-bd file inside the worktree
          (`echo > STAGE.txt`).
       5. Call
@@ -175,22 +190,36 @@ local workaround.
          - touches `STAGE.txt` (added)
          - touches `.beads/issues.jsonl` (added or
            modified, depending on whether HEAD had it)
-         - does NOT add `issues.jsonl` at root (the
-           bug shape) — explicit assertion against the
-           tree at the new commit
+         - does NOT add `issues.jsonl` at root
          - the worktree's `.beads/issues.jsonl` content
            matches `bd export` from main's repo root at
            commit time (canonical state propagation
            preserved)
-- [ ] Negative control test in the same file:
-      `test_plain_commit_after_bd_prime_reproduces_bug_shape`.
-      Same setup but uses plain `git -C <worktree>
-      add -A && git commit` (no hook bypass, no explicit
-      export). Asserts the BUGGY shape (root `issues.jsonl`
-      added, `.beads/issues.jsonl` deleted). This pins the
-      reproducer so a future bd release that fixes the
-      defect surfaces an unexpected pass — at which point
-      this arc's hook-bypass becomes optional.
+- [ ] **Negative control test** (the SOLE place that
+      asserts the upstream buggy shape):
+      `test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug`.
+      Same setup as the happy-path test, but uses plain
+      `git -C <worktree> add -A && git commit` (no hook
+      bypass, no explicit export). Asserts the BUGGY shape:
+      root `issues.jsonl` added AND `.beads/issues.jsonl`
+      deleted.
+      
+      Includes an inline test docstring that says verbatim:
+      
+      > "If this test starts failing, upstream bd has
+      > likely fixed the pre-commit hook path-resolution
+      > defect this workaround was written for. See
+      > `openspec/changes/swarm-worker-commit-bd-
+      > ownership/design.md` and re-evaluate whether the
+      > hook bypass in `commit_all_with_bd_export` is
+      > still needed. Do NOT silence this test — read the
+      > triage chain and consider removing or simplifying
+      > the workaround."
+      
+      The docstring is the single source of truth on
+      what an unexpected pass means. No other test
+      mentions the buggy shape. No other test gives
+      removal guidance.
 
 ### 4. Docs + CHANGELOG amendment
 
