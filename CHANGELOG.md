@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+- Added per-task lifecycle progress output to `turma run`. As the main loop drives each claimed task, it now prints `worktree: setup <id>`, `worker: running <id> (timeout <N>s)` (emitted before the worker blocks, so the run's longest silent stretch is announced upfront), `commit: <id>`, and `push: <id>`, alongside the existing `swarm: claimed` / `swarm: opened` lines. Additive, deterministic, text-only; failure paths are unchanged and still surface through `swarm: <id> failed …`. See `openspec/changes/swarm-run-progress-output/`.
+
 ## [0.3.0] - 2026-04-27
 
 ### Added

@@ -208,6 +208,15 @@ matching `close_task` + `cleanup_worktree` only fires once
 the PR has been observed as MERGED by the next run's
 `merge_advancement_phase`.
 
+As each claimed task moves through that path, the loop emits
+compact per-task progress lines — `worktree: setup <id>`,
+`worker: running <id> (timeout <N>s)` (printed before the
+worker blocks, so the run's longest silent stretch is
+announced), `commit: <id>`, and `push: <id>` — alongside the
+existing `swarm: claimed` / `swarm: opened` lines. The state
+machine is unchanged; the output is additive (see
+`openspec/changes/swarm-run-progress-output/`).
+
 ### bd-state ownership
 
 bd's dolt database (`.beads/embeddeddolt/`) is gitignored

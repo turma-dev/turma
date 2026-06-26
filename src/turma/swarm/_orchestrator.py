@@ -779,6 +779,7 @@ def _run_single_task(
         task_id=task.id,
         base_branch=services.base_branch,
     )
+    print(f"worktree: setup {task.id}")
     _clear_sentinels(ref.path)
     description = services.beads.get_task_body(task.id)
     invocation = WorkerInvocation(
@@ -789,6 +790,9 @@ def _run_single_task(
         timeout_seconds=services.worker_timeout,
     )
     worker = services.worker_factory()
+    # Announce the long wait before blocking on worker.run — this is
+    # the run's longest silent stretch (up to worker_timeout).
+    print(f"worker: running {task.id} (timeout {services.worker_timeout}s)")
     result = worker.run(invocation)
 
     if result.status != "success":
@@ -806,7 +810,9 @@ def _run_single_task(
             beads=services.beads,
             repo_root=services.repo_root,
         )
+        print(f"commit: {task.id}")
         services.git.push_branch(ref.path, ref.branch)
+        print(f"push: {task.id}")
     except PlanningError as exc:
         return _handle_failure(services, task.id, str(exc))
 
