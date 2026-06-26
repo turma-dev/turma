@@ -45,7 +45,7 @@ without overstating that pool independence alone solves throughput.
 └── pyproject.toml
 ```
 
-## CLI Scaffold
+## CLI Commands
 
 Default development workflow:
 
@@ -53,10 +53,16 @@ Default development workflow:
 uv sync
 uv run turma --help
 uv run turma init
-uv run turma plan --feature oauth-auth
-uv run turma run --feature oauth-auth
-uv run turma status
+uv run turma plan --feature oauth-auth                    # author/critic loop; suspends at the human gate
+uv run turma plan --feature oauth-auth --resume --approve  # approve: writes the APPROVED marker
+uv run turma plan-to-beads --feature oauth-auth           # transcribe the approved plan into Beads tasks
+uv run turma run --feature oauth-auth                     # orchestrate execution against the Beads DAG
+uv run turma status --feature oauth-auth
 ```
+
+`turma run` preflight refuses to start until the feature has an `APPROVED`
+marker (from the plan human gate) and a `TRANSCRIBED.md` (from
+`turma plan-to-beads`) — see the Resume CLI and Plan-to-Beads sections below.
 
 Current command status:
 
@@ -102,7 +108,9 @@ is currently the strongest validated path. OpenCode transport is validated,
 but provider/model quality varies. Gemini requires the `gemini` CLI
 (`npm install -g @google/gemini-cli`).
 
-It does not yet commit changes or orchestrate execution.
+`turma plan` only produces and critiques spec artifacts; it does not commit
+changes or orchestrate execution. Transcription is handled by
+`turma plan-to-beads` and execution by `turma run` (see below).
 
 ## Resume CLI
 
