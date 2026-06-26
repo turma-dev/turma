@@ -6,9 +6,10 @@ guidance lives under `.agents/`.
 
 ## Purpose
 
-Turma is a provider-pool-aware multi-agent coding orchestrator. The repo is
-currently an early Python scaffold plus design documentation. The long-term
-workflow is:
+Turma is a provider-pool-aware multi-agent coding orchestrator. The repo
+carries a working CLI surface (`init`, `plan`, `plan-to-beads`, `run`,
+`status`) over an implemented planning + swarm engine, alongside the design
+documentation. The long-term workflow is:
 
 1. plan a feature through explicit spec authoring and critique
 2. translate approved work into executable task units
@@ -137,8 +138,13 @@ uv run pytest
 
 Current implementation note:
 
-- `turma init` is real and covered by tests
-- `turma plan`, `turma run`, and `turma status` are still placeholder surfaces
+- `turma init`, `turma plan`, `turma plan-to-beads`, `turma run`, and
+  `turma status` are all implemented over the real engine and covered by tests
+- `turma plan` runs the full author/critic loop with a human approval gate and
+  a resume CLI; `turma run` drives the swarm against the transcribed Beads DAG;
+  `turma status` is a read-only, no-mutation feature readout
+- remaining operator-surface work is experience polish (progress output,
+  machine-readable modes), not net-new commands
 
 ## Agent Roles
 
