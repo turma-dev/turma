@@ -107,6 +107,51 @@ For now, use this practical contributor flow:
 4. update docs/config/examples if the public contract changed
 5. keep history legible by separating unrelated concerns into separate commits
 
+## Post-Merge Cleanup
+
+After a PR merges, sync `main` and delete the merged branch — but do not rely
+on `git branch --merged` to decide what is merged.
+
+This repo merges PRs by squash/rebase, which lands a new commit on `main` with
+a different SHA than the branch tip. The original tip is therefore not an
+ancestor of `main`, so `git branch --merged` reports already-merged branches as
+unmerged. Build a candidate list from the GitHub merged-PR list instead:
+
+```bash
+# branch names of merged PRs
+gh pr list --state merged --limit 300 --json headRefName --jq '.[].headRefName' \
+  | sort -u > /tmp/merged_prs.txt
+
+# local branches, excluding main
+git for-each-ref --format='%(refname:short)' refs/heads/ \
+  | grep -vE '^(main)$' | sort -u > /tmp/local_branches.txt
+
+# candidates: local branches whose name matches a merged PR
+comm -12 /tmp/local_branches.txt /tmp/merged_prs.txt > /tmp/branches_to_delete.txt
+```
+
+A name match is a *candidate*, not proof a branch is disposable — a branch can
+share a name with an old merged PR yet still hold new, unmerged work. So treat
+`/tmp/branches_to_delete.txt` as a starting point, not a delete queue. Before
+deleting anything, open the file and **edit it down to only the branches you
+have confirmed are disposable**:
+
+- inspect each candidate
+- delete the line for any long-lived or local-only branch you intend to keep
+- verify the merge against the real ref (`origin/main`), not a summary
+
+Only then run the delete, and have it consume the *reviewed file* — never
+re-derive the raw candidate set at delete time:
+
+```bash
+# operates on the hand-reviewed file, not a fresh comm of all candidates
+xargs -r -n1 git branch -D < /tmp/branches_to_delete.txt
+```
+
+`git branch -D` (force) is expected here because the squash rewrote the SHA, so
+plain `git branch -d` would refuse a genuinely-merged branch — run it only over
+branches you have already confirmed are disposable.
+
 ## Testing Discipline
 
 This repo expects test-first work when behavior is testable.
