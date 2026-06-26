@@ -1071,7 +1071,9 @@ def test_revert_paths_called_after_failure(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------
 
 
-def test_single_task_happy_loop(tmp_path: Path) -> None:
+def test_single_task_happy_loop(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     _scratch_feature(tmp_path)
     task = _ref("bd-1", title="Wire OAuth")
     beads = StubBeads(
@@ -1141,6 +1143,16 @@ def test_single_task_happy_loop(tmp_path: Path) -> None:
     # success path itself.
     assert [c[0] for c in wt.calls].count("setup") == 1
     assert [c[0] for c in wt.calls].count("cleanup") == 0
+
+    # Per-task lifecycle progress output
+    # (openspec/changes/swarm-run-progress-output). Additive,
+    # deterministic lines; the timeout value is the SwarmServices
+    # default (1800s) since _make_services does not override it.
+    out = capsys.readouterr().out
+    assert "worktree: setup bd-1" in out
+    assert "worker: running bd-1 (timeout 1800s)" in out
+    assert "commit: bd-1" in out
+    assert "push: bd-1" in out
 
 
 def test_multi_task_sequential_loop(tmp_path: Path) -> None:
@@ -1279,7 +1291,7 @@ def test_worker_failure_with_budget_remaining_retries(tmp_path: Path) -> None:
 
 
 def test_worker_failure_with_exhausted_budget_halts_loop(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _scratch_feature(tmp_path)
     task = _ref("bd-1")
@@ -1299,6 +1311,14 @@ def test_worker_failure_with_exhausted_budget_halts_loop(
     # One fail_task recorded; no close.
     assert len(beads.failed) == 1
     assert beads.closed == []
+
+    # Lifecycle output: the long-wait line was announced before the
+    # failing worker.run, but no false success markers precede the
+    # failure (swarm-run-progress-output negative guarantee).
+    out = capsys.readouterr().out
+    assert "worker: running bd-1 (timeout 1800s)" in out
+    assert "commit: bd-1" not in out
+    assert "push: bd-1" not in out
 
 
 def test_push_failure_enters_retry_path(tmp_path: Path) -> None:
