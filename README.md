@@ -256,20 +256,25 @@ per-invocation cap with no config equivalent. Missing or partial
 
 ### Base-branch sync
 
-Every non-`--dry-run` invocation begins with a single
-`git fetch origin <base_branch>:<base_branch>` against the local
-checkout, fast-forwarding `<base_branch>` to match origin. This
-runs after preflight and before reconciliation. Without it,
+Every non-`--dry-run` invocation begins by fast-forwarding the
+local `<base_branch>` to origin — after preflight, before
+reconciliation. It is a three-call sequence: a `git symbolic-ref
+--short HEAD` precheck (refuses cleanly unless `<base_branch>` is
+the checked-out branch), then `git fetch origin <base_branch>`,
+then `git merge --ff-only origin/<base_branch>`. Divergent local
+history is refused rather than force-reconciled. Without this,
 chained features stall: when task A's PR merges between runs and
 the next `turma run` claims the dependent task B, B's worktree
 would otherwise be cut from a stale local base that lacks A's
 commits, and the worker would refuse to operate against the
 missing precondition.
 
-The fetch refuses to overwrite divergent local history — if
-local `<base_branch>` has commits that origin doesn't, the run
-halts with a `PlanningError` naming the branch and the two
-`git log <base_branch>..origin/<base_branch>` triage commands.
+The `merge --ff-only` step refuses to overwrite divergent local
+history — if local `<base_branch>` has commits that origin
+doesn't, the run halts with a typed `PlanningError` naming the
+branch and pointing at both triage commands, `git log
+<base_branch>..origin/<base_branch>` and `git log
+origin/<base_branch>..<base_branch>`, to compare directions.
 Operators triage manually rather than letting turma rebase or
 merge automatically.
 
