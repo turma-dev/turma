@@ -50,10 +50,15 @@ def resume_plan(
     feature: str,
     services: PlanningServices,
     request: ResumeRequest,
+    *,
+    quiet: bool = False,
 ) -> PlanningGraphResult:
     """Dispatch a resume request to the state machine."""
     _validate_reason(request)
     session = _prepare_planning_session(feature, services, require_fresh=False)
+    # `--revise` re-enters the loop, whose nodes print progress; suppress
+    # it under `--json` so stdout stays a single snapshot document.
+    session.quiet = quiet
 
     if request.action is ResumeAction.STATUS:
         return read_planning_state(session)

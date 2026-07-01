@@ -254,7 +254,7 @@ def _critic_review_node(
         "tasks": session.change_dir / "tasks.md",
     }
     critique = _run_critic_review(session, artifact_paths, round_num=round_num)
-    _print_critic_result(critique)
+    _print_critic_result(critique, session)
 
     next_state = _state_name_for_critique(critique)
     updated: PlanningGraphState = {

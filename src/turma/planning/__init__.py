@@ -86,6 +86,19 @@ class PlanningSession:
     services: PlanningServices
     max_rounds: int = 4
     interactive: bool = True
+    # Suppress human-facing progress output (used by `turma plan --json`,
+    # where stdout must be exactly one JSON snapshot document).
+    quiet: bool = False
+
+
+def _note(session: "PlanningSession", message: str = "", **print_kwargs) -> None:
+    """Print a progress line unless the session is running quiet.
+
+    Every human-facing progress print in the planning loop routes through
+    this so `--json` (quiet) mode leaves stdout clean for the snapshot.
+    """
+    if not session.quiet:
+        print(message, **print_kwargs)
 
 
 def default_planning_services() -> PlanningServices:
@@ -102,20 +115,31 @@ def default_planning_services() -> PlanningServices:
 def run_planning(
     feature: str,
     services: PlanningServices | None = None,
+    *,
+    as_json: bool = False,
 ) -> None:
     """Run planning through the critic-loop state machine."""
     session = _prepare_planning_session(
         feature,
         services or default_planning_services(),
     )
+    # In --json mode, suppress every human-facing progress line (here and
+    # in the loop nodes) so stdout is exactly one snapshot document.
+    session.quiet = as_json
 
-    print("loading config from turma.toml")
-    print(f"author model: {session.author_model}")
-    print(f"creating change: {feature}")
+    if not as_json:
+        print("loading config from turma.toml")
+        print(f"author model: {session.author_model}")
+        print(f"creating change: {feature}")
 
     from turma.planning.state_machine import run_planning_state_machine
 
     result = run_planning_state_machine(session)
+
+    if as_json:
+        print(render_plan_snapshot(result, feature, action=None))
+        return
+
     if result.next_nodes:
         print(f"planning suspended before: {', '.join(result.next_nodes)}")
     print(f"checkpoint: {result.checkpoint_path}")
@@ -142,6 +166,33 @@ def run_planning(
         )
     else:
         print(f"\nplanning complete. artifacts written to openspec/changes/{feature}/")
+
+
+PLAN_SCHEMA = "turma.plan.v1"
+
+
+def plan_snapshot(result, feature: str, action: str | None) -> dict:
+    """Structured `turma.plan.v1` snapshot of a planning outcome.
+
+    One object per invocation — plan runs the state machine to a single
+    terminal-or-suspended `result` and reports it. `action` is the
+    `ResumeAction` value for resume invocations, `None` for a fresh plan.
+    """
+    return {
+        "schema": PLAN_SCHEMA,
+        "feature": feature,
+        "state": result.state.get("state"),
+        "round": int(result.state.get("round", 1)),
+        "next_nodes": list(result.next_nodes),
+        "checkpoint": str(result.checkpoint_path),
+        "artifacts_dir": f"openspec/changes/{feature}/",
+        "action": action,
+    }
+
+
+def render_plan_snapshot(result, feature: str, action: str | None) -> str:
+    """Render the plan snapshot as a single indented JSON document."""
+    return json.dumps(plan_snapshot(result, feature, action), indent=2)
 
 
 def _print_resume_command_hints(feature: str, *, include_override: bool) -> None:
@@ -246,7 +297,7 @@ def _generate_initial_artifacts(session: PlanningSession) -> dict[str, Path]:
     written_artifacts: dict[str, Path] = {}
 
     for artifact_id in ARTIFACT_ORDER:
-        print(f"generating {artifact_id} (this may take 1-2 min) ...", end=" ", flush=True)
+        _note(session, f"generating {artifact_id} (this may take 1-2 min) ...", end=" ", flush=True)
 
         instructions = _get_instructions(artifact_id, session)
         output_path = session.change_dir / instructions["outputPath"]
@@ -273,7 +324,7 @@ def _generate_initial_artifacts(session: PlanningSession) -> dict[str, Path]:
         _write_artifact(output_path, artifact_text)
         written_artifacts[artifact_id] = output_path
 
-        print("done")
+        _note(session, "done")
 
     return written_artifacts
 
@@ -308,13 +359,13 @@ def _run_critic_review(
 _run_initial_critic_review = _run_critic_review
 
 
-def _print_critic_result(result: ParseResult) -> None:
+def _print_critic_result(result: ParseResult, session: PlanningSession) -> None:
     """Print the first critic route without advancing state."""
     if isinstance(result, ParsedCritique):
-        print(f"critic status: {result.status.value}")
+        _note(session, f"critic status: {result.status.value}")
     else:
-        print(f"critic parse failure: {result.reason}")
-    print(f"critic route: {result.route.value}")
+        _note(session, f"critic parse failure: {result.reason}")
+    _note(session, f"critic route: {result.route.value}")
 
 
 def _read_artifact_set(written_artifacts: dict[str, Path]) -> str:
@@ -400,7 +451,8 @@ def _generate_response(
     human_reason: str = "",
 ) -> str:
     """Author call 1: produce the per-finding response to a prior critique."""
-    print(
+    _note(
+        session,
         f"generating response_{prev_round}.md (this may take 1-2 min) ...",
         end=" ",
         flush=True,
@@ -420,7 +472,7 @@ def _generate_response(
         timeout=300,
     )
     response_text = _normalize_generated_markdown(raw_output)
-    print("done")
+    _note(session, "done")
     return response_text
 
 
@@ -490,7 +542,8 @@ def _generate_revised_artifacts(
     backend = session.author_backend
 
     for artifact_id in ARTIFACT_ORDER:
-        print(
+        _note(
+            session,
             f"revising {artifact_id} for round {round_num} (this may take 1-2 min) ...",
             end=" ",
             flush=True,
@@ -523,7 +576,7 @@ def _generate_revised_artifacts(
         _write_artifact(output_path, artifact_text)
         written_artifacts[artifact_id] = output_path
 
-        print("done")
+        _note(session, "done")
 
     return written_artifacts
 

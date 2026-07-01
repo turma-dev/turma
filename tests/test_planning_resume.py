@@ -411,3 +411,40 @@ def test_reason_required_for_actions(
             services,
             ResumeRequest(action=action, reason="   "),
         )
+
+
+def test_resume_revise_quiet_suppresses_loop_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--revise` re-enters the loop; under quiet=True (json mode) its
+    per-node progress must not reach stdout — resume_plan prints nothing,
+    leaving stdout for the CLI's single snapshot document."""
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("turma.planning.shutil.which", lambda _: "/usr/bin/mock")
+
+    author_backend = FakeBackend(_author_output)
+    critic_backend = FakeBackend(lambda *_: APPROVED_CRITIQUE)
+    services = PlanningServices(
+        get_backend=lambda model: (
+            critic_backend if model == "claude-sonnet-4-6" else author_backend
+        ),
+        run_openspec=_run_openspec,
+    )
+
+    session = _prepare_planning_session("test-feature", services)
+    run_planning_state_machine(session)  # round 1 → awaiting_human_approval
+    capsys.readouterr()  # discard round-1 progress
+
+    result = resume_plan(
+        "test-feature",
+        services,
+        ResumeRequest(action=ResumeAction.REVISE, reason="too vague"),
+        quiet=True,
+    )
+
+    out = capsys.readouterr().out
+    assert int(result.state["round"]) == 2  # the loop really re-ran
+    assert out == ""  # ...but emitted no progress text

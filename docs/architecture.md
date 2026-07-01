@@ -70,6 +70,15 @@ Revisions use a two-call contract: the author first writes a per-finding
 as input. A partial failure between the two calls preserves the response
 on disk for retry.
 
+`turma plan --json` renders the terminal outcome as a single
+`turma.plan.v1` JSON snapshot (`state` / `round` / `next_nodes` /
+`checkpoint` / `artifacts_dir` / resume `action`). Because the loop
+nodes print human progress, `--json` threads a `quiet` flag through
+`PlanningSession` to suppress all of it, so stdout is exactly one JSON
+document. This completes the machine-readable operator surface alongside
+the `status --json` snapshot and the `run --json` event stream (see
+`openspec/changes/plan-json-output/`).
+
 Terminal filesystem markers (`APPROVED`, `ABANDONED.md`,
 `NEEDS_HUMAN_REVIEW.md`) are the authoritative indicator of current
 state. A LangGraph SQLite checkpoint and a `PLANNING_STATE.json` hint
