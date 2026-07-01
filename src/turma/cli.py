@@ -397,11 +397,25 @@ def main(argv: list[str] | None = None) -> int:
             return _run_error(exc)
         return 0
     if args.command == "status":
+        # `status --json` is a snapshot command, so a failure is a
+        # structured error object (matching `plan --json`), not a bare
+        # `error: <msg>` text line — keeping the JSON surface parseable.
+        def _status_error(exc: Exception) -> int:
+            if args.json:
+                print(
+                    json.dumps(
+                        {"schema": "turma.status.v1", "error": str(exc)},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"error: {exc}")
+            return 1
+
         try:
             config = load_swarm_config()
         except ConfigError as exc:
-            print(f"error: {exc}")
-            return 1
+            return _status_error(exc)
         try:
             services = default_swarm_services(
                 repo_root=Path.cwd(),
@@ -418,8 +432,7 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.json,
             )
         except PlanningError as exc:
-            print(f"error: {exc}")
-            return 1
+            return _status_error(exc)
         print(readout)
         return 0
 

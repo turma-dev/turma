@@ -456,6 +456,50 @@ def test_main_status_config_error_exits_1(
     mock_status_readout.assert_not_called()
 
 
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_json_planning_error_is_structured(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under --json a status adapter failure is a structured error object,
+    not a bare `error: <msg>` text line — so the surface stays parseable."""
+    mock_load_swarm_config.return_value = _stub_config()
+    mock_services_factory.return_value = MagicMock(name="SwarmServices")
+    mock_status_readout.side_effect = PlanningError("bd list failed")
+
+    exit_code = main(["status", "--feature", "oauth", "--json"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out.strip()
+    assert json.loads(out) == {
+        "schema": "turma.status.v1",
+        "error": "bd list failed",
+    }
+    assert not out.startswith("error: ")
+
+
+@patch("turma.cli.load_swarm_config")
+def test_main_status_json_config_error_is_structured(
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pre-services ConfigError path is also structured under --json."""
+    mock_load_swarm_config.side_effect = ConfigError("turma.toml not found")
+
+    exit_code = main(["status", "--feature", "oauth", "--json"])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out.strip()
+    assert json.loads(out) == {
+        "schema": "turma.status.v1",
+        "error": "turma.toml not found",
+    }
+
+
 def test_status_accepts_json_flag() -> None:
     parser = build_parser()
     args = parser.parse_args(["status", "--feature", "oauth", "--json"])
