@@ -107,6 +107,34 @@ For now, use this practical contributor flow:
 4. update docs/config/examples if the public contract changed
 5. keep history legible by separating unrelated concerns into separate commits
 
+## Opening PRs
+
+Open PRs against this repo with the REST endpoint:
+
+```bash
+gh api --method POST repos/turma-dev/turma/pulls \
+  -f title="..." -f head="<branch>" -f base="main" -f body="..." \
+  --jq '.html_url'
+```
+
+Two things this repo's setup makes easy to get wrong:
+
+- **The token needs `Pull requests: write` on `turma-dev/turma`**, and
+  that access has to reach the **organization**, not just your personal
+  account. Creating a PR needs only the Pull requests permission — the
+  branch is already on `origin` via SSH (below), so the token does not
+  need Contents write for this. A fine-grained PAT scoped to
+  "repositories owned by you" can read this public repo but cannot
+  create PRs on it — org-owned repos need an org-scoped grant (a
+  fine-grained token with resource owner `turma-dev`, or a classic
+  token authorized for the org).
+- **`git push` succeeding does not prove GitHub API write access.**
+  The `origin` remote is SSH (`git@github.com:...`), so pushes
+  authenticate with your SSH key — a separate credential from the API
+  token `gh` uses. A branch can push cleanly while PR creation still
+  returns 403. Confirm PR-creation capability by creating a PR, never
+  by observing that push worked.
+
 ## Post-Merge Cleanup
 
 After a PR merges, sync `main` and delete the merged branch — but do not rely
