@@ -133,6 +133,38 @@ uv run turma plan --feature <name> --resume --approve --override "<why>"  # over
 suspended at `awaiting_human_approval`. `--approve --override` is valid only
 when the graph has halted in `needs_human_review`.
 
+### Machine-readable output
+
+`turma plan --feature <name> --json` (and any `--resume` variant with `--json`)
+emits a single **`turma.plan.v1` JSON snapshot** of the planning outcome instead
+of text — for scripts and surfaces. `plan` runs to one terminal-or-suspended
+outcome per invocation, so this is a snapshot (like `status --json`), not an
+event stream:
+
+```json
+{
+  "schema": "turma.plan.v1",
+  "feature": "oauth",
+  "state": "awaiting_human_approval",
+  "round": 2,
+  "next_nodes": ["awaiting_human_approval"],
+  "checkpoint": ".langgraph/oauth.sqlite",
+  "artifacts_dir": "openspec/changes/oauth/",
+  "action": null
+}
+```
+
+`state` is one of `awaiting_human_approval` / `approved` / `needs_revision` /
+`abandoned` / `needs_human_review`; `action` is the resume action
+(`approve` / `revise` / `abandon` / `override_approve` / `status`) for `--resume`
+invocations, `null` for a fresh plan. **stdout is exactly one JSON document** —
+all per-round progress is suppressed in `--json` mode. On failure, a single
+`{"schema": "turma.plan.v1", "error": "<message>"}` object, exit nonzero. Absent
+the flag, text output is unchanged.
+
+Together with `status --json` (snapshot) and `run --json` (NDJSON stream), this
+completes the machine-readable operator surface.
+
 ## Plan-to-Beads
 
 Once a plan has an `APPROVED` marker, `turma plan-to-beads` translates its

@@ -333,6 +333,43 @@ def test_run_planning_reports_pause_not_completion(
 @patch("turma.planning._get_backend")
 @patch("turma.planning.shutil.which", return_value="/usr/bin/mock")
 @patch("turma.planning.subprocess.run")
+def test_run_planning_json_is_a_single_snapshot_document(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    mock_get_backend: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--json` stdout is exactly one turma.plan.v1 snapshot — no
+    preamble / per-node progress / resume-hint text leaked in."""
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mock_run.side_effect = _mock_openspec("test-feat")
+    backend = MagicMock()
+    backend.generate.side_effect = _artifact_output_from_prompt
+    mock_get_backend.return_value = backend
+
+    run_planning("test-feat", as_json=True)
+
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    # stdout is exactly the one document — nothing else printed.
+    assert out.strip() == json.dumps(obj, indent=2)
+    assert obj["schema"] == "turma.plan.v1"
+    assert obj["feature"] == "test-feat"
+    assert obj["state"] == "awaiting_human_approval"
+    assert obj["next_nodes"]  # suspended at the gate
+    assert obj["action"] is None
+    assert obj["artifacts_dir"] == "openspec/changes/test-feat/"
+    # no leaked progress / hint text
+    for leak in ("generating", "critic route", "planning paused", "--resume"):
+        assert leak not in out
+
+
+@patch("turma.planning._get_backend")
+@patch("turma.planning.shutil.which", return_value="/usr/bin/mock")
+@patch("turma.planning.subprocess.run")
 def test_prompt_includes_author_role(
     mock_run: MagicMock,
     mock_which: MagicMock,
@@ -802,3 +839,110 @@ def test_extract_template_headings_skips_placeholder_headings() -> None:
     """Placeholder headings with HTML comments are not treated as literal requirements."""
     template = "## 1. <!-- Task Group Name -->\n\n## Real Heading\n"
     assert _extract_template_headings(template) == ["## Real Heading"]
+
+
+def test_plan_snapshot_carries_state_round_and_resume_action() -> None:
+    from turma.planning import plan_snapshot
+
+    class _Result:
+        state = {"state": "approved", "round": 3}
+        next_nodes = ()
+        checkpoint_path = "/x/cp.sqlite"
+
+    snap = plan_snapshot(_Result(), "oauth", action="approve")
+    assert snap == {
+        "schema": "turma.plan.v1",
+        "feature": "oauth",
+        "state": "approved",
+        "round": 3,
+        "next_nodes": [],
+        "checkpoint": "/x/cp.sqlite",
+        "artifacts_dir": "openspec/changes/oauth/",
+        "action": "approve",
+    }
+
+
+def test_plan_json_error_is_a_single_json_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A PlanningError under `--json` yields a single turma.plan.v1 error
+    object and exit 1 — not a bare `error: <msg>` text line."""
+    from turma.cli import main
+
+    monkeypatch.chdir(tmp_path)  # no turma.toml → PlanningError in preflight
+    code = main(["plan", "--feature", "oauth", "--json"])
+    assert code == 1
+    out = capsys.readouterr().out.strip()
+    obj = json.loads(out)
+    assert obj["schema"] == "turma.plan.v1"
+    assert "error" in obj and obj["error"]
+    assert not out.startswith("error: ")
+
+
+@patch("turma.planning._get_backend")
+@patch("turma.planning.shutil.which", return_value="/usr/bin/mock")
+@patch("turma.planning.subprocess.run")
+def test_plan_resume_json_via_cli_revise_and_readonly(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    mock_get_backend: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End-to-end CLI resume under --json: both `--revise` (re-runs the
+    loop) and read-only `--resume` emit a single turma.plan.v1 snapshot
+    with the right `action`, no progress/`action:`-text leaked."""
+    from turma.cli import main
+
+    _setup_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mock_run.side_effect = _mock_openspec("feat")
+
+    def _gen(prompt: str, model: str, timeout: int) -> str:
+        # critic always approves (any round); author returns valid
+        # artifacts for both round-1 drafting and round-2 revision.
+        if "Review the round" in prompt:
+            return "## Status: approved\n\n## Findings\n"
+        if "generating the per-finding response artifact" in prompt:
+            return "# Response\n\n## [B001] Accept — addressed\n"
+        if 'the "proposal" artifact' in prompt:
+            return "## Why\nX\n\n## What Changes\nY\n"
+        if 'the "design" artifact' in prompt:
+            return "## Goals\nG\n\n## Non-goals\nN\n"
+        if 'the "tasks" artifact' in prompt:
+            return "## Task 1\nDo\n"
+        raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+
+    backend = MagicMock()
+    backend.generate.side_effect = _gen
+    mock_get_backend.return_value = backend
+
+    # Seed a fresh plan → suspends at awaiting_human_approval (round 1).
+    assert main(["plan", "--feature", "feat"]) == 0
+    capsys.readouterr()
+
+    # Read-only resume --json → action "status", current state.
+    assert main(["plan", "--feature", "feat", "--resume", "--json"]) == 0
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert out.strip() == json.dumps(obj, indent=2)
+    assert obj["schema"] == "turma.plan.v1"
+    assert obj["action"] == "status"
+    assert obj["state"] == "awaiting_human_approval"
+
+    # Resume --revise --json → re-runs the loop to round 2, single doc.
+    code = main(
+        ["plan", "--feature", "feat", "--resume", "--revise", "too vague", "--json"]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    obj = json.loads(out)
+    assert out.strip() == json.dumps(obj, indent=2)  # exactly one document
+    assert obj["action"] == "revise"
+    assert obj["state"] == "awaiting_human_approval"
+    assert obj["round"] == 2
+    for leak in ("revising", "generating", "critic route", "action:", "state:"):
+        assert leak not in out

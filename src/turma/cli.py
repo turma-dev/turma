@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
 from turma import __version__
 from turma.config import ConfigError, load_swarm_config
 from turma.errors import PlanningError
-from turma.planning import default_planning_services, run_planning
+from turma.planning import (
+    default_planning_services,
+    render_plan_snapshot,
+    run_planning,
+)
 from turma.planning.resume import ResumeAction, ResumeRequest, resume_plan
 from turma.swarm import (
     DEFAULT_WORKER_BACKEND,
@@ -71,6 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REASON",
         help=(
             "Override halted needs_human_review (requires --resume --approve)."
+        ),
+    )
+    plan_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit a turma.plan.v1 JSON snapshot of the planning outcome "
+            "instead of text (stdout is exactly one JSON document)."
         ),
     )
 
@@ -303,14 +316,30 @@ def main(argv: list[str] | None = None) -> int:
                     args.feature,
                     default_planning_services(),
                     request,
+                    quiet=args.json,
                 )
-                _print_resume_result(request, result)
+                if args.json:
+                    print(
+                        render_plan_snapshot(
+                            result, args.feature, action=request.action.value
+                        )
+                    )
+                else:
+                    _print_resume_result(request, result)
             else:
                 _reject_stray_resume_flags(args)
-                run_planning(args.feature)
+                run_planning(args.feature, as_json=args.json)
             return 0
         except PlanningError as exc:
-            print(f"error: {exc}")
+            if args.json:
+                print(
+                    json.dumps(
+                        {"schema": "turma.plan.v1", "error": str(exc)},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"error: {exc}")
             return 1
     if args.command == "plan-to-beads":
         try:
