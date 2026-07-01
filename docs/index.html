@@ -161,13 +161,16 @@ uv run turma init
 uv run turma --help</code></pre>
 
         <div class="status">
-          <strong>Status:</strong> early implementation. The package installs,
-          <code>turma init</code> works, <code>turma plan</code> can generate a
-          single-pass OpenSpec change with Claude, Codex, Gemini, or
-          OpenCode-backed author generation, CI is in place, and the architecture is
-          documented. Planning quality still depends on the chosen model, and
-          the critic loop plus full orchestration workflow are not implemented
-          yet.
+          <strong>Status:</strong> early implementation, functional end to end.
+          <code>turma init</code>, <code>turma plan</code> (author/critic loop
+          with a human approval gate), <code>turma plan-to-beads</code>,
+          <code>turma run</code> (single-feature swarm orchestrator, one PR per
+          task), and <code>turma status</code> all work. The swarm runs each task
+          through a pluggable worker backend — Claude Code, Codex, or OpenCode.
+          <code>status</code>, <code>run</code>, and <code>plan</code> each offer
+          a machine-readable <code>--json</code> mode. CI is in place and the
+          architecture is documented. Planning quality still depends on the
+          chosen model.
         </div>
       </section>
 

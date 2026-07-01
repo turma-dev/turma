@@ -5,14 +5,28 @@ Beads task tracking, and resumable swarm execution.
 
 ## Status
 
-Early implementation phase. This repo has the Python package layout, OpenSpec
-workflow scaffolding, a working `turma init` command, a working `turma plan`
-command running a full author/critic loop with an explicit human approval
-gate and resume CLI, a working `turma plan-to-beads` command that
-transcribes approved plans into a feature-tagged Beads task set, a working
-`turma run` single-feature sequential swarm orchestrator (preflight →
-reconcile → repair → main loop, one PR per Beads task), baseline CI, and
-public architecture documentation.
+Early implementation phase, but the core workflow is functional end to end.
+Five CLI commands ship:
+
+- `turma init` — local project scaffolding.
+- `turma plan` — the full author/critic loop with an explicit human approval
+  gate and a resume CLI.
+- `turma plan-to-beads` — transcribes an approved plan into a feature-tagged
+  Beads task set.
+- `turma run` — a single-feature sequential swarm orchestrator (preflight →
+  reconcile → repair → main loop, one PR per Beads task).
+- `turma status` — a read-only readout of a feature's Beads + PR + worktree
+  state.
+
+The swarm drives each task through a pluggable worker backend — `claude-code`
+(default), `codex`, or `opencode`. A Gemini author backend exists, but its
+consumer `gemini` CLI path is being retired by Google, so a Gemini *worker*
+backend is deferred (see the Gemini CLI note in `docs/architecture.md`).
+
+`turma status`, `turma run`, and `turma plan` each have a machine-readable
+`--json` mode — `status`/`plan` as snapshots (`turma.status.v1` /
+`turma.plan.v1`), `run` as a `turma.run.v1` NDJSON event stream — for scripts
+and surfaces. Baseline CI and public architecture documentation round it out.
 
 ## What It Is
 
