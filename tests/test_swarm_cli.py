@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -300,6 +301,25 @@ def test_main_run_config_error_exits_1(
     out = capsys.readouterr().out
     assert out.startswith("error: ")
     assert "turma.toml not found" in out
+
+
+@patch("turma.cli.load_swarm_config")
+def test_main_run_json_error_emits_error_event(
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """In --json mode the terminal failure is an `error` event NDJSON
+    line, not the `error: <msg>` text line."""
+    mock_load_swarm_config.side_effect = ConfigError("turma.toml not found")
+    exit_code = main(["run", "--feature", "oauth", "--json"])
+    assert exit_code == 1
+    out = capsys.readouterr().out.strip()
+    assert json.loads(out) == {
+        "schema": "turma.run.v1",
+        "event": "error",
+        "message": "turma.toml not found",
+    }
+    assert "error: " not in out
 
 
 # ---------------------------------------------------------------------

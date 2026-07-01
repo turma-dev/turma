@@ -47,7 +47,7 @@ not add telemetry.
 | `fetch_skipped` | — | `fetch: skipped (--dry-run)` |
 | `fetch_advanced` | `base_branch` | `fetch: origin/<b> → <b>` |
 | `reconcile_summary` | `in_progress_count` | `reconcile: N in-progress …` |
-| `reconcile_finding` | `task_id?`, `kind`, `detail` | `reconcile:   <finding>` |
+| `reconcile_finding` | `kind`, `detail`, `task_id` (or `branch` for orphan) | `reconcile:   <finding>` |
 | `repair` | `task_id`, `action`, `reason?` | `repair: <id> → …` |
 | `repair_orphan_branch` | `branch` | `repair: orphan branch …` |
 | `merge_advancement` | `task_id`, `pr_number`, `pr_state`, `action`, `dry_run` | `merge-advancement:` / `would:` (all 5 variants — see below) |

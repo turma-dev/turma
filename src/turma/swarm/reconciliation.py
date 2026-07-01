@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from turma.swarm.events import RunEmitter, TextEmitter
 from turma.transcription.beads import BeadsTaskRef, _extract_pr_number
 
 
@@ -198,6 +199,7 @@ def reconcile_feature(
     git_adapter: _GitView,
     pr_adapter: _PullRequestView,
     repo_root: Path,
+    emitter: RunEmitter | None = None,
 ) -> ReconciliationReport:
     """Classify prior-run state for `feature` and return the report.
 
@@ -245,7 +247,7 @@ def reconcile_feature(
         findings=tuple(findings),
         merge_tracked=tuple(merge_tracked),
     )
-    _print_summary(report, len(in_progress))
+    _print_summary(report, len(in_progress), emitter or TextEmitter())
     return report
 
 
@@ -295,7 +297,11 @@ def _read_reason(path: Path) -> str:
 # ---------------------------------------------------------------------
 
 
-def _print_summary(report: ReconciliationReport, in_progress_count: int) -> None:
+def _print_summary(
+    report: ReconciliationReport,
+    in_progress_count: int,
+    emitter: RunEmitter,
+) -> None:
     """Emit a short `reconcile: ...` line for operator visibility.
 
     Per-repair lines are the orchestrator's responsibility — this
@@ -303,15 +309,38 @@ def _print_summary(report: ReconciliationReport, in_progress_count: int) -> None
     Merge-tracked tasks (skipped before classification) get one
     line each, alongside the per-finding lines.
     """
-    task_noun = "task" if in_progress_count == 1 else "tasks"
-    print(f"reconcile: {in_progress_count} in-progress {task_noun}")
+    emitter.emit("reconcile_summary", in_progress_count=in_progress_count)
     for task_id, pr_number in report.merge_tracked:
-        print(
-            f"reconcile:   {task_id} → skipped "
-            f"(merge-tracked at PR #{pr_number})"
+        emitter.emit(
+            "reconcile_skipped", task_id=task_id, pr_number=pr_number
         )
     for finding in report.findings:
-        print(f"reconcile:   {_describe(finding)}")
+        emitter.emit(
+            "reconcile_finding",
+            detail=_describe(finding),
+            **_finding_fields(finding),
+        )
+
+
+_FINDING_KIND = {
+    "MissingWorktree": "missing-worktree",
+    "CompletionPending": "completion-pending",
+    "CompletionPendingWithPr": "completion-pending-with-pr",
+    "FailurePending": "failure-pending",
+    "StaleNoSentinels": "stale-no-sentinels",
+    "OrphanBranch": "orphan-branch",
+}
+
+
+def _finding_fields(finding: Finding) -> dict[str, object]:
+    """Structured identity of a finding for the `reconcile_finding` JSON
+    event — the machine-readable counterpart of `_describe`'s human
+    string. `kind` is the canonical finding name; every finding carries
+    either a `task_id` or (for `OrphanBranch`) a `branch`."""
+    kind = _FINDING_KIND[type(finding).__name__]
+    if isinstance(finding, OrphanBranch):
+        return {"kind": kind, "branch": finding.branch}
+    return {"kind": kind, "task_id": finding.task_id}
 
 
 def _describe(finding: Finding) -> str:

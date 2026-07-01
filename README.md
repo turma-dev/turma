@@ -238,6 +238,28 @@ mode; the OpenCode worker drives `opencode run --dangerously-skip-permissions`.
 All backends honor the same sentinel completion contract as Claude Code and
 share one subprocess/timeout/sentinel path, differing only in argv.
 
+### Machine-readable output
+
+`turma run --feature <name> --json` emits a **`turma.run.v1` NDJSON event
+stream** — one compact JSON object per line, flushed as each transition
+happens — instead of the text lines, for scripts and live surfaces (a VS Code
+extension, an MCP client, a dashboard):
+
+```bash
+uv run turma run --feature oauth-auth --json | while read -r line; do
+  echo "$line" | jq -r '"\(.event) \(.task_id // "")"'
+done
+```
+
+Every line is `{"schema": "turma.run.v1", "event": "<name>", ...}`. Events map
+1:1 to the text lines — `fetch_advanced`, `reconcile_summary`, `task_claimed`,
+`worktree_setup`, `worker_running`, `commit`, `push`, `task_opened`,
+`task_failed`, `merge_advancement`, `done`, and so on. On failure the run still
+exits nonzero; events emitted before the failure remain valid records, and the
+terminal error is a final `{"event": "error", "message": ...}` line (in
+`--json` mode) rather than the `error: <msg>` text. Absent the flag, the text
+output is unchanged.
+
 Config: `turma run` reads the `[swarm]` block from `turma.toml`
 for `worker_backend`, `worker_timeout`, `max_retries`,
 `worktree_root`, and `base_branch`. CLI flags take precedence —
