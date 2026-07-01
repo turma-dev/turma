@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project uses Semantic Versionin
 
 ### Added
 - Added per-task lifecycle progress output to `turma run`. As the main loop drives each claimed task, it now prints `worktree: setup <id>`, `worker: running <id> (timeout <N>s)` (emitted before the worker blocks, so the run's longest silent stretch is announced upfront), `commit: <id>`, and `push: <id>`, alongside the existing `swarm: claimed` / `swarm: opened` lines. Additive, deterministic, text-only; failure paths are unchanged and still surface through `swarm: <id> failed …`. See `openspec/changes/swarm-run-progress-output/`.
+- Added `turma status --feature <name> --json` — a machine-readable (`turma.status.v1`) rendering of the status readout for scripts and dashboards. Pretty-printed (`indent=2`), it mirrors the text sections 1:1: `schema`, `feature`, `spec`, `tasks` counters, `ready`, `in_progress`, `pull_requests`, `orphan_branches`. Each `in_progress` entry carries `worktree {present, path}`, a structured `sentinel {status, reason}`, and `pr {number, state, url}` (or `null` without a `turma-pr:` label). Implemented as a second renderer over the same gather pipeline, so the read-only/no-mutation invariant holds, the text output is unchanged, and adapter failures still raise rather than emitting partial JSON. See `openspec/changes/turma-status-json/`.
 
 ## [0.3.0] - 2026-04-27
 

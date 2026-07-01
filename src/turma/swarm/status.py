@@ -29,6 +29,7 @@ See `openspec/changes/swarm-post-merge-advancement/design.md`
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -44,6 +45,11 @@ from turma.transcription.beads import (
 
 
 NEEDS_HUMAN_REVIEW_LABEL = "needs_human_review"
+
+# Stable identifier for the --json payload contract
+# (openspec/changes/turma-status-json). Not a versioning system —
+# bumping it later is a future decision.
+STATUS_SCHEMA = "turma.status.v1"
 
 _PLAN_HINT = "run `turma plan --feature {name}` first"
 _PLAN_TO_BEADS_HINT = "run `turma plan-to-beads --feature {name}` next"
@@ -87,6 +93,7 @@ def status_readout(
     *,
     services: SwarmServices,
     repo_root: Path,
+    as_json: bool = False,
 ) -> str:
     """Compose a read-only status readout for `feature` into a string.
 
@@ -94,6 +101,11 @@ def status_readout(
     partial readout is worse than an explicit error. Missing spec
     dir / APPROVED / TRANSCRIBED.md markers render inline as `no`
     (the command's job is to show state, including "no state yet").
+
+    `as_json=True` selects the machine-readable renderer
+    (`turma.status.v1`) over the text one. Both consume the same
+    gathered state, so the read-only/no-mutation invariant is
+    identical; only the final formatting differs.
     """
     preflight = _check_preflight(feature, repo_root)
 
@@ -132,7 +144,7 @@ def status_readout(
             services.pr.get_pr_state_by_number(pr_number)
         )
 
-    return _render(
+    render_kwargs = dict(
         feature=feature,
         preflight=preflight,
         buckets=buckets,
@@ -145,6 +157,7 @@ def status_readout(
         branches=branches,
         prs=prs,
     )
+    return _render_json(**render_kwargs) if as_json else _render(**render_kwargs)
 
 
 # ---------------------------------------------------------------------
@@ -241,6 +254,24 @@ def _describe_sentinel(worktree: Path) -> str:
         first_line = text.splitlines()[0] if text.splitlines() else ""
         return f'failed: "{first_line.strip()}"'
     return "none"
+
+
+def _sentinel_struct(worktree: Path) -> dict[str, object]:
+    """Structured form of the sentinel for the JSON renderer, mirroring
+    `_describe_sentinel`'s precedence, first-line truncation, and
+    unreadable-file fallback as `{status, reason}`."""
+    complete = worktree / TASK_COMPLETE_SENTINEL
+    failed = worktree / TASK_FAILED_SENTINEL
+    if complete.exists():
+        return {"status": "complete", "reason": None}
+    if failed.exists():
+        try:
+            text = failed.read_text()
+        except OSError:
+            return {"status": "failed", "reason": "<could not read sentinel>"}
+        lines = text.splitlines()
+        return {"status": "failed", "reason": lines[0].strip() if lines else ""}
+    return {"status": None, "reason": None}
 
 
 # ---------------------------------------------------------------------
@@ -370,6 +401,22 @@ def _render_prs(prs: tuple[PrSummary, ...]) -> str:
     return "\n".join(lines)
 
 
+def _orphan_branch_names(
+    feature: str,
+    branches: tuple[str, ...],
+    in_progress_tasks: tuple[BeadsTaskRef, ...],
+    worktree_manager: _WorktreeView,
+) -> list[str]:
+    """Feature branches with no in_progress task — the same filter the
+    text and JSON renderers both surface. Mirrors reconciliation's
+    `in_progress`-only orphan definition."""
+    in_progress_branches = {
+        worktree_manager.branch_name_for(feature, t.id)
+        for t in in_progress_tasks
+    }
+    return [b for b in branches if b not in in_progress_branches]
+
+
 def _render_orphan_branches(
     feature: str,
     branches: tuple[str, ...],
@@ -377,14 +424,120 @@ def _render_orphan_branches(
     worktree_manager: _WorktreeView,
 ) -> str:
     lines = ["orphan branches:"]
-    in_progress_branches = {
-        worktree_manager.branch_name_for(feature, t.id)
-        for t in in_progress_tasks
-    }
-    orphans = tuple(b for b in branches if b not in in_progress_branches)
+    orphans = _orphan_branch_names(
+        feature, branches, in_progress_tasks, worktree_manager
+    )
     if not orphans:
         lines.append("  (none)")
     else:
         for branch in orphans:
             lines.append(f"  {branch}  (no in_progress task)")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------
+# JSON rendering (turma.status.v1)
+# ---------------------------------------------------------------------
+
+
+def _render_json(
+    *,
+    feature: str,
+    preflight: _Preflight,
+    buckets: _Buckets,
+    ready_tasks: tuple[BeadsTaskRef, ...],
+    in_progress_tasks: tuple[BeadsTaskRef, ...],
+    in_progress_retries: dict[str, int],
+    in_progress_pr_states: dict[str, PrState],
+    max_retries: int,
+    worktree_manager: _WorktreeView,
+    branches: tuple[str, ...],
+    prs: tuple[PrSummary, ...],
+) -> str:
+    """Render the gathered status model as `turma.status.v1` JSON.
+
+    Pure formatting over the same data the text renderer consumes;
+    mirrors the text sections 1:1 in gathered order. `indent=2`, no
+    `sort_keys` (insertion order is the contract)."""
+    payload = {
+        "schema": STATUS_SCHEMA,
+        "feature": feature,
+        "spec": {
+            "change_dir": f"openspec/changes/{feature}/",
+            "present": preflight.change_dir_exists,
+            "approved": preflight.approved,
+            "transcribed": preflight.transcribed,
+        },
+        "tasks": {
+            "ready": buckets.ready,
+            "in_progress": buckets.in_progress,
+            "blocked_deferred": buckets.blocked_deferred,
+            "closed": buckets.closed,
+            "needs_human_review": buckets.needs_human_review,
+        },
+        "ready": [{"id": t.id, "title": t.title} for t in ready_tasks],
+        "in_progress": [
+            _in_progress_json_entry(
+                feature,
+                task,
+                in_progress_retries,
+                in_progress_pr_states,
+                max_retries,
+                worktree_manager,
+            )
+            for task in in_progress_tasks
+        ],
+        "pull_requests": [
+            {
+                "number": pr.number,
+                "url": pr.url,
+                "state": pr.state,
+                "title": pr.title,
+                "head_branch": pr.head_branch,
+            }
+            for pr in prs
+        ],
+        "orphan_branches": _orphan_branch_names(
+            feature, branches, in_progress_tasks, worktree_manager
+        ),
+    }
+    return json.dumps(payload, indent=2)
+
+
+def _in_progress_json_entry(
+    feature: str,
+    task: BeadsTaskRef,
+    retries: dict[str, int],
+    pr_states: dict[str, PrState],
+    max_retries: int,
+    worktree_manager: _WorktreeView,
+) -> dict[str, object]:
+    worktree = worktree_manager.worktree_path_for(feature, task.id)
+    present = worktree.is_dir()
+    sentinel = (
+        _sentinel_struct(worktree)
+        if present
+        else {"status": None, "reason": None}
+    )
+    pr_state = pr_states.get(task.id)
+    pr = (
+        None
+        if pr_state is None
+        else {
+            "number": pr_state.number,
+            "state": pr_state.state,
+            "url": pr_state.url,
+        }
+    )
+    return {
+        "id": task.id,
+        "title": task.title,
+        "retries": retries.get(task.id, 0),
+        "max_retries": max_retries,
+        "worktree": {
+            "present": present,
+            "path": str(worktree) if present else None,
+        },
+        "sentinel": sentinel,
+        "pr": pr,
+    }

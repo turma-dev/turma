@@ -130,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument(
         "--feature", required=True, help="Feature name to inspect."
     )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the readout as turma.status.v1 JSON instead of text.",
+    )
 
     return parser
 
@@ -361,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.feature,
                 services=services,
                 repo_root=Path.cwd(),
+                as_json=args.json,
             )
         except PlanningError as exc:
             print(f"error: {exc}")

@@ -436,6 +436,39 @@ def test_main_status_config_error_exits_1(
     mock_status_readout.assert_not_called()
 
 
+def test_status_accepts_json_flag() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["status", "--feature", "oauth", "--json"])
+    assert args.json is True
+
+
+def test_status_json_defaults_false() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["status", "--feature", "oauth"])
+    assert args.json is False
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_passes_json_flag_through(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--json` reaches `status_readout(as_json=True)`; default is False."""
+    mock_load_swarm_config.return_value = _stub_config()
+    mock_services_factory.return_value = MagicMock(name="SwarmServices")
+    mock_status_readout.return_value = "{}"
+
+    main(["status", "--feature", "oauth", "--json"])
+    assert mock_status_readout.call_args.kwargs["as_json"] is True
+
+    main(["status", "--feature", "oauth"])
+    assert mock_status_readout.call_args.kwargs["as_json"] is False
+
+
 @patch("turma.cli.load_swarm_config")
 @patch("turma.cli.default_swarm_services")
 @patch("turma.cli.status_readout")
