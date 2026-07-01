@@ -1,4 +1,4 @@
-"""Worker-backend protocol and the v1 Claude Code implementation.
+"""Worker-backend protocol and the concrete worker implementations.
 
 The swarm orchestrator drives a claimed Beads task by handing a
 `WorkerInvocation` to a `WorkerBackend`, which runs the agent CLI
@@ -8,9 +8,10 @@ worker is prompted to write (`.task_complete` on success,
 `.task_failed` on an unresolvable blocker); the orchestrator does not
 parse the worker's stdout for success/failure.
 
-v1 ships a single backend — `ClaudeCodeWorker` — registered under the
-name `"claude-code"`. Adding Codex, OpenCode, or Gemini later is a
-small follow-on: implement the protocol, register the factory.
+Registered backends are `claude-code`, `codex`, and `opencode`. They
+share the subprocess/timeout/sentinel machinery (`_run_cli_worker`) and
+differ only in the argv they build, so adding a backend (Gemini is next)
+is a small follow-on: implement the protocol, register the factory.
 """
 
 from __future__ import annotations
@@ -259,6 +260,51 @@ class CodexWorker:
 
 
 # ---------------------------------------------------------------------
+# OpenCode worker
+# ---------------------------------------------------------------------
+
+
+OPENCODE_INSTALL_HINT = (
+    "opencode CLI not found. Install OpenCode first "
+    "(https://opencode.ai)."
+)
+
+
+class OpenCodeWorker:
+    """Runs OpenCode non-interactively inside a per-task worktree.
+
+    argv: `opencode run <prompt> --dir <worktree>
+    --dangerously-skip-permissions`
+
+    OpenCode is server / TUI-first; `run` is its non-interactive
+    subcommand and `--dir` sets the working root (it spins a local
+    server per invocation). `--dangerously-skip-permissions` auto-
+    approves so the worker never blocks on OpenCode's permission gate —
+    the direct parallel to Claude Code's identically-named flag.
+
+    Completion is the shared sentinel contract (`render_worker_prompt` +
+    `_detect_sentinel_result`); the worker must not commit — Turma owns
+    the worker-commit boundary.
+    """
+
+    name = "opencode"
+
+    def __init__(self) -> None:
+        if shutil.which("opencode") is None:
+            raise PlanningError(OPENCODE_INSTALL_HINT)
+
+    def run(self, invocation: WorkerInvocation) -> WorkerResult:
+        prompt = render_worker_prompt(invocation)
+        argv = [
+            "opencode",
+            "run", prompt,
+            "--dir", str(invocation.worktree),
+            "--dangerously-skip-permissions",
+        ]
+        return _run_cli_worker(argv, invocation)
+
+
+# ---------------------------------------------------------------------
 # Backend registry
 # ---------------------------------------------------------------------
 
@@ -266,6 +312,7 @@ class CodexWorker:
 _BACKENDS: dict[str, Callable[[], WorkerBackend]] = {
     "claude-code": ClaudeCodeWorker,
     "codex": CodexWorker,
+    "opencode": OpenCodeWorker,
 }
 
 

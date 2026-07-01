@@ -11,7 +11,7 @@
 # defaults below.
 
 # Which worker backend drives claimed tasks. Registered: "claude-code"
-# (default) and "codex". OpenCode / Gemini backends are not yet available.
+# (default), "codex", and "opencode". A Gemini backend is not yet available.
 worker_backend = "claude-code"
 
 # Seconds before a worker is considered timed-out.

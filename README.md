@@ -220,13 +220,16 @@ uv run turma run --feature <name>
 uv run turma run --feature <name> --max-tasks 1       # smoke one task end-to-end
 uv run turma run --feature <name> --backend claude-code
 uv run turma run --feature <name> --backend codex     # drive Codex instead of Claude Code
+uv run turma run --feature <name> --backend opencode  # drive OpenCode
 uv run turma run --feature <name> --dry-run           # preflight + reconcile only
 ```
 
 Worker backends are selectable via `--backend` (or `[swarm]
-worker_backend`); registered names are `claude-code` (default) and
-`codex`. The Codex worker drives `codex exec` in `workspace-write` mode
-and honors the same sentinel completion contract as Claude Code.
+worker_backend`); registered names are `claude-code` (default), `codex`,
+and `opencode`. The Codex worker drives `codex exec` in `workspace-write`
+mode; the OpenCode worker drives `opencode run --dangerously-skip-permissions`.
+All backends honor the same sentinel completion contract as Claude Code and
+share one subprocess/timeout/sentinel path, differing only in argv.
 
 Config: `turma run` reads the `[swarm]` block from `turma.toml`
 for `worker_backend`, `worker_timeout`, `max_retries`,
@@ -242,10 +245,10 @@ per-invocation cap with no config equivalent. Missing or partial
 - `git` on PATH
 - `gh` (GitHub CLI) on PATH with an authenticated session
   (`gh auth login` once; verified at startup via `gh auth status`)
-- `claude` (Claude Code CLI) on PATH for the default
-  `claude-code` worker backend, or `codex` (Codex CLI) on PATH for
-  `--backend codex`. Only the selected backend's CLI is required.
-  `--dry-run` requires neither because the worker is never invoked.
+- the selected worker backend's CLI on PATH: `claude` (default
+  `claude-code`), `codex` (`--backend codex`), or `opencode`
+  (`--backend opencode`). Only the selected backend's CLI is required;
+  `--dry-run` requires none because the worker is never invoked.
 - A transcribed feature: `openspec/changes/<name>/APPROVED` and
   `openspec/changes/<name>/TRANSCRIBED.md` must both exist. Missing
   either halts with a pointer back to `turma plan` or
@@ -544,7 +547,7 @@ never emits a partial document.
 - post-merge advancement: detect when a `turma run`-opened PR has
   been merged and unblock dependent Beads tasks automatically
 - parallel task execution + per-task backend routing (`worker-backend:<id>` labels)
-- OpenCode / Gemini worker implementations (Codex is shipped)
+- Gemini worker implementation (Codex and OpenCode are shipped)
 - a `turma run --clean <feature>` flag to bulk-remove failed worktrees
   and branches
 

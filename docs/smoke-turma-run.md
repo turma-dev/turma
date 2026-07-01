@@ -625,26 +625,37 @@ auto-delete them on close.
   `pull_requests:write` scope. Fix under Settings → Personal
   access tokens for the repo owner.
 
-## Codex worker backend
+## Alternate worker backends (Codex, OpenCode)
 
-Every step above runs identically with `--backend codex` — only the
-worker CLI differs; the worktree / commit / PR / reconciliation
-pipeline is backend-agnostic. Prerequisite: `codex` (Codex CLI) on
-PATH and authenticated, in place of `claude`.
+Every step above runs identically with `--backend codex` or `--backend
+opencode` — only the worker CLI differs; the worktree / commit / PR /
+reconciliation pipeline is backend-agnostic. Prerequisite: the selected
+backend's CLI on PATH and authenticated, in place of `claude`.
 
 ```bash
 uv run turma run --feature smoke-run --max-tasks 1 --backend codex
+uv run turma run --feature smoke-run --max-tasks 1 --backend opencode
 ```
 
-Autonomy note: the load-bearing question — does `codex exec` in the
+Codex autonomy: the load-bearing question — does `codex exec` in the
 `workspace-write` sandbox run non-interactively without an approval
 prompt? — was confirmed with an isolated probe (2026-06-30, codex-cli
 0.142.0): `codex exec "<task>" --cd <dir> --sandbox workspace-write`
 created files and wrote `.task_complete` autonomously, exit 0, no
-prompt. The full end-to-end `turma run --backend codex` against a live
-`bd` + `gh` (opening a real PR) is left as an operator-run smoke; the
-worker unit tests pin the argv, and the isolated probe confirms the
-tool obeys it.
+prompt.
+
+OpenCode autonomy: confirmed by an isolated probe (2026-06-30, opencode
+1.14.28) using the **real rendered worker prompt**: `opencode run
+"<prompt>" --dir <dir> --dangerously-skip-permissions` edited files and
+wrote a **verbatim** `.task_complete`, exit 0, no prompt. (A note on the
+prompt: an ad-hoc paraphrase once made OpenCode name the sentinel
+`` `.task_complete` `` with backticks; the actual `render_worker_prompt`
+output does not, so keep the worker prompt's sentinel wording intact.)
+
+For both, the full end-to-end `turma run --backend <name>` against a
+live `bd` + `gh` (opening a real PR) is left as an operator-run smoke;
+the worker unit tests pin the argv, and the isolated probes confirm the
+tools obey it.
 
 ## Notes for future work
 
