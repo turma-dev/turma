@@ -395,6 +395,16 @@ def test_run_swarm_accepts_codex_backend_past_the_gate(tmp_path: Path) -> None:
         run_swarm("oauth", services=services, backend="codex")
 
 
+def test_run_swarm_accepts_opencode_backend_past_the_gate(
+    tmp_path: Path,
+) -> None:
+    """`opencode` is registered, so it passes the gate and fails later
+    at preflight rather than as an unknown backend."""
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    with pytest.raises(PlanningError, match="no OpenSpec change directory"):
+        run_swarm("oauth", services=services, backend="opencode")
+
+
 def test_preflight_missing_change_dir(tmp_path: Path) -> None:
     services, *_ = _make_services(tmp_path, beads=StubBeads())
     with pytest.raises(PlanningError, match="no OpenSpec change directory"):
