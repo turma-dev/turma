@@ -17,6 +17,7 @@ from turma.swarm import (
     run_swarm,
     status_readout,
 )
+from turma.swarm.events import JsonEmitter
 from turma.swarm.worker import registered_worker_backends
 from turma.transcription import TranscriptionResult, transcribe_to_beads
 from turma.transcription.beads import BeadsAdapter
@@ -120,6 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run preflight + reconciliation only; no claims, no "
             "commits, no PRs."
+        ),
+    )
+    run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit a turma.run.v1 NDJSON event stream (one object per "
+            "line) instead of text, for scripts and live surfaces."
         ),
     )
 
@@ -317,11 +326,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}")
             return 1
     if args.command == "run":
+        # In --json mode every line — including the terminal failure —
+        # is a turma.run.v1 event, so route errors through the emitter
+        # instead of the shared `error: <msg>` text path.
+        emitter = JsonEmitter() if args.json else None
+
+        def _run_error(exc: Exception) -> int:
+            if emitter is not None:
+                emitter.emit("error", message=str(exc))
+            else:
+                print(f"error: {exc}")
+            return 1
+
         try:
             config = load_swarm_config()
         except ConfigError as exc:
-            print(f"error: {exc}")
-            return 1
+            return _run_error(exc)
 
         # CLI flags take precedence over [swarm] in turma.toml; all
         # other knobs (worker_timeout, max_retries, worktree_root,
@@ -335,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_retries=config.swarm.max_retries,
                 worker_timeout=config.swarm.worker_timeout,
                 worktree_root=config.swarm.worktree_root,
+                emitter=emitter,
             )
             run_swarm(
                 args.feature,
@@ -344,8 +365,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
             )
         except PlanningError as exc:
-            print(f"error: {exc}")
-            return 1
+            return _run_error(exc)
         return 0
     if args.command == "status":
         try:

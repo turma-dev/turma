@@ -17,6 +17,8 @@ Task 7 checklist gets at least one test:
 
 from __future__ import annotations
 
+import io
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -26,10 +28,19 @@ import pytest
 from turma.errors import PlanningError
 from turma.swarm import SwarmServices, run_swarm
 from turma.swarm._orchestrator import _pr_number_from_url
+from turma.swarm.events import JsonEmitter
 from turma.swarm.pull_request import PrState
 from turma.swarm.worker import WorkerInvocation, WorkerResult
 from turma.swarm.worktree import WorktreeRef
 from turma.transcription.beads import BeadsTaskRef
+
+
+def _run_events(services: SwarmServices, feature: str = "oauth", **kwargs):
+    """Drive run_swarm with a capturing JsonEmitter; return parsed events."""
+    buf = io.StringIO()
+    services.emitter = JsonEmitter(stream=buf)
+    run_swarm(feature, services=services, **kwargs)
+    return [json.loads(line) for line in buf.getvalue().splitlines()]
 
 
 # ---------------------------------------------------------------------
@@ -2452,3 +2463,190 @@ def test_chained_feature_post_merge_advances_dependent(
     )
     # No fail_task fired anywhere in the run.
     assert beads.failed == []
+
+
+# ---------------------------------------------------------------------
+# --json event stream (openspec/changes/run-json-events)
+# ---------------------------------------------------------------------
+
+
+def test_json_happy_loop_event_order(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1", title="Wire OAuth")
+    beads = StubBeads(ready_queue=[(task,)], bodies={"bd-1": "body"})
+    services, *_ = _make_services(
+        tmp_path, beads=beads, worker_results=[_success()]
+    )
+    events = _run_events(services)
+    assert all(e["schema"] == "turma.run.v1" for e in events)
+    assert [e["event"] for e in events] == [
+        "fetch_advanced",
+        "reconcile_summary",
+        "task_claimed",
+        "worktree_setup",
+        "worker_running",
+        "commit",
+        "push",
+        "task_opened",
+        "done",
+        "bd_state_unpropagated",
+    ]
+    by = {e["event"]: e for e in events}
+    assert by["fetch_advanced"]["base_branch"] == "main"
+    assert by["reconcile_summary"]["in_progress_count"] == 0
+    assert by["task_claimed"] == {
+        "schema": "turma.run.v1",
+        "event": "task_claimed",
+        "task_id": "bd-1",
+        "title": "Wire OAuth",
+    }
+    assert by["worker_running"]["timeout_s"] == 1800
+    assert by["task_opened"]["pr_number"] == 1
+    assert by["task_opened"]["pr_url"].endswith("/pull/1")
+    assert by["done"]["reason"] == "no_ready_tasks"
+
+
+def test_json_worker_failure_then_retry_events(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1")
+    beads = StubBeads(ready_queue=[(task,), (task,)])
+    services, *_ = _make_services(
+        tmp_path,
+        beads=beads,
+        worker_results=[_failure("timeout"), _success()],
+        max_retries=1,
+    )
+    events = _run_events(services)
+    failed = [e for e in events if e["event"] == "task_failed"]
+    assert len(failed) == 1
+    assert failed[0]["task_id"] == "bd-1"
+    assert failed[0]["attempt"] == 1
+    assert failed[0]["max_attempts"] == 2
+    assert failed[0]["reason"] == "timeout"
+    assert failed[0]["budget_exhausted"] is False
+    assert any(e["event"] == "task_opened" for e in events)
+
+
+def test_json_exhaustion_emits_task_failed_then_raises(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    task = _ref("bd-1")
+    beads = StubBeads(ready_queue=[(task,)], retries={"bd-1": 1})
+    services, *_ = _make_services(
+        tmp_path,
+        beads=beads,
+        worker_results=[_failure("boom")],
+        max_retries=1,
+    )
+    buf = io.StringIO()
+    services.emitter = JsonEmitter(stream=buf)
+    with pytest.raises(PlanningError, match="budget exhausted"):
+        run_swarm("oauth", services=services)
+    events = [json.loads(line) for line in buf.getvalue().splitlines()]
+    # events emitted before the raise are complete NDJSON records.
+    assert all(e["schema"] == "turma.run.v1" for e in events)
+    failed = [e for e in events if e["event"] == "task_failed"]
+    assert failed and failed[0]["budget_exhausted"] is True
+    # The terminal `error` event is the CLI's job, not run_swarm's —
+    # covered by the CLI test.
+
+
+def test_json_dry_run_omits_claim_commit_push(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    beads = StubBeads()
+    services, *_ = _make_services(tmp_path, beads=beads)
+    events = _run_events(services, dry_run=True)
+    names = {e["event"] for e in events}
+    assert "fetch_skipped" in names
+    assert "reconcile_summary" in names
+    assert not (names & {"task_claimed", "commit", "push", "task_opened"})
+
+
+def _merge_advancement_event(
+    tmp_path: Path, pr_state_obj, *, pr_number: int = 5, dry_run: bool = False
+) -> dict:
+    """Run the sweep for one labelled task and return its single
+    `merge_advancement` event (capturing even if the run raises)."""
+    _scratch_feature(tmp_path)
+    _setup_labelled_task_for_advancement(tmp_path, "bd-1", pr_number)
+    task = _ref_with_pr_label("bd-1", pr_number)
+    beads = StubBeads(in_progress=(task,))
+    pr = StubPr(pr_states={pr_number: pr_state_obj})
+    pr.find_open_pr_url_for_branch = (  # type: ignore[assignment]
+        lambda branch: f"https://github.com/o/r/pull/{pr_number}"
+    )
+    services, *_ = _make_services(tmp_path, beads=beads, pr=pr)
+    buf = io.StringIO()
+    services.emitter = JsonEmitter(stream=buf)
+    try:
+        run_swarm("oauth", services=services, dry_run=dry_run)
+    except PlanningError:
+        pass  # 404 halts; the event is emitted before the raise
+    events = [json.loads(line) for line in buf.getvalue().splitlines()]
+    ma = [e for e in events if e["event"] == "merge_advancement"]
+    assert len(ma) == 1, ma
+    return ma[0]
+
+
+def _pr(number: int, state: str):
+    return PrState(
+        number=number, state=state, url=f"https://github.com/o/r/pull/{number}"
+    )
+
+
+def test_json_merge_advancement_merged(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, _pr(5, "MERGED"))
+    assert e["action"] == "closed"
+    assert e["pr_state"] == "MERGED"
+    assert e["pr_number"] == 5
+    assert e["dry_run"] is False
+
+
+def test_json_merge_advancement_closed(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, _pr(5, "CLOSED"))
+    assert e["action"] == "failed"
+    assert e["pr_state"] == "CLOSED"
+
+
+def test_json_merge_advancement_open(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, _pr(5, "OPEN"))
+    assert e["action"] == "left_alone"
+    assert e["pr_state"] == "OPEN"
+
+
+def test_json_merge_advancement_unrecognized(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, _pr(5, "WEIRD_STATE"))
+    assert e["action"] == "left_alone_unrecognized"
+    assert e["pr_state"] == "WEIRD_STATE"
+
+
+def test_json_merge_advancement_404_halting(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, None, pr_number=9999)
+    assert e["action"] == "halting_stale"
+    assert e["pr_state"] == "not_found"
+    assert e["pr_number"] == 9999
+    # `dry_run` is present on every merge_advancement variant, so
+    # consumers can rely on it uniformly.
+    assert e["dry_run"] is False
+
+
+def test_json_merge_advancement_dry_run_flag(tmp_path: Path) -> None:
+    e = _merge_advancement_event(tmp_path, _pr(5, "MERGED"), dry_run=True)
+    assert e["action"] == "closed"
+    assert e["dry_run"] is True
+
+
+def test_json_reconcile_finding_is_structured(tmp_path: Path) -> None:
+    """`reconcile_finding` carries structured kind + task_id, not just
+    the human `detail` string, so consumers need not parse it."""
+    _scratch_feature(tmp_path)
+    task = _ref("bd-gone")
+    beads = StubBeads(in_progress=(task,), ready_queue=[()])
+    services, *_ = _make_services(tmp_path, beads=beads)
+    # No worktree dir → MissingWorktree finding during reconcile.
+    events = _run_events(services)
+    findings = [e for e in events if e["event"] == "reconcile_finding"]
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["kind"] == "missing-worktree"
+    assert f["task_id"] == "bd-gone"
+    assert f["detail"] == "bd-gone → missing-worktree"

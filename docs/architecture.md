@@ -217,6 +217,14 @@ existing `swarm: claimed` / `swarm: opened` lines. The state
 machine is unchanged; the output is additive (see
 `openspec/changes/swarm-run-progress-output/`).
 
+All of this operator output flows through a `RunEmitter` on
+`SwarmServices` rather than raw `print`, so `turma run --json`
+swaps a `JsonEmitter` in for the default `TextEmitter` and renders
+the same transitions as a `turma.run.v1` NDJSON event stream (one
+flushed object per line) for live surfaces — the text output is
+byte-for-byte unchanged (see
+`openspec/changes/run-json-events/`).
+
 ### bd-state ownership
 
 bd's dolt database (`.beads/embeddeddolt/`) is gitignored

@@ -16,11 +16,12 @@ live subprocess in this module's unit-test scope.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from turma.errors import PlanningError
+from turma.swarm.events import JsonEmitter, RunEmitter, TextEmitter
 from turma.swarm.git import COMMIT_MESSAGE_TEMPLATE, GitAdapter
 from turma.swarm.pull_request import PullRequestAdapter
 from turma.swarm.worker import get_worker_backend
@@ -109,6 +110,9 @@ class SwarmServices:
     base_branch: str = "main"
     max_retries: int = 1
     worker_timeout: int = 1800
+    # Run-event sink. Defaults to text (the historical print output);
+    # the CLI swaps in a JsonEmitter for `turma run --json`.
+    emitter: RunEmitter = field(default_factory=TextEmitter)
     # Run-scoped mutable counter — reset at run_swarm start,
     # incremented in `_revert_beads_export`, read at run_swarm end
     # to decide whether to print the tail-mutation warning.
@@ -124,6 +128,7 @@ def default_swarm_services(
     max_retries: int = 1,
     worker_timeout: int = 1800,
     worktree_root: str = ".worktrees",
+    emitter: RunEmitter | None = None,
 ) -> SwarmServices:
     """Construct production `SwarmServices` rooted at `repo_root`.
 
@@ -152,6 +157,7 @@ def default_swarm_services(
         base_branch=base_branch,
         max_retries=max_retries,
         worker_timeout=worker_timeout,
+        emitter=emitter if emitter is not None else TextEmitter(),
     )
 
 
@@ -230,14 +236,13 @@ def run_swarm(
     # design.md` "GitAdapter.fetch_and_ff_base" for the contract
     # (single colon-form fetch; refuses divergent local).
     if dry_run:
-        print("fetch: skipped (--dry-run)")
+        services.emitter.emit("fetch_skipped")
     else:
         services.git.fetch_and_ff_base(
             services.repo_root, services.base_branch
         )
-        print(
-            f"fetch: origin/{services.base_branch} → "
-            f"{services.base_branch}"
+        services.emitter.emit(
+            "fetch_advanced", base_branch=services.base_branch
         )
 
     report = reconcile_feature(
@@ -247,6 +252,7 @@ def run_swarm(
         git_adapter=services.git,
         pr_adapter=services.pr,
         repo_root=services.repo_root,
+        emitter=services.emitter,
     )
 
     if dry_run:
@@ -273,12 +279,7 @@ def run_swarm(
     # `openspec/changes/swarm-beads-state-merge-cleanliness/
     # design.md` "Shareability contract" for the v1 acceptance.
     if services._bd_mutations_during_run > 0:
-        print(
-            "bd-state: local mutations not yet propagated to "
-            "origin. Run `bd export && git commit -- "
-            ".beads/issues.jsonl` to capture them, or rely on "
-            "the next `turma run` worker commit to propagate."
-        )
+        services.emitter.emit("bd_state_unpropagated")
 
 
 # ---------------------------------------------------------------------
@@ -519,13 +520,19 @@ def _apply_repairs(
                     "reconcile: worktree missing; releasing claim",
                 ):
                     exhausted_ids.append(task_id)
-                print(f"repair: {task_id} → release claim (missing-worktree)")
+                services.emitter.emit(
+                    "repair",
+                    action="release_claim_missing_worktree",
+                    task_id=task_id,
+                )
 
             case CompletionPending(task_id=task_id):
                 pr_url = _complete_pending_task(feature, task_id, services)
-                print(
-                    f"repair: {task_id} → committed, pushed, PR opened "
-                    f"({pr_url}; awaiting merge), labelled"
+                services.emitter.emit(
+                    "repair",
+                    action="completion_pending",
+                    task_id=task_id,
+                    pr_url=pr_url,
                 )
 
             case CompletionPendingWithPr(task_id=task_id, pr_url=pr_url):
@@ -538,9 +545,11 @@ def _apply_repairs(
                 pr_number = _pr_number_from_url(pr_url)
                 services.beads.mark_pr_open(task_id, pr_number)
                 _revert_beads_export(services)
-                print(
-                    f"repair: {task_id} → labelled "
-                    f"(PR already open at {pr_url}; awaiting merge)"
+                services.emitter.emit(
+                    "repair",
+                    action="completion_pending_with_pr",
+                    task_id=task_id,
+                    pr_url=pr_url,
                 )
 
             case FailurePending(task_id=task_id, reason=reason):
@@ -548,7 +557,9 @@ def _apply_repairs(
                     services, task_id, f"reconcile: {reason}"
                 ):
                     exhausted_ids.append(task_id)
-                print(f"repair: {task_id} → fail_task recorded ({reason})")
+                services.emitter.emit(
+                    "repair", action="fail_task", task_id=task_id, reason=reason
+                )
 
             case StaleNoSentinels(task_id=task_id):
                 raise PlanningError(
@@ -579,7 +590,7 @@ def _apply_repairs(
                     )
                 if branch in ready_branches:
                     continue
-                print(f"repair: orphan branch (operator triage): {branch}")
+                services.emitter.emit("repair_orphan_branch", branch=branch)
 
     if exhausted_ids:
         joined = ", ".join(exhausted_ids)
@@ -643,9 +654,13 @@ def _advance_merged_prs(
             pr_state = services.pr.get_pr_state_by_number(pr_number)
         except PlanningError as exc:
             if "not found via gh" in str(exc):
-                print(
-                    f"merge-advancement: {task.id} → 404; halting "
-                    f"(turma-pr:{pr_number} stale; triage)"
+                services.emitter.emit(
+                    "merge_advancement",
+                    action="halting_stale",
+                    task_id=task.id,
+                    pr_number=pr_number,
+                    pr_state="not_found",
+                    dry_run=dry_run,
                 )
                 raise PlanningError(
                     f"merge-advancement: PR #{pr_number} for task "
@@ -656,11 +671,14 @@ def _advance_merged_prs(
                 ) from exc
             raise
 
-        prefix = "would: " if dry_run else ""
-
         if pr_state.state == "MERGED":
-            print(
-                f"{prefix}merge-advancement: {task.id} → MERGED, closed"
+            services.emitter.emit(
+                "merge_advancement",
+                action="closed",
+                task_id=task.id,
+                pr_number=pr_number,
+                pr_state="MERGED",
+                dry_run=dry_run,
             )
             if not dry_run:
                 services.beads.unmark_pr_open(task.id, pr_number)
@@ -672,9 +690,13 @@ def _advance_merged_prs(
                 _revert_beads_export(services)
 
         elif pr_state.state == "CLOSED":
-            print(
-                f"{prefix}merge-advancement: {task.id} → CLOSED "
-                "without merge → fail_task"
+            services.emitter.emit(
+                "merge_advancement",
+                action="failed",
+                task_id=task.id,
+                pr_number=pr_number,
+                pr_state="CLOSED",
+                dry_run=dry_run,
             )
             if not dry_run:
                 services.beads.unmark_pr_open(task.id, pr_number)
@@ -688,17 +710,26 @@ def _advance_merged_prs(
         elif pr_state.state == "OPEN":
             # Draft PRs surface as OPEN here; v1 does not
             # differentiate.
-            print(
-                f"merge-advancement: {task.id} → OPEN, leaving alone"
+            services.emitter.emit(
+                "merge_advancement",
+                action="left_alone",
+                task_id=task.id,
+                pr_number=pr_number,
+                pr_state="OPEN",
+                dry_run=dry_run,
             )
 
         else:
             # Unknown state — log and leave alone. If `gh` ever
             # adds a new state value, surfacing it here keeps
             # the orchestrator honest without a hard halt.
-            print(
-                f"merge-advancement: {task.id} → "
-                f"unrecognized state {pr_state.state!r}, leaving alone"
+            services.emitter.emit(
+                "merge_advancement",
+                action="left_alone_unrecognized",
+                task_id=task.id,
+                pr_number=pr_number,
+                pr_state=pr_state.state,
+                dry_run=dry_run,
             )
 
     if exhausted_ids:
@@ -729,12 +760,12 @@ def _main_loop(
     iterations = 0
     while True:
         if max_tasks is not None and iterations >= max_tasks:
-            print(f"swarm: stopping at --max-tasks={max_tasks}")
+            services.emitter.emit("stopping_max_tasks", max_tasks=max_tasks)
             return
 
         ready = services.beads.list_ready_tasks(feature)
         if not ready:
-            print("swarm: no ready tasks remain; done")
+            services.emitter.emit("done", reason="no_ready_tasks")
             return
 
         task = ready[0]
@@ -746,7 +777,9 @@ def _main_loop(
             # re-fetch on the next iteration. Races do NOT consume
             # `max_tasks` budget: the operator asked for N tasks
             # end-to-end, not N claim attempts.
-            print(f"swarm: claim race on {task.id}; skipping ({exc})")
+            services.emitter.emit(
+                "claim_race", task_id=task.id, detail=str(exc)
+            )
             continue
 
         # bd's hook dirtied .beads/issues.jsonl on claim_task; revert
@@ -754,7 +787,9 @@ def _main_loop(
         _revert_beads_export(services)
 
         iterations += 1
-        print(f"swarm: claimed {task.id} — {task.title}")
+        services.emitter.emit(
+            "task_claimed", task_id=task.id, title=task.title
+        )
 
         exhausted = _run_single_task(feature, task, services)
         if exhausted:
@@ -780,7 +815,7 @@ def _run_single_task(
         task_id=task.id,
         base_branch=services.base_branch,
     )
-    print(f"worktree: setup {task.id}")
+    services.emitter.emit("worktree_setup", task_id=task.id)
     _clear_sentinels(ref.path)
     description = services.beads.get_task_body(task.id)
     invocation = WorkerInvocation(
@@ -793,7 +828,9 @@ def _run_single_task(
     worker = services.worker_factory()
     # Announce the long wait before blocking on worker.run — this is
     # the run's longest silent stretch (up to worker_timeout).
-    print(f"worker: running {task.id} (timeout {services.worker_timeout}s)")
+    services.emitter.emit(
+        "worker_running", task_id=task.id, timeout_s=services.worker_timeout
+    )
     result = worker.run(invocation)
 
     if result.status != "success":
@@ -811,9 +848,9 @@ def _run_single_task(
             beads=services.beads,
             repo_root=services.repo_root,
         )
-        print(f"commit: {task.id}")
+        services.emitter.emit("commit", task_id=task.id)
         services.git.push_branch(ref.path, ref.branch)
-        print(f"push: {task.id}")
+        services.emitter.emit("push", task_id=task.id)
     except PlanningError as exc:
         return _handle_failure(services, task.id, str(exc))
 
@@ -839,8 +876,8 @@ def _run_single_task(
     pr_number = _pr_number_from_url(pr_url)
     services.beads.mark_pr_open(task.id, pr_number)
     _revert_beads_export(services)
-    print(
-        f"swarm: opened {task.id} (PR: {pr_url}; awaiting merge)"
+    services.emitter.emit(
+        "task_opened", task_id=task.id, pr_number=pr_number, pr_url=pr_url
     )
     return False
 
@@ -901,16 +938,14 @@ def _handle_failure(
     # the next iteration's fetch_and_ff_base stays clean.
     _revert_beads_export(services)
     exhausted = (retries + 1) > services.max_retries
-    if exhausted:
-        print(
-            f"swarm: {task_id} failed (budget exhausted after "
-            f"{retries + 1} attempts): {reason}"
-        )
-    else:
-        print(
-            f"swarm: {task_id} failed (attempt "
-            f"{retries + 1}/{services.max_retries + 1}): {reason}"
-        )
+    services.emitter.emit(
+        "task_failed",
+        task_id=task_id,
+        attempt=retries + 1,
+        max_attempts=services.max_retries + 1,
+        reason=reason,
+        budget_exhausted=exhausted,
+    )
     return exhausted
 
 
