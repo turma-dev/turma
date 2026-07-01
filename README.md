@@ -106,7 +106,14 @@ already-terminal plan is a read-only no-op.
 Planning quality depends on the chosen backend/model. Claude-backed planning
 is currently the strongest validated path. OpenCode transport is validated,
 but provider/model quality varies. Gemini requires the `gemini` CLI
-(`npm install -g @google/gemini-cli`).
+(`npm install -g @google/gemini-cli`) — but Google is retiring that CLI: the
+consumer **free / Pro / Ultra** tiers stopped serving requests on 2026-06-18,
+and it continues only via paid Gemini / Gemini Enterprise Agent Platform API
+keys, Standard/Enterprise Gemini Code Assist licenses, or Gemini Code Assist
+for GitHub through Google Cloud. The replacement Antigravity CLI is not a
+drop-in, so Gemini authoring is supported only on those paid/enterprise paths
+pending that transition
+([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)).
 
 `turma plan` only produces and critiques spec artifacts; it does not commit
 changes or orchestrate execution. Transcription is handled by
@@ -552,7 +559,8 @@ never emits a partial document.
 - post-merge advancement: detect when a `turma run`-opened PR has
   been merged and unblock dependent Beads tasks automatically
 - parallel task execution + per-task backend routing (`worker-backend:<id>` labels)
-- Gemini worker implementation (Codex and OpenCode are shipped)
+- Gemini worker implementation — deferred pending Google's Gemini CLI →
+  Antigravity CLI transition (Codex and OpenCode are shipped)
 - a `turma run --clean <feature>` flag to bulk-remove failed worktrees
   and branches
 

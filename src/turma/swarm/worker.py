@@ -10,8 +10,10 @@ parse the worker's stdout for success/failure.
 
 Registered backends are `claude-code`, `codex`, and `opencode`. They
 share the subprocess/timeout/sentinel machinery (`_run_cli_worker`) and
-differ only in the argv they build, so adding a backend (Gemini is next)
-is a small follow-on: implement the protocol, register the factory.
+differ only in the argv they build, so adding a backend is a small
+follow-on: implement the protocol, register the factory. A Gemini
+backend is deferred pending Google's Gemini CLI -> Antigravity CLI
+transition (the new CLI is not a drop-in and needs investigation).
 """
 
 from __future__ import annotations

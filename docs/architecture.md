@@ -355,8 +355,9 @@ orchestrator never parses worker stdout for success / failure.
 
 The protocol is deliberately minimal — the three workers share the
 subprocess/timeout/sentinel machinery and differ only in argv — so
-adding a backend is a small branch. A Gemini worker backend is the
-next addition.
+adding a backend is a small branch. A Gemini worker backend was the
+planned fourth but is deferred (see the Gemini CLI note under Current
+Public Status).
 
 ### Reconciliation
 
@@ -422,7 +423,8 @@ Today, the public repo contains:
   max-rounds and loop-detection guards, a resume CLI
   (`--approve | --revise | --abandon | --approve --override`), and
   LangGraph SQLite checkpointing, backed by Claude, Codex, Gemini, and
-  OpenCode authoring backends
+  OpenCode authoring backends (the Gemini author backend depends on the
+  `gemini` CLI, which Google is retiring — see the Gemini CLI note below)
 - a working `turma plan-to-beads` command that transcribes approved
   plans into feature-tagged Beads task sets
 - a working `turma run` single-feature sequential swarm orchestrator
@@ -433,8 +435,18 @@ Today, the public repo contains:
 - architecture and workflow documentation
 
 Planning quality still depends on the chosen provider/model. Parallel
-execution, per-task backend routing, and a Gemini worker backend
-are deferred past v1.
+execution and per-task backend routing are deferred past v1.
+
+Gemini CLI note: a Gemini worker backend is deferred, and the existing
+Gemini author backend is affected by Google retiring the `gemini` CLI.
+The consumer free / Pro / Ultra tiers stopped serving requests on
+2026-06-18; access continues only via paid Gemini / Gemini Enterprise
+Agent Platform API keys, Standard/Enterprise Gemini Code Assist
+licenses, or Gemini Code Assist for GitHub through Google Cloud. The
+replacement Antigravity CLI is not a drop-in, so a Gemini-class worker
+now requires investigating Antigravity CLI rather than reusing
+`gemini`. Ref:
+https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/
 
 ## Scope Of This Document
 
