@@ -507,6 +507,26 @@ Adapter failures (`bd list` non-zero exit, `gh pr list`
 non-zero exit, etc.) raise `PlanningError` and exit 1 with
 `error: <msg>` on stdout — no partial readout printed.
 
+### Machine-readable output
+
+`turma status --feature <name> --json` emits the same state as a
+pretty-printed (`indent=2`) JSON object instead of text, for scripts
+and dashboards:
+
+```bash
+uv run turma status --feature oauth-auth --json | jq '.tasks'
+```
+
+The payload carries a stable top-level `"schema": "turma.status.v1"`
+and mirrors the text sections 1:1: `feature`, `spec`, `tasks`
+(counters), `ready`, `in_progress`, `pull_requests`, `orphan_branches`.
+Each `in_progress` entry has `worktree { present, path }`, a structured
+`sentinel { status, reason }` (`status` ∈ `complete` / `failed` /
+`null`), and `pr { number, state, url }` (or `null` when the task
+carries no `turma-pr:` label). The same read-only / no-mutation
+invariant and `PlanningError`-on-failure behavior apply — `--json`
+never emits a partial document.
+
 ## Core Docs
 
 - [Architecture](docs/architecture.md)

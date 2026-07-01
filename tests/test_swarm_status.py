@@ -10,6 +10,7 @@ pinned output shape from
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -828,3 +829,213 @@ def test_status_readout_is_reexported_from_turma_swarm() -> None:
     from turma.swarm.status import status_readout as direct_status_readout
 
     assert reexport_status_readout is direct_status_readout
+
+
+# ---------------------------------------------------------------------
+# JSON mode (--json) — openspec/changes/turma-status-json
+# ---------------------------------------------------------------------
+
+
+def test_json_shape_populated(tmp_path: Path) -> None:
+    """Full payload: schema, spec, counters, ready, a fully-populated
+    in_progress entry (worktree + structured sentinel + pr), pull
+    requests, and orphan branches — mirroring the text sections 1:1."""
+    _scratch_feature(tmp_path, approved=True, transcribed=False)
+    beads = StubBeads(
+        all_snapshots=(
+            _snap("bd-1", status="in_progress"),
+            _snap("bd-2", status="open"),
+            _snap("bd-4", status="closed"),
+        ),
+        ready_tasks=(_ref("bd-2", title="Wire callback"),),
+        in_progress_tasks=(
+            _ref("bd-1", title="Token exchange", extra_labels=("turma-pr:7",)),
+        ),
+        retries={"bd-1": 0},
+    )
+    pr = StubPr(
+        prs=(
+            PrSummary(
+                number=7,
+                url="https://github.com/o/r/pull/7",
+                state="OPEN",
+                title="Token exchange",
+                head_branch="task/oauth/bd-1",
+            ),
+        ),
+        pr_states={
+            7: PrState(
+                number=7, state="OPEN", url="https://github.com/o/r/pull/7"
+            )
+        },
+    )
+    services, *_ = _make_services(
+        tmp_path,
+        beads=beads,
+        pr=pr,
+        task_branches=("task/oauth/bd-old", "task/oauth/bd-1"),
+    )
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-1"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_failed").write_text("timeout after 1800s\nextra\n")
+
+    payload = json.loads(
+        status_readout(
+            "oauth", services=services, repo_root=tmp_path, as_json=True
+        )
+    )
+
+    assert payload["schema"] == "turma.status.v1"
+    assert payload["feature"] == "oauth"
+    assert payload["spec"] == {
+        "change_dir": "openspec/changes/oauth/",
+        "present": True,
+        "approved": True,
+        "transcribed": False,
+    }
+    assert payload["tasks"] == {
+        "ready": 1,
+        "in_progress": 1,
+        "blocked_deferred": 0,
+        "closed": 1,
+        "needs_human_review": 0,
+    }
+    assert payload["ready"] == [{"id": "bd-2", "title": "Wire callback"}]
+
+    assert len(payload["in_progress"]) == 1
+    ip = payload["in_progress"][0]
+    assert ip["id"] == "bd-1"
+    assert ip["title"] == "Token exchange"
+    assert ip["retries"] == 0
+    assert ip["max_retries"] == 1
+    assert ip["worktree"] == {"present": True, "path": str(worktree)}
+    assert ip["sentinel"] == {
+        "status": "failed",
+        "reason": "timeout after 1800s",
+    }
+    assert ip["pr"] == {
+        "number": 7,
+        "state": "OPEN",
+        "url": "https://github.com/o/r/pull/7",
+    }
+
+    assert payload["pull_requests"] == [
+        {
+            "number": 7,
+            "url": "https://github.com/o/r/pull/7",
+            "state": "OPEN",
+            "title": "Token exchange",
+            "head_branch": "task/oauth/bd-1",
+        }
+    ]
+    assert payload["orphan_branches"] == ["task/oauth/bd-old"]
+
+
+def test_json_nullability_absent_worktree_and_no_pr(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        in_progress_tasks=(_ref("bd-1", title="t"),),
+        retries={"bd-1": 0},
+    )
+    services, *_ = _make_services(tmp_path, beads=beads)
+    # No worktree dir → absent; no turma-pr label → pr null.
+    payload = json.loads(
+        status_readout(
+            "oauth", services=services, repo_root=tmp_path, as_json=True
+        )
+    )
+    ip = payload["in_progress"][0]
+    assert ip["worktree"] == {"present": False, "path": None}
+    assert ip["sentinel"] == {"status": None, "reason": None}
+    assert ip["pr"] is None
+
+
+def test_json_sentinel_complete(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    beads = StubBeads(in_progress_tasks=(_ref("bd-1"),))
+    services, *_ = _make_services(tmp_path, beads=beads)
+    worktree = tmp_path / ".worktrees" / "oauth" / "bd-1"
+    worktree.mkdir(parents=True)
+    (worktree / ".task_complete").write_text("")
+    payload = json.loads(
+        status_readout(
+            "oauth", services=services, repo_root=tmp_path, as_json=True
+        )
+    )
+    assert payload["in_progress"][0]["sentinel"] == {
+        "status": "complete",
+        "reason": None,
+    }
+
+
+def test_json_mode_never_calls_any_mutation_surface(tmp_path: Path) -> None:
+    """The no-mutation invariant must hold in JSON mode too — same
+    gather pipeline, so the same headline guarantee applies."""
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        all_snapshots=(
+            _snap("bd-1", status="in_progress"),
+            _snap("bd-2", status="open"),
+        ),
+        ready_tasks=(_ref("bd-2"),),
+        in_progress_tasks=(_ref("bd-1", extra_labels=("turma-pr:1",)),),
+        retries={"bd-1": 0},
+    )
+    pr = StubPr(
+        prs=(
+            PrSummary(
+                number=1,
+                url="u",
+                state="OPEN",
+                title="t",
+                head_branch="task/oauth/bd-1",
+            ),
+        ),
+        pr_states={1: PrState(number=1, state="OPEN", url="u")},
+    )
+    services, beads_s, wt, git, pr_s = _make_services(
+        tmp_path, beads=beads, pr=pr, task_branches=("task/oauth/bd-1",)
+    )
+    json.loads(
+        status_readout(
+            "oauth", services=services, repo_root=tmp_path, as_json=True
+        )
+    )
+    mutation = {
+        "claim_task", "close_task", "fail_task", "setup", "cleanup",
+        "commit_all", "push_branch", "open_pr",
+    }
+    for stub in (beads_s, wt, git, pr_s):
+        called = {c[0] for c in stub.calls}
+        assert not (called & mutation), f"mutation called: {called & mutation}"
+
+
+def test_json_output_is_deterministic_and_pretty(tmp_path: Path) -> None:
+    _scratch_feature(tmp_path)
+    beads = StubBeads(
+        all_snapshots=(
+            _snap("bd-1", status="in_progress"),
+            _snap("bd-2", status="open"),
+        ),
+        ready_tasks=(_ref("bd-2"),),
+        in_progress_tasks=(_ref("bd-1"),),
+    )
+    services, *_ = _make_services(tmp_path, beads=beads)
+    first = status_readout(
+        "oauth", services=services, repo_root=tmp_path, as_json=True
+    )
+    second = status_readout(
+        "oauth", services=services, repo_root=tmp_path, as_json=True
+    )
+    assert first == second
+    # indent=2 pretty-printed object.
+    assert first.startswith("{\n")
+
+
+def test_json_absent_flag_still_renders_text(tmp_path: Path) -> None:
+    """Default (no --json) path is byte-for-byte the text readout."""
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path)
+    out = status_readout("oauth", services=services, repo_root=tmp_path)
+    assert out.startswith("feature: oauth")
+    assert not out.lstrip().startswith("{")
