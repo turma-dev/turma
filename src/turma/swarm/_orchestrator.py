@@ -40,6 +40,7 @@ from turma.swarm.worker import (
     TASK_FAILED_SENTINEL,
     WorkerBackend,
     WorkerInvocation,
+    registered_worker_backends,
 )
 from turma.transcription.beads import (
     BeadsAdapter,
@@ -189,10 +190,10 @@ def run_swarm(
             "wires default services in Task 8 of "
             "openspec/changes/swarm-orchestration/tasks.md."
         )
-    if backend is not None and backend != "claude-code":
+    if backend is not None and backend not in registered_worker_backends():
         raise PlanningError(
-            f"unknown worker backend: {backend!r}. v1 registers only "
-            "'claude-code'."
+            f"unknown worker backend: {backend!r}. "
+            f"Registered: {list(registered_worker_backends())}"
         )
 
     _preflight(feature, services.repo_root)

@@ -219,8 +219,14 @@ stops. Review, merge, and release are human-driven.
 uv run turma run --feature <name>
 uv run turma run --feature <name> --max-tasks 1       # smoke one task end-to-end
 uv run turma run --feature <name> --backend claude-code
+uv run turma run --feature <name> --backend codex     # drive Codex instead of Claude Code
 uv run turma run --feature <name> --dry-run           # preflight + reconcile only
 ```
+
+Worker backends are selectable via `--backend` (or `[swarm]
+worker_backend`); registered names are `claude-code` (default) and
+`codex`. The Codex worker drives `codex exec` in `workspace-write` mode
+and honors the same sentinel completion contract as Claude Code.
 
 Config: `turma run` reads the `[swarm]` block from `turma.toml`
 for `worker_backend`, `worker_timeout`, `max_retries`,
@@ -237,8 +243,9 @@ per-invocation cap with no config equivalent. Missing or partial
 - `gh` (GitHub CLI) on PATH with an authenticated session
   (`gh auth login` once; verified at startup via `gh auth status`)
 - `claude` (Claude Code CLI) on PATH for the default
-  `claude-code` worker backend. `--dry-run` does not require
-  `claude` because the worker is never invoked.
+  `claude-code` worker backend, or `codex` (Codex CLI) on PATH for
+  `--backend codex`. Only the selected backend's CLI is required.
+  `--dry-run` requires neither because the worker is never invoked.
 - A transcribed feature: `openspec/changes/<name>/APPROVED` and
   `openspec/changes/<name>/TRANSCRIBED.md` must both exist. Missing
   either halts with a pointer back to `turma plan` or
@@ -537,7 +544,7 @@ never emits a partial document.
 - post-merge advancement: detect when a `turma run`-opened PR has
   been merged and unblock dependent Beads tasks automatically
 - parallel task execution + per-task backend routing (`worker-backend:<id>` labels)
-- Codex / OpenCode / Gemini worker implementations
+- OpenCode / Gemini worker implementations (Codex is shipped)
 - a `turma run --clean <feature>` flag to bulk-remove failed worktrees
   and branches
 

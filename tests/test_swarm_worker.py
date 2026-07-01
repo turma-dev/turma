@@ -11,10 +11,12 @@ import pytest
 from turma.errors import PlanningError
 from turma.swarm.worker import (
     CLAUDE_INSTALL_HINT,
+    CODEX_INSTALL_HINT,
     TASK_COMPLETE_SENTINEL,
     TASK_FAILED_SENTINEL,
     WORKER_PROMPT_TEMPLATE,
     ClaudeCodeWorker,
+    CodexWorker,
     WorkerBackend,
     WorkerInvocation,
     WorkerResult,
@@ -285,8 +287,8 @@ def test_claude_worker_run_timeout_without_captured_streams(
 # ---------------------------------------------------------------------
 
 
-def test_registered_worker_backends_exposes_claude_code() -> None:
-    assert registered_worker_backends() == ("claude-code",)
+def test_registered_worker_backends_exposes_claude_code_and_codex() -> None:
+    assert registered_worker_backends() == ("claude-code", "codex")
 
 
 @patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/claude")
@@ -315,3 +317,135 @@ def test_claude_code_worker_satisfies_worker_backend_protocol() -> None:
     # WorkerBackend is only a structural protocol used for type hints.
     # Instantiation here is gated on claude being available, so skip.
     _ = WorkerBackend  # keep the import live for readers
+
+
+# ---------------------------------------------------------------------
+# CodexWorker (openspec/changes/codex-worker-backend)
+# ---------------------------------------------------------------------
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+def test_codex_worker_init_succeeds_when_cli_present(
+    _which: MagicMock,
+) -> None:
+    worker = CodexWorker()
+    assert worker.name == "codex"
+
+
+@patch("turma.swarm.worker.shutil.which", return_value=None)
+def test_codex_worker_init_raises_when_cli_missing(
+    _which: MagicMock,
+) -> None:
+    with pytest.raises(PlanningError) as exc:
+        CodexWorker()
+    assert str(exc.value) == CODEX_INSTALL_HINT
+
+
+def test_codex_install_hint_wording() -> None:
+    assert "codex CLI not found" in CODEX_INSTALL_HINT
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+@patch("turma.swarm.worker.subprocess.run")
+def test_codex_worker_run_pins_argv_and_cwd(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout="codex output", stderr=""
+    )
+    (tmp_path / TASK_COMPLETE_SENTINEL).write_text("DONE\n")
+
+    result = CodexWorker().run(_inv(tmp_path))
+
+    mock_run.assert_called_once()
+    call_args = mock_run.call_args
+    argv = call_args.args[0]
+    # codex exec <prompt> --cd <worktree> --sandbox workspace-write
+    assert argv[:2] == ["codex", "exec"]
+    assert "Task: Do the thing" in argv[2]
+    assert "--cd" in argv
+    assert argv[argv.index("--cd") + 1] == str(tmp_path)
+    assert "--sandbox" in argv
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    # least-privilege: never the full-access escape hatch
+    assert "danger-full-access" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+    assert call_args.kwargs["cwd"] == tmp_path
+    assert call_args.kwargs["capture_output"] is True
+    assert call_args.kwargs["text"] is True
+    assert call_args.kwargs["timeout"] == 30
+
+    assert result.status == "success"
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+@patch("turma.swarm.worker.subprocess.run")
+def test_codex_worker_run_success_sentinel(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout="out", stderr="warn"
+    )
+    (tmp_path / TASK_COMPLETE_SENTINEL).write_text("DONE\n")
+
+    result = CodexWorker().run(_inv(tmp_path))
+
+    assert result == WorkerResult(
+        status="success", reason="", stdout="out", stderr="warn"
+    )
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+@patch("turma.swarm.worker.subprocess.run")
+def test_codex_worker_run_failure_sentinel(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout="", stderr=""
+    )
+    (tmp_path / TASK_FAILED_SENTINEL).write_text("blocked by missing dep\n")
+
+    result = CodexWorker().run(_inv(tmp_path))
+
+    assert result.status == "failure"
+    assert result.reason == "blocked by missing dep"
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+@patch("turma.swarm.worker.subprocess.run")
+def test_codex_worker_run_no_sentinel_is_failure(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout="", stderr=""
+    )
+
+    result = CodexWorker().run(_inv(tmp_path))
+
+    assert result.status == "failure"
+    assert "without writing a completion marker" in result.reason
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+@patch("turma.swarm.worker.subprocess.run")
+def test_codex_worker_run_timeout_returns_typed_timeout(
+    mock_run: MagicMock, _which: MagicMock, tmp_path: Path
+) -> None:
+    mock_run.side_effect = subprocess.TimeoutExpired(
+        cmd=["codex"], timeout=30, output=b"partial", stderr=b"err"
+    )
+
+    result = CodexWorker().run(_inv(tmp_path, timeout_seconds=30))
+
+    assert result.status == "timeout"
+    assert result.reason == "worker exceeded timeout"
+
+
+@patch("turma.swarm.worker.shutil.which", return_value="/usr/bin/codex")
+def test_get_worker_backend_returns_codex_instance(
+    _which: MagicMock,
+) -> None:
+    worker = get_worker_backend("codex")
+    assert isinstance(worker, CodexWorker)
+    assert worker.name == "codex"

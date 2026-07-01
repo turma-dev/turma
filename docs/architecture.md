@@ -345,14 +345,17 @@ needs_human_review`.
 ### Worker backends
 
 Workers implement a small `WorkerBackend` protocol — `run(invocation)
--> WorkerResult`. v1 registers only `claude-code` (`claude -p
-<prompt> --dangerously-skip-permissions` against the per-task
-worktree). Workers signal completion by writing sentinel files;
-the orchestrator never parses worker stdout for success / failure.
+-> WorkerResult`. Registered backends are `claude-code` (`claude -p
+<prompt> --dangerously-skip-permissions`) and `codex` (`codex exec
+<prompt> --cd <worktree> --sandbox workspace-write`), both driven
+against the per-task worktree. Workers signal completion by writing
+sentinel files; the orchestrator never parses worker stdout for
+success / failure.
 
-Codex / OpenCode / Gemini worker backends are v2 concerns. The
-protocol is deliberately minimal so adding a backend is a small
-branch.
+The protocol is deliberately minimal — the two workers share the
+subprocess/timeout/sentinel machinery and differ only in argv — so
+adding a backend is a small branch. OpenCode and Gemini worker
+backends are the next additions.
 
 ### Reconciliation
 
@@ -423,14 +426,14 @@ Today, the public repo contains:
   plans into feature-tagged Beads task sets
 - a working `turma run` single-feature sequential swarm orchestrator
   (preflight → reconcile → repair → main loop, one PR per Beads
-  task) with the `claude-code` worker backend
+  task) with `claude-code` and `codex` worker backends
 - minimal CI for install and test validation
 - project configuration and validation basics
 - architecture and workflow documentation
 
 Planning quality still depends on the chosen provider/model. Parallel
-execution, per-task backend routing, and Codex / OpenCode / Gemini
-worker backends are deferred past v1.
+execution, per-task backend routing, and OpenCode / Gemini worker
+backends are deferred past v1.
 
 ## Scope Of This Document
 
