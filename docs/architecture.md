@@ -447,6 +447,11 @@ Today, the public repo contains:
 - a working `turma run` single-feature sequential swarm orchestrator
   (preflight → reconcile → repair → main loop, one PR per Beads
   task) with `claude-code`, `codex`, and `opencode` worker backends
+- a working `turma status` command — a read-only readout of a
+  feature's Beads + PR + worktree state
+- machine-readable `--json` output for `turma status` and `turma plan`
+  (single JSON snapshots — `turma.status.v1` / `turma.plan.v1`) and
+  `turma run` (a `turma.run.v1` NDJSON event stream)
 - minimal CI for install and test validation
 - project configuration and validation basics
 - architecture and workflow documentation
