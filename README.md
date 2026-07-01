@@ -600,8 +600,11 @@ Each `in_progress` entry has `worktree { present, path }`, a structured
 `sentinel { status, reason }` (`status` ∈ `complete` / `failed` /
 `null`), and `pr { number, state, url }` (or `null` when the task
 carries no `turma-pr:` label). The same read-only / no-mutation
-invariant and `PlanningError`-on-failure behavior apply — `--json`
-never emits a partial document.
+invariant applies, and `--json` never emits a partial document. On
+failure it emits a single structured error object —
+`{"schema": "turma.status.v1", "error": "<message>"}`, exit 1 — so the
+surface stays parseable (matching `plan --json`; text mode still prints
+`error: <msg>`).
 
 ## Core Docs
 
