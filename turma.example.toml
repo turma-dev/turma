@@ -11,7 +11,8 @@
 # defaults below.
 
 # Which worker backend drives claimed tasks. Registered: "claude-code"
-# (default), "codex", and "opencode". A Gemini backend is not yet available.
+# (default), "codex", and "opencode". A Gemini backend is deferred pending
+# Google's Gemini CLI -> Antigravity CLI transition.
 worker_backend = "claude-code"
 
 # Seconds before a worker is considered timed-out.
@@ -61,7 +62,9 @@ interactive = true
 # revision of all three artifacts. Model prefix selects the backend:
 # claude-*, gpt-*/codex-*/o*, gemini-*, or provider/model for OpenCode.
 author_model = "claude-opus-4-6"
-# author_model = "gemini-2.5-flash"                # Gemini CLI
+# author_model = "gemini-2.5-flash"                # Gemini CLI (paid/enterprise
+#                                                  # tiers only; consumer tiers
+#                                                  # retired 2026-06-18)
 # author_model = "groq/llama-3.3-70b-versatile"   # OpenCode + Groq
 
 # Critic backend writes critique_N.md per round. Output must be in the
