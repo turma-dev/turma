@@ -610,7 +610,8 @@ auto-delete them on close.
   construction.
 - `error: claude CLI not found` — `claude` missing from PATH;
   only fires when a task is actually claimed, not during
-  `--dry-run`.
+  `--dry-run`. (`error: codex CLI not found` is the equivalent for
+  `--backend codex`.)
 - `error: stale worktree for <id> has no sentinels` — reconcile
   caught ambiguous state; inspect
   `.worktrees/<feature>/<id>/` and decide. The orchestrator
@@ -623,6 +624,27 @@ auto-delete them on close.
   personal access token` — the authenticated `gh` session lacks
   `pull_requests:write` scope. Fix under Settings → Personal
   access tokens for the repo owner.
+
+## Codex worker backend
+
+Every step above runs identically with `--backend codex` — only the
+worker CLI differs; the worktree / commit / PR / reconciliation
+pipeline is backend-agnostic. Prerequisite: `codex` (Codex CLI) on
+PATH and authenticated, in place of `claude`.
+
+```bash
+uv run turma run --feature smoke-run --max-tasks 1 --backend codex
+```
+
+Autonomy note: the load-bearing question — does `codex exec` in the
+`workspace-write` sandbox run non-interactively without an approval
+prompt? — was confirmed with an isolated probe (2026-06-30, codex-cli
+0.142.0): `codex exec "<task>" --cd <dir> --sandbox workspace-write`
+created files and wrote `.task_complete` autonomously, exit 0, no
+prompt. The full end-to-end `turma run --backend codex` against a live
+`bd` + `gh` (opening a real PR) is left as an operator-run smoke; the
+worker unit tests pin the argv, and the isolated probe confirms the
+tool obeys it.
 
 ## Notes for future work
 

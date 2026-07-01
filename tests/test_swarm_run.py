@@ -379,7 +379,19 @@ def test_preflight_requires_services(tmp_path: Path) -> None:
 def test_preflight_rejects_unknown_backend(tmp_path: Path) -> None:
     _scratch_feature(tmp_path)
     services, *_ = _make_services(tmp_path, beads=StubBeads())
-    with pytest.raises(PlanningError, match="unknown worker backend"):
+    with pytest.raises(PlanningError, match="unknown worker backend") as exc:
+        run_swarm("oauth", services=services, backend="vim-swordsman")
+    # Message names the registry, not a hardcoded single backend.
+    assert "claude-code" in str(exc.value)
+    assert "codex" in str(exc.value)
+
+
+def test_run_swarm_accepts_codex_backend_past_the_gate(tmp_path: Path) -> None:
+    """`codex` is a registered backend, so the backend gate lets it
+    through — the run then fails at preflight (no change dir), proving
+    the gate accepted it rather than rejecting it as unknown."""
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    with pytest.raises(PlanningError, match="no OpenSpec change directory"):
         run_swarm("oauth", services=services, backend="codex")
 
 

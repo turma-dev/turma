@@ -141,6 +141,45 @@ def _detect_sentinel_result(
     )
 
 
+def _decode_stream(stream: bytes | str | None) -> str:
+    """Normalize a subprocess stream (bytes | str | None) to str."""
+    if isinstance(stream, (bytes, bytearray)):
+        return stream.decode()
+    return stream or ""
+
+
+def _run_cli_worker(
+    argv: list[str], invocation: WorkerInvocation
+) -> WorkerResult:
+    """Run a worker CLI in the task worktree and derive a WorkerResult.
+
+    Shared by the concrete workers, which differ only in how they build
+    `argv`: everything after the subprocess call — timeout handling and
+    sentinel-based completion detection — is identical.
+    """
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=invocation.worktree,
+            capture_output=True,
+            text=True,
+            timeout=invocation.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return WorkerResult(
+            status="timeout",
+            reason=_TIMEOUT_REASON,
+            stdout=_decode_stream(exc.stdout),
+            stderr=_decode_stream(exc.stderr),
+        )
+
+    return _detect_sentinel_result(
+        worktree=invocation.worktree,
+        stdout=result.stdout or "",
+        stderr=result.stderr or "",
+    )
+
+
 # ---------------------------------------------------------------------
 # Claude Code worker
 # ---------------------------------------------------------------------
@@ -174,33 +213,49 @@ class ClaudeCodeWorker:
             "-p", prompt,
             "--dangerously-skip-permissions",
         ]
-        try:
-            result = subprocess.run(
-                argv,
-                cwd=invocation.worktree,
-                capture_output=True,
-                text=True,
-                timeout=invocation.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "").decode() if isinstance(
-                exc.stdout, (bytes, bytearray)
-            ) else (exc.stdout or "")
-            stderr = (exc.stderr or "").decode() if isinstance(
-                exc.stderr, (bytes, bytearray)
-            ) else (exc.stderr or "")
-            return WorkerResult(
-                status="timeout",
-                reason=_TIMEOUT_REASON,
-                stdout=stdout,
-                stderr=stderr,
-            )
+        return _run_cli_worker(argv, invocation)
 
-        return _detect_sentinel_result(
-            worktree=invocation.worktree,
-            stdout=result.stdout or "",
-            stderr=result.stderr or "",
-        )
+
+# ---------------------------------------------------------------------
+# Codex worker
+# ---------------------------------------------------------------------
+
+
+CODEX_INSTALL_HINT = (
+    "codex CLI not found. Install Codex first "
+    "(https://developers.openai.com/codex/cli)."
+)
+
+
+class CodexWorker:
+    """Runs Codex non-interactively inside a per-task worktree.
+
+    argv: `codex exec <prompt> --cd <worktree> --sandbox workspace-write`
+    `exec` is Codex's non-interactive mode. `--sandbox workspace-write`
+    lets the agent edit its worktree — the planning author backend uses
+    `read-only` because it only generates text, but a worker makes
+    changes. Least-privilege: never `danger-full-access`.
+
+    Completion is the shared sentinel contract (`render_worker_prompt` +
+    `_detect_sentinel_result`); the worker must not commit — Turma owns
+    the worker-commit boundary.
+    """
+
+    name = "codex"
+
+    def __init__(self) -> None:
+        if shutil.which("codex") is None:
+            raise PlanningError(CODEX_INSTALL_HINT)
+
+    def run(self, invocation: WorkerInvocation) -> WorkerResult:
+        prompt = render_worker_prompt(invocation)
+        argv = [
+            "codex",
+            "exec", prompt,
+            "--cd", str(invocation.worktree),
+            "--sandbox", "workspace-write",
+        ]
+        return _run_cli_worker(argv, invocation)
 
 
 # ---------------------------------------------------------------------
@@ -210,6 +265,7 @@ class ClaudeCodeWorker:
 
 _BACKENDS: dict[str, Callable[[], WorkerBackend]] = {
     "claude-code": ClaudeCodeWorker,
+    "codex": CodexWorker,
 }
 
 
