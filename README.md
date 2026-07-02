@@ -499,6 +499,9 @@ bd show <id>
 
 A detailed end-to-end smoke procedure against real `bd` + `gh` +
 `claude` lives in [`docs/smoke-turma-run.md`](docs/smoke-turma-run.md).
+A turnkey checklist for smoking all three worker backends
+(`claude-code` / `codex` / `opencode`) through the same workflow is in
+[`docs/smoke-three-backends.md`](docs/smoke-three-backends.md).
 
 ### Feature status
 
