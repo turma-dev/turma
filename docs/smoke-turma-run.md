@@ -55,7 +55,9 @@ WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 git clone "$SMOKE_REPO_URL" .
 git checkout -b main
-git push -u origin main || true   # ensure `main` exists on origin
+# Nothing to push yet: an empty scratch repo has no commit, so
+# `git push` here fails with "src refspec main does not match any".
+# `main` is created on origin by the first *real* push below (git push -u).
 
 # Minimum Turma project layout: config + role prompts.
 cp "$TURMA_REPO/turma.example.toml" turma.toml
@@ -86,7 +88,7 @@ cat >> .gitignore <<'EOF'
 EOF
 git add .gitignore turma.toml
 git commit -m "smoke: turma project layout"
-git push
+git push -u origin main   # first real push: creates `main` on origin + sets upstream
 ```
 
 ## Pre-populate a transcribed feature
@@ -633,8 +635,10 @@ reconciliation pipeline is backend-agnostic. Prerequisite: the selected
 backend's CLI on PATH and authenticated, in place of `claude`.
 
 ```bash
-uv run turma run --feature smoke-run --max-tasks 1 --backend codex
-uv run turma run --feature smoke-run --max-tasks 1 --backend opencode
+# Run from the scratch repo, which has no pyproject.toml — invoke the venv
+# binary by absolute path (`uv run` will not resolve here).
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1 --backend codex
+"$TURMA_REPO/.venv/bin/turma" run --feature smoke-run --max-tasks 1 --backend opencode
 ```
 
 Codex autonomy: the load-bearing question — does `codex exec` in the
