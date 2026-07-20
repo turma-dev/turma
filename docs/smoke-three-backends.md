@@ -28,10 +28,24 @@ task to a fresh `open` state.
 
 ## Per-backend run
 
-For each backend, from the scratch repo:
+For each backend, run this full cycle from the scratch repo. `$TURMA_REPO` is
+exported in `docs/smoke-turma-run.md` → "Scratch setup"; `uv run` does **not**
+work here (the scratch repo has no `pyproject.toml`), so invoke the venv binary
+by absolute path:
 
 ```bash
-uv run turma run --feature <feat> --max-tasks 1 --backend <backend>
+BACKEND=<backend>   # claude-code | codex | opencode
+
+# 1. Reset the feature's task to a fresh `open` state
+"$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature <feat> --force
+
+# 2. Drive one task end to end
+"$TURMA_REPO/.venv/bin/turma" run --feature <feat> --max-tasks 1 --backend "$BACKEND"
+
+# 3. Verify checks 1–4 below, then merge the PR on GitHub (no --delete-branch)
+
+# 4. Re-run to exercise merge-advancement (check 5)
+"$TURMA_REPO/.venv/bin/turma" run --feature <feat>
 ```
 
 Verify all five, for **each** backend:
