@@ -2724,6 +2724,18 @@ def test_run_swarm_rejects_max_tasks_with_router(tmp_path: Path) -> None:
                   max_parallel=2, max_tasks=5)
 
 
+@patch("turma.swarm._orchestrator.dispatch_concurrent")
+def test_dry_run_allows_max_tasks_with_router(mock_dispatch, tmp_path: Path) -> None:
+    # A dry-run exits before dispatch, so `--dry-run --max-tasks N` must stay
+    # usable in a pooled config rather than being rejected for a cap it never
+    # applies.
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    run_swarm("oauth", services=services, router=_default_router(),
+              max_parallel=2, max_tasks=5, dry_run=True)
+    mock_dispatch.assert_not_called()
+
+
 def test_run_swarm_concurrent_path_rejects_unknown_backend(
     tmp_path: Path
 ) -> None:
