@@ -62,6 +62,7 @@ name     = "anthropic"
 backend  = "claude-code"
 types    = ["impl", "spec"]   # turma-type: labels routed here
 max      = 2
+default  = true               # exactly one pool must set this; unmatched types route here
 
 [[swarm.pools]]
 name     = "openai"
@@ -71,9 +72,12 @@ max      = 2
 ```
 
 - **Routing key: the existing `turma-type:` label.** A ready task's type selects
-  its pool. A type not matched by any pool falls to a designated default pool
-  (or errors at config-load — decided in Task 2). Each pool binds one backend
-  from the existing worker registry.
+  its pool. **A type not matched by any pool's `types` routes to the default
+  pool** — the pool marked `default = true`. Config-load requires **exactly one**
+  `default = true` pool whenever `[[swarm.pools]]` is present (the back-compat
+  implicit pool is the default), so an unmatched type always has a home and never
+  errors at run time. Each pool binds one backend from the existing worker
+  registry.
 - **Back-compat.** With no `[[swarm.pools]]` block, behavior is today's:
   one implicit pool over all types using `[swarm].worker_backend`, `max = 1` (or
   a documented default). `--backend <id>` remains a single-pool override for the
@@ -120,9 +124,16 @@ hold the lock, the network `push` need not.
 
 - **Retry-budget exhaustion halts the whole run**, matching today's `_main_loop`
   (which raises `PlanningError` on exhaustion). v1 does **not** add per-pool
-  quiescing. On a halting failure the dispatcher stops scheduling new slots;
-  in-flight slots are awaited to a safe boundary (or cancelled) per the stop
-  protocol, then the run exits nonzero as today. Per-pool isolation ("halt only
+  quiescing.
+- **Stop protocol (decision: drain, do not cancel).** On a halting failure the
+  dispatcher **stops scheduling new slots** but lets every in-flight worker reach
+  its **normal terminal handling** — commit → push → open PR, or `fail_task` —
+  rather than cancelling it. Cancelling mid-tail would strand edited worktrees
+  and written sentinels in an ambiguous state; draining leaves each task at a
+  clean terminal that the next run's reconciliation already understands
+  (`completion-pending`, `pr_open`, released-to-`open`, etc.). Once all in-flight
+  slots have drained, the run exits nonzero. (`--max-tasks` reaching its cap is
+  the same drain path minus the nonzero exit.) Per-pool isolation ("halt only
   that pool, keep the others") is explicitly deferred.
 - Non-halting task failures (retry budget remaining) release the task back to
   `open` exactly as today; another slot may re-claim it later.

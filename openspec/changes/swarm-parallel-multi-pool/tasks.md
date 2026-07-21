@@ -30,8 +30,9 @@ are pinned before any implementation.
 - [ ] `[[swarm.pools]]` array-of-tables in `turma.example.toml` (name, backend,
       types, max) and `SwarmConfig` parsing in `src/turma/config.py`.
 - [ ] A pool-registry/router: `turma-type:` label → pool → backend (from the
-      existing worker registry) + cap. Decide and implement the unmatched-type
-      policy (default pool vs config-load error) and document it.
+      existing worker registry) + cap. Unmatched types route to the `default =
+      true` pool; config-load requires exactly one default pool when
+      `[[swarm.pools]]` is present (validate + error otherwise).
 - [ ] Back-compat: no `[[swarm.pools]]` ⇒ one implicit pool over all types using
       `[swarm].worker_backend`; `--backend <id>` overrides to a single pool for
       the whole run.
@@ -78,9 +79,11 @@ are pinned before any implementation.
 
 - [ ] Verify reconciliation/repair and merge-advancement behave with N concurrent
       in-progress tasks (classification is already set-based); add a test.
-- [ ] Failure-halt: retry-budget exhaustion stops scheduling new slots; in-flight
-      slots resolve to a safe boundary (or cancel) per the stop protocol; run
-      exits nonzero as today. No per-pool quiescing. Green the failure test.
+- [ ] Failure-halt (drain, not cancel): retry-budget exhaustion stops scheduling
+      new slots but lets in-flight workers reach normal terminal handling
+      (commit/push/PR or `fail_task`) — no mid-tail cancellation — then the run
+      exits nonzero. No per-pool quiescing. Green the failure test, asserting
+      in-flight slots reached a clean terminal (not cancelled).
 
 ### 7. Full baseline + docs + scope guard
 
