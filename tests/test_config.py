@@ -416,3 +416,21 @@ def test_max_parallel_must_be_positive_is_config_error(tmp_path, monkeypatch):
     text = MINIMAL_CONFIG + "\n[swarm]\nmax_parallel = 0\n"
     with pytest.raises(ConfigError, match="max_parallel"):
         _load(tmp_path, monkeypatch, text)
+
+
+def test_pool_unknown_backend_is_config_error(tmp_path, monkeypatch):
+    """A [[swarm.pools]] backend not in the worker registry is rejected at
+    load time (matching the --backend/worker_backend gate), not deferred to
+    the dispatcher."""
+    text = (
+        MINIMAL_CONFIG
+        + """
+[[swarm.pools]]
+name = "a"
+backend = "typo"
+types = ["impl"]
+default = true
+"""
+    )
+    with pytest.raises(ConfigError, match="unknown worker backend"):
+        _load(tmp_path, monkeypatch, text)

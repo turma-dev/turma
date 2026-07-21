@@ -8,6 +8,7 @@ from pathlib import Path
 
 from turma.errors import PlanningError
 from turma.swarm.pools import Pool, PoolRouter, build_router
+from turma.swarm.worker import registered_worker_backends
 
 
 class ConfigError(Exception):
@@ -194,9 +195,10 @@ def _parse_swarm(swarm_raw: dict) -> SwarmConfig:
 def _parse_pools(pools_raw: object) -> tuple[Pool, ...]:
     """Parse `[[swarm.pools]]` into validated `Pool`s.
 
-    Per-key shape errors and the cross-pool rules (exactly one default, no
-    duplicate task types across pools, `max >= 1`) raise `ConfigError` so the
-    operator fixes turma.toml. The cross-pool rules reuse `build_router`.
+    Per-key shape errors, an unknown backend (not in the worker registry), and
+    the cross-pool rules (exactly one default, no duplicate task types across
+    pools, `max >= 1`) raise `ConfigError` so the operator fixes turma.toml.
+    The cross-pool rules reuse `build_router`.
     """
     if not isinstance(pools_raw, list):
         raise ConfigError(
@@ -218,6 +220,12 @@ def _parse_pools(pools_raw: object) -> tuple[Pool, ...]:
         if not isinstance(backend, str) or not backend:
             raise ConfigError(
                 f"swarm.pools[{name!r}].backend must be a non-empty string"
+            )
+        if backend not in registered_worker_backends():
+            raise ConfigError(
+                f"swarm.pools[{name!r}].backend: unknown worker backend "
+                f"{backend!r}. Registered: "
+                f"{list(registered_worker_backends())}"
             )
         types = entry.get("types", [])
         if not isinstance(types, list) or not all(
