@@ -192,7 +192,9 @@ def run_swarm(
     - `services` is required for orchestration. Callers that invoke
       `run_swarm` programmatically must provide a `SwarmServices`.
     - `max_tasks` caps sequential outer-loop iterations (default
-      unbounded). Not supported alongside `router` (parallel execution).
+      unbounded). Not supported alongside `router` (parallel execution)
+      unless `dry_run` — a dry-run exits before the loop, so the cap is
+      moot and the preview stays usable.
     - `backend` is validated against the worker registry; it selects the
       single-backend for the sequential path and is informational for the
       concurrent path (whose per-pool backends come from `router`).
@@ -215,7 +217,11 @@ def run_swarm(
             f"unknown worker backend: {backend!r}. "
             f"Registered: {list(registered_worker_backends())}"
         )
-    if router is not None and max_tasks is not None:
+    # --max-tasks has no defined semantics under parallel execution yet, so
+    # refuse it up front rather than silently ignoring it. Only when we would
+    # actually dispatch concurrently: --dry-run exits before the loop (below),
+    # so a pooled `--dry-run --max-tasks N` preview stays usable.
+    if router is not None and max_tasks is not None and not dry_run:
         raise PlanningError(
             "--max-tasks is not supported with parallel execution "
             "(max_parallel > 1 or configured [[swarm.pools]]). Rerun with "
