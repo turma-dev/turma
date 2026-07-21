@@ -113,6 +113,10 @@ class SwarmServices:
     # Run-event sink. Defaults to text (the historical print output);
     # the CLI swaps in a JsonEmitter for `turma run --json`.
     emitter: RunEmitter = field(default_factory=TextEmitter)
+    # Backend-keyed worker resolver for the concurrent multi-pool dispatcher
+    # (pool.backend name -> WorkerBackend). None on the sequential path, which
+    # uses `worker_factory`. See `swarm-parallel-multi-pool`.
+    worker_for: Callable[[str], WorkerBackend] | None = None
     # Run-scoped mutable counter — reset at run_swarm start,
     # incremented in `_revert_beads_export`, read at run_swarm end
     # to decide whether to print the tail-mutation warning.
