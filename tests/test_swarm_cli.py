@@ -10,6 +10,7 @@ import pytest
 from turma.cli import build_parser, main
 from turma.config import SwarmConfig, TurmaConfig, PlanningConfig, ConfigError
 from turma.errors import PlanningError
+from turma.swarm.pools import Pool
 
 
 def _stub_config(swarm: SwarmConfig | None = None) -> TurmaConfig:
@@ -287,6 +288,106 @@ def test_main_run_backend_falls_back_to_config_when_flag_absent(
     assert mock_run_swarm.call_args.kwargs["backend"] == "claude-code"
 
 
+# ---------------------------------------------------------------------
+# Concurrent multi-pool dispatch wiring (swarm-parallel-multi-pool)
+# ---------------------------------------------------------------------
+
+
+_TWO_POOLS = (
+    Pool(name="anthropic", backend="claude-code", types=("impl",), max=2,
+         default=True),
+    Pool(name="openai", backend="codex", types=("test",), max=2),
+)
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_default_config_stays_sequential(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+) -> None:
+    """Default [swarm] (max_parallel=1, no pools) → no router → sequential."""
+    mock_load_swarm_config.return_value = _stub_config(SwarmConfig())
+    mock_services_factory.return_value = MagicMock()
+
+    main(["run", "--feature", "oauth"])
+
+    assert mock_run_swarm.call_args.kwargs["router"] is None
+    assert mock_run_swarm.call_args.kwargs["max_parallel"] == 1
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_configured_pools_pass_a_router(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+) -> None:
+    """Configured [[swarm.pools]] → a router built from those pools reaches
+    run_swarm, so dispatch_concurrent owns execution."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(pools=_TWO_POOLS, max_parallel=4)
+    )
+    mock_services_factory.return_value = MagicMock()
+
+    main(["run", "--feature", "oauth"])
+
+    router = mock_run_swarm.call_args.kwargs["router"]
+    assert router is not None
+    assert {p.name for p in router.pools} == {"anthropic", "openai"}
+    assert mock_run_swarm.call_args.kwargs["max_parallel"] == 4
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_max_parallel_only_passes_a_router(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+) -> None:
+    """max_parallel > 1 with no pools still routes through the dispatcher (one
+    implicit default pool on worker_backend)."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(worker_backend="claude-code", max_parallel=3)
+    )
+    mock_services_factory.return_value = MagicMock()
+
+    main(["run", "--feature", "oauth"])
+
+    router = mock_run_swarm.call_args.kwargs["router"]
+    assert router is not None
+    assert len(router.pools) == 1
+    assert router.pools[0].backend == "claude-code"
+    assert mock_run_swarm.call_args.kwargs["max_parallel"] == 3
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_backend_flag_overrides_configured_pools(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+) -> None:
+    """--backend collapses configured pools to a single-backend router."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(pools=_TWO_POOLS, max_parallel=2)
+    )
+    mock_services_factory.return_value = MagicMock()
+
+    main(["run", "--feature", "oauth", "--backend", "opencode"])
+
+    router = mock_run_swarm.call_args.kwargs["router"]
+    assert router is not None
+    assert len(router.pools) == 1
+    assert router.pools[0].backend == "opencode"
+    assert mock_run_swarm.call_args.kwargs["backend"] == "opencode"
+
+
 @patch("turma.cli.load_swarm_config")
 def test_main_run_config_error_exits_1(
     mock_load_swarm_config: MagicMock,
@@ -392,6 +493,30 @@ def test_status_rejects_unknown_flag(
 
 
 # Dispatch behavior -------------------------------------------------
+
+
+@patch("turma.swarm._orchestrator.dispatch_concurrent")
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.status_readout")
+def test_main_status_never_uses_pool_dispatch(
+    mock_status_readout: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    mock_dispatch: MagicMock,
+) -> None:
+    """status is a read-only snapshot: even with [[swarm.pools]] configured it
+    goes through status_readout, never the concurrent dispatcher."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(pools=_TWO_POOLS, max_parallel=4)
+    )
+    mock_services_factory.return_value = MagicMock(name="SwarmServices")
+    mock_status_readout.return_value = "feature: oauth\n"
+
+    assert main(["status", "--feature", "oauth"]) == 0
+
+    mock_status_readout.assert_called_once()
+    mock_dispatch.assert_not_called()
 
 
 @patch("turma.cli.load_swarm_config")
