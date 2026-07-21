@@ -233,7 +233,7 @@ class RecordingPr:
     rec: Recorder
 
     def open_pr(self, *, branch, base, title, body):
-        return "https://example/pull/1"
+        return "https://github.com/turma-dev/turma/pull/1"
 
     def find_open_pr_url_for_branch(self, branch):
         return None
@@ -354,13 +354,12 @@ def test_two_workers_run_concurrently_outside_the_lock(tmp_path):
 
 
 @pending_dispatcher
-def test_pool_caps_and_max_parallel_are_enforced(tmp_path):
-    """Invariant 4: concurrency never exceeds max_parallel, and a pool capped
-    at 1 never runs two of its tasks at once."""
+def test_pool_cap_binds(tmp_path):
+    """Invariant 4a: a pool capped at 1 never runs two of its tasks at once,
+    even with a generous max_parallel."""
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(6)])
     worker = ControllableWorker(rec, delay=0.05)
-    # Single pool capped at 1, generous max_parallel: the pool cap must bind.
     services = _services(
         tmp_path, beads, RecordingWorktree(rec, tmp_path),
         RecordingGit(rec), RecordingPr(rec), worker,
@@ -368,6 +367,31 @@ def test_pool_caps_and_max_parallel_are_enforced(tmp_path):
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(max=1), max_parallel=5)
     assert rec.peak.get("worker", 0) == 1
+
+
+@pending_dispatcher
+def test_max_parallel_binds_below_summed_pool_caps(tmp_path):
+    """Invariant 4b: total concurrency never exceeds max_parallel even when the
+    pools' summed caps are larger. A dispatcher that honored only per-pool
+    semaphores (ignoring the global slot limit) would wrongly pass, so the pools
+    are capped at 3+3=6 while max_parallel=2 must bind."""
+    rec = Recorder()
+    ready = (
+        [_ref(f"i{i}", "impl") for i in range(4)]
+        + [_ref(f"t{i}", "test") for i in range(4)]
+    )
+    beads = RecordingBeads(rec, ready=ready)
+    worker = ControllableWorker(rec, delay=0.05)
+    router = build_router([
+        _pool("anthropic", "claude-code", ["impl"], max=3, default=True),
+        _pool("openai", "codex", ["test"], max=3),
+    ])
+    services = _services(
+        tmp_path, beads, RecordingWorktree(rec, tmp_path),
+        RecordingGit(rec), RecordingPr(rec), worker,
+    )
+    dispatch_concurrent("oauth", services, router=router, max_parallel=2)
+    assert rec.peak.get("worker", 0) == 2  # reaches, and never exceeds, the cap
 
 
 @pending_dispatcher
