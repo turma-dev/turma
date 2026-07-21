@@ -85,6 +85,14 @@ def dispatch_concurrent(
     fatal_error: list[BaseException] = []
     threads: list[threading.Thread] = []
 
+    def release_slot(pool_name: str) -> None:
+        """Give back one global + one pool slot and wake the scheduler."""
+        nonlocal global_running
+        with cv:
+            global_running -= 1
+            pool_running[pool_name] -= 1
+            cv.notify_all()
+
     def signal_halt(task_id: str) -> None:
         if not halt.is_set():
             halt_error.append(
@@ -179,10 +187,7 @@ def dispatch_concurrent(
                 fatal_error.append(exc)
             halt.set()
         finally:
-            with cv:
-                global_running -= 1
-                pool_running[pool.name] -= 1
-                cv.notify_all()
+            release_slot(pool.name)
 
     # Scheduling loop: repeatedly pick a ready task that a free slot can run
     # right now — global slots below max_parallel AND its pool below its cap —
@@ -220,6 +225,13 @@ def dispatch_concurrent(
                 cv.wait(timeout=1.0)
                 continue
 
+        # A worker may have exhausted its budget (or crashed) between reserving
+        # this slot and now. Do not claim new work once halting: give the slot
+        # back and stop scheduling.
+        if halt.is_set():
+            release_slot(pool.name)
+            break
+
         # Claim outside the cv, under the mutation lock. On a race, roll the
         # reserved slots back (and notify, in case the scheduler is waiting).
         claim_failed = False
@@ -233,11 +245,16 @@ def dispatch_concurrent(
                 )
                 claim_failed = True
         if claim_failed:
-            with cv:
-                global_running -= 1
-                pool_running[pool.name] -= 1
-                cv.notify_all()
+            release_slot(pool.name)
             continue
+
+        # Re-check: claim_task can be slow (a bd subprocess), so a halt may have
+        # landed while we held the lock. Don't start another worker; give the
+        # slot back and stop. The task stays in_progress and the next run's
+        # reconcile phase recovers it (in_progress without a `turma-pr:` label).
+        if halt.is_set():
+            release_slot(pool.name)
+            break
         services.emitter.emit("task_claimed", task_id=task.id, title=task.title)
 
         thread = threading.Thread(
