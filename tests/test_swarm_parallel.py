@@ -457,6 +457,61 @@ def test_saturated_pool_does_not_block_a_free_pool(tmp_path):
     assert "b0" in codex.finished  # the free-pool task actually ran
 
 
+def test_halt_after_slot_reservation_starts_no_extra_task(tmp_path):
+    """A halt that lands after a slot is reserved but before the worker starts
+    must not start that extra task. 'boom' halts the run (here via an
+    unexpected exception, the fatal path) while the scheduler is mid-claim on
+    'extra'; the pre-start recheck must give the slot back and stop, leaving
+    'extra' unstarted rather than launching a worker after the run should stop.
+
+    Deadlock-free deterministic coordination: 'extra' is held out of `ready`
+    until 'boom' is parked at its gate — i.e. past its lock-holding setup phase.
+    Only then is 'extra' offered, so when the scheduler claims it (holding the
+    mutation lock), 'boom' can raise and set `halt` without needing that lock.
+    'extra''s claim opens the gate and waits for the raise, and the 20ms
+    `bd:claim_task` hold that follows gives `halt` ample margin to be set before
+    the scheduler's pre-start recheck reads it.
+    """
+    rec = Recorder()
+    boom_at_gate = threading.Event()  # boom → parked, past my lock phase
+    boom_gate = threading.Event()     # scheduler → raise now
+    boom_raised = threading.Event()   # boom → raised (halt about to set)
+
+    class CoordinatingBeads(RecordingBeads):
+        def list_ready_tasks(self, feature):
+            with self._bd("list_ready_tasks"):
+                base = [t for t in self.ready if t.id not in self.completed]
+                if not boom_at_gate.is_set():
+                    # Withhold 'extra' until boom is parked past its lock phase.
+                    return tuple(t for t in base if t.id != "extra")
+                return tuple(base)
+
+        def claim_task(self, task_id):
+            if task_id == "extra":
+                boom_gate.set()
+                boom_raised.wait(timeout=5)
+            return super().claim_task(task_id)
+
+    class RaisingWorker(ControllableWorker):
+        def run(self, invocation):
+            if invocation.task_id == "boom":
+                boom_at_gate.set()
+                boom_gate.wait(timeout=5)
+                boom_raised.set()
+                raise RuntimeError("boom detonates")
+            return super().run(invocation)
+
+    beads = CoordinatingBeads(rec, ready=[_ref("boom"), _ref("extra")])
+    worker = RaisingWorker(rec, delay=0.05)
+    services = _services(tmp_path, beads, rec, _one(worker))
+    with pytest.raises(RuntimeError, match="boom detonates"):
+        dispatch_concurrent("oauth", services,
+                            router=_one_default_router(max=2), max_parallel=2)
+    # The extra task was reserved and claimed but never started: its worker
+    # never ran, so it is absent from `finished`.
+    assert "extra" not in worker.finished
+
+
 def test_failure_halt_drains_in_flight_not_cancel(tmp_path):
     """Invariant 5: a halting failure stops scheduling new slots but lets
     in-flight workers reach their normal terminal — drain, not cancel."""
