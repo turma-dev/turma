@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from turma import __version__
-from turma.config import ConfigError, load_swarm_config
+from turma.config import ConfigError, build_swarm_router, load_swarm_config
 from turma.errors import PlanningError
 from turma.planning import (
     default_planning_services,
@@ -376,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
         # other knobs (worker_timeout, max_retries, worktree_root,
         # base_branch) come from config since they have no flag.
         backend = args.backend or config.swarm.worker_backend
+        # Route through the concurrent multi-pool dispatcher when the operator
+        # asked for parallelism (max_parallel > 1) or declared [[swarm.pools]];
+        # otherwise keep the sequential loop. `--backend` collapses routing to a
+        # single-backend pool. The default config (max_parallel = 1, no pools)
+        # passes router=None, so behavior is unchanged.
+        use_concurrent = config.swarm.max_parallel > 1 or bool(config.swarm.pools)
+        router = build_swarm_router(config.swarm, backend_override=args.backend)
         try:
             services = default_swarm_services(
                 repo_root=Path.cwd(),
@@ -392,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_tasks=args.max_tasks,
                 backend=backend,
                 dry_run=args.dry_run,
+                router=router if use_concurrent else None,
+                max_parallel=config.swarm.max_parallel,
             )
         except PlanningError as exc:
             return _run_error(exc)

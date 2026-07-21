@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Callable
 
 from turma.errors import PlanningError
+from turma.swarm.dispatch import dispatch_concurrent
 from turma.swarm.events import JsonEmitter, RunEmitter, TextEmitter
 from turma.swarm.git import COMMIT_MESSAGE_TEMPLATE, GitAdapter
+from turma.swarm.pools import PoolRouter
 from turma.swarm.pull_request import PullRequestAdapter
 from turma.swarm.worker import get_worker_backend
 from turma.swarm.worktree import WorktreeManager, WorktreeRef
@@ -157,6 +159,11 @@ def default_swarm_services(
         git=GitAdapter(),
         pr=PullRequestAdapter(),
         worker_factory=lambda: get_worker_backend(backend),
+        # Backend-keyed resolver for the concurrent dispatcher: a pool's
+        # `backend` name -> WorkerBackend. Harmless on the sequential path
+        # (which uses `worker_factory`); lazy, so no CLI is probed until a
+        # worker actually runs.
+        worker_for=get_worker_backend,
         repo_root=repo_root,
         base_branch=base_branch,
         max_retries=max_retries,
@@ -177,22 +184,25 @@ def run_swarm(
     max_tasks: int | None = None,
     backend: str | None = None,
     dry_run: bool = False,
+    router: PoolRouter | None = None,
+    max_parallel: int = 1,
 ) -> None:
-    """Run the single-feature sequential swarm loop for `feature`.
+    """Run the single-feature swarm for `feature`.
 
-    - `services` is required for orchestration. Task 8 wires default
-      construction behind the CLI; callers that invoke `run_swarm`
-      programmatically must provide a `SwarmServices`.
-    - `max_tasks` caps outer-loop iterations (default unbounded).
-    - `backend` is accepted for the signature Task 8 wants; backend
-      selection actually happens via the provided
-      `services.worker_factory` and this parameter is purely
-      informational in v1 (raises if it names something the factory
-      is not known to produce). v1 ships only `claude-code`.
-    - `dry_run=True` runs preflight + reconciliation only; the
-      reconciliation summary has already been printed by
-      `reconcile_feature` at that point, so dry-run exits cleanly
-      without entering the repair phase or the main loop.
+    - `services` is required for orchestration. Callers that invoke
+      `run_swarm` programmatically must provide a `SwarmServices`.
+    - `max_tasks` caps sequential outer-loop iterations (default
+      unbounded). Not supported alongside `router` (parallel execution).
+    - `backend` is validated against the worker registry; it selects the
+      single-backend for the sequential path and is informational for the
+      concurrent path (whose per-pool backends come from `router`).
+    - `dry_run=True` runs preflight + reconciliation only, exiting before
+      the repair phase and the execution loop — on either path.
+    - `router` selects execution: when provided, the concurrent multi-pool
+      `dispatch_concurrent` owns the run (with `max_parallel` as the global
+      slot cap); when None, the sequential `_main_loop` runs. The CLI builds
+      a router exactly when `max_parallel > 1` or `[[swarm.pools]]` are
+      configured, so the default configuration stays on the sequential path.
     """
     if services is None:
         raise PlanningError(
@@ -204,6 +214,12 @@ def run_swarm(
         raise PlanningError(
             f"unknown worker backend: {backend!r}. "
             f"Registered: {list(registered_worker_backends())}"
+        )
+    if router is not None and max_tasks is not None:
+        raise PlanningError(
+            "--max-tasks is not supported with parallel execution "
+            "(max_parallel > 1 or configured [[swarm.pools]]). Rerun with "
+            "max_parallel = 1 and no pools, or drop --max-tasks."
         )
 
     _preflight(feature, services.repo_root)
@@ -269,7 +285,12 @@ def run_swarm(
 
     _apply_repairs(feature, report, services)
     _advance_merged_prs(feature, services, dry_run=False)
-    _main_loop(feature, services, max_tasks)
+    if router is not None:
+        dispatch_concurrent(
+            feature, services, router=router, max_parallel=max_parallel
+        )
+    else:
+        _main_loop(feature, services, max_tasks)
 
     # Tail-mutation telemetry: if any Turma bd update fired during
     # this run, the dolt db now holds mutations that origin/main's

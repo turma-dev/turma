@@ -22,12 +22,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 import pytest
 
 from turma.errors import PlanningError
 from turma.swarm import SwarmServices, run_swarm
 from turma.swarm._orchestrator import _pr_number_from_url
+from turma.swarm.pools import Pool, build_router
 from turma.swarm.events import JsonEmitter
 from turma.swarm.pull_request import PrState
 from turma.swarm.worker import WorkerInvocation, WorkerResult
@@ -2650,3 +2652,85 @@ def test_json_reconcile_finding_is_structured(tmp_path: Path) -> None:
     assert f["kind"] == "missing-worktree"
     assert f["task_id"] == "bd-gone"
     assert f["detail"] == "bd-gone → missing-worktree"
+
+
+# ---------------------------------------------------------------------
+# Concurrent multi-pool dispatch wiring (swarm-parallel-multi-pool)
+# ---------------------------------------------------------------------
+#
+# run_swarm keeps the sequential `_main_loop` by default and switches to the
+# concurrent `dispatch_concurrent` only when a router is supplied (the CLI
+# builds one exactly when max_parallel > 1 or [[swarm.pools]] are configured).
+# The preflight/reconcile/repair/merge-advancement phases are identical on both
+# paths — only the execution loop differs — so these patch the two loop entry
+# points and assert which one run_swarm selects.
+
+
+def _default_router(max_parallel: int = 2):
+    return build_router([
+        Pool(name="anthropic", backend="claude-code", types=(),
+             max=max_parallel, default=True),
+    ])
+
+
+@patch("turma.swarm._orchestrator.dispatch_concurrent")
+@patch("turma.swarm._orchestrator._main_loop")
+def test_run_swarm_uses_sequential_loop_when_no_router(
+    mock_main_loop, mock_dispatch, tmp_path: Path
+) -> None:
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    run_swarm("oauth", services=services, max_tasks=7)
+    mock_main_loop.assert_called_once()
+    # max_tasks flows to the sequential loop unchanged.
+    assert mock_main_loop.call_args.args[2] == 7
+    mock_dispatch.assert_not_called()
+
+
+@patch("turma.swarm._orchestrator.dispatch_concurrent")
+@patch("turma.swarm._orchestrator._main_loop")
+def test_run_swarm_uses_concurrent_dispatch_when_router_present(
+    mock_main_loop, mock_dispatch, tmp_path: Path
+) -> None:
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    router = _default_router(max_parallel=3)
+    run_swarm("oauth", services=services, router=router, max_parallel=3)
+    mock_dispatch.assert_called_once()
+    assert mock_dispatch.call_args.kwargs["router"] is router
+    assert mock_dispatch.call_args.kwargs["max_parallel"] == 3
+    mock_main_loop.assert_not_called()
+
+
+@patch("turma.swarm._orchestrator.dispatch_concurrent")
+def test_dry_run_never_dispatches_concurrent(
+    mock_dispatch, tmp_path: Path
+) -> None:
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    router = _default_router()
+    run_swarm("oauth", services=services, router=router, max_parallel=2,
+              dry_run=True)
+    mock_dispatch.assert_not_called()
+
+
+def test_run_swarm_rejects_max_tasks_with_router(tmp_path: Path) -> None:
+    # --max-tasks has no defined semantics under parallel execution yet, so it
+    # is refused up front rather than silently ignored.
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    with pytest.raises(PlanningError, match="max-tasks"):
+        run_swarm("oauth", services=services, router=_default_router(),
+                  max_parallel=2, max_tasks=5)
+
+
+def test_run_swarm_concurrent_path_rejects_unknown_backend(
+    tmp_path: Path
+) -> None:
+    # An unknown --backend still surfaces cleanly on the concurrent path, at the
+    # same gate as the sequential path — before any reconcile/dispatch work.
+    _scratch_feature(tmp_path)
+    services, *_ = _make_services(tmp_path, beads=StubBeads())
+    with pytest.raises(PlanningError, match="unknown worker backend"):
+        run_swarm("oauth", services=services, backend="vim-swordsman",
+                  router=_default_router(), max_parallel=2)
