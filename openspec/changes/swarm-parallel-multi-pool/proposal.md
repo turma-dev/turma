@@ -54,8 +54,10 @@ UI/distribution surfaces stay deferred behind it.
   optimization, not v1.
 - **Failure semantics unchanged.** An exhausted retry budget still **halts the
   whole run** (matching today's `_main_loop`); v1 does not add per-pool
-  quiescing. In-flight slots are allowed to finish or are cancelled per the
-  design's stop protocol, but no new "keep going on other pools" behavior.
+  quiescing. On a halting failure the dispatcher **stops scheduling new slots**,
+  **drains** all in-flight slots through their normal terminal handling
+  (commit/push/PR or `fail_task` — not mid-tail cancellation), then exits
+  nonzero. No "keep going on other pools" behavior.
 - **Merge gate unchanged.** Dependents still unblock only at `merged`, so no
   dependent runs against an unmerged upstream even under concurrency. No
   pre-merge-dependent / integration-branch mode.
