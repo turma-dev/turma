@@ -245,11 +245,20 @@ class ControllableWorker:
     delay: float = 0.05
     fail_ids: set[str] = field(default_factory=set)
     finished: list[str] = field(default_factory=list)
+    barrier: "threading.Barrier | None" = None
 
     name: str = "recording"
 
     def run(self, invocation: WorkerInvocation) -> WorkerResult:
         with self.rec.track(f"worker:{invocation.task_id}", "worker", hold=0):
+            # Deterministic overlap (vs sleep-timing): block until `parties`
+            # workers are concurrently here. Only a truly concurrent dispatcher
+            # releases the barrier; a serial one times out (BrokenBarrierError).
+            if self.barrier is not None and invocation.task_id not in self.fail_ids:
+                try:
+                    self.barrier.wait(timeout=5)
+                except threading.BrokenBarrierError:
+                    pass
             time.sleep(self.delay)
             self.finished.append(invocation.task_id)  # normal terminal reached
             if invocation.task_id in self.fail_ids:
@@ -269,7 +278,7 @@ def _ref(task_id, turma_type="impl"):
     )
 
 
-def _services(tmp_path, beads, rec, worker_for):
+def _services(tmp_path, beads, rec, worker_for, *, max_retries=1):
     """Build SwarmServices with recording adapters and a backend-keyed worker
     resolver (`worker_for`: pool.backend name -> worker) — the multi-pool DI
     shape. `worker_factory` (the sequential path) is set but unused here."""
@@ -282,7 +291,7 @@ def _services(tmp_path, beads, rec, worker_for):
         worker_for=worker_for,   # type: ignore[arg-type]
         repo_root=tmp_path,
         base_branch="main",
-        max_retries=1,
+        max_retries=max_retries,
     )
 
 
@@ -301,22 +310,10 @@ def _one_default_router(max=3):
 # Concurrency invariants — red until the dispatcher + lock exist
 # =====================================================================
 #
-# These pin the invariants against the not-yet-implemented dispatcher, so they
-# fail on `NotImplementedError` today. `xfail(strict, raises=...)` keeps the
-# suite green (the PR is mergeable and CI stays honest) while documenting each
-# invariant as pending: the moment the dispatcher + global lock land (Tasks
-# 3-4) each test starts passing, and strict-xfail turns that XPASS into a
-# failure — forcing removal of the marker so the assertions become live.
-
-pending_dispatcher = pytest.mark.xfail(
-    raises=NotImplementedError,
-    strict=True,
-    reason="concurrent dispatcher + one global mutation lock not implemented "
-    "yet — swarm-parallel-multi-pool Tasks 3-4",
-)
+# The concurrent dispatcher + one global mutation lock are now implemented, so
+# these run live against it.
 
 
-@pending_dispatcher
 def test_no_overlapping_beads_calls(tmp_path):
     """Invariant 1: the global mutation lock serializes every `bd` call, so
     no two BeadsAdapter subprocess calls ever overlap under concurrency."""
@@ -328,7 +325,6 @@ def test_no_overlapping_beads_calls(tmp_path):
     assert rec.overlapping("bd:") == []
 
 
-@pending_dispatcher
 def test_no_overlapping_git_metadata_ops(tmp_path):
     """Invariant 2: worktree add/remove + branch ops mutate the shared parent
     `.git`, so they must also serialize — no two overlap under concurrency."""
@@ -340,20 +336,18 @@ def test_no_overlapping_git_metadata_ops(tmp_path):
     assert rec.overlapping("git:") == []
 
 
-@pending_dispatcher
 def test_two_workers_run_concurrently_outside_the_lock(tmp_path):
     """Invariant 3: worker execution is NOT serialized — with slots free, at
     least two workers run at once (the whole point of concurrency)."""
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(4)])
-    worker = ControllableWorker(rec, delay=0.1)
+    worker = ControllableWorker(rec, delay=0.05, barrier=threading.Barrier(2))
     services = _services(tmp_path, beads, rec, _one(worker))
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(max=3), max_parallel=3)
     assert rec.peak.get("worker", 0) >= 2
 
 
-@pending_dispatcher
 def test_pool_cap_binds(tmp_path):
     """Invariant 4a: a pool capped at 1 never runs two of its tasks at once,
     even with a generous max_parallel."""
@@ -366,7 +360,6 @@ def test_pool_cap_binds(tmp_path):
     assert rec.peak.get("worker", 0) == 1
 
 
-@pending_dispatcher
 def test_max_parallel_binds_below_summed_pool_caps(tmp_path):
     """Invariant 4b: total concurrency never exceeds max_parallel even when the
     pools' summed caps are larger. A dispatcher that honored only per-pool
@@ -378,7 +371,7 @@ def test_max_parallel_binds_below_summed_pool_caps(tmp_path):
         + [_ref(f"t{i}", "test") for i in range(4)]
     )
     beads = RecordingBeads(rec, ready=ready)
-    worker = ControllableWorker(rec, delay=0.05)
+    worker = ControllableWorker(rec, delay=0.05, barrier=threading.Barrier(2))
     router = build_router([
         _pool("anthropic", "claude-code", ["impl"], max=3, default=True),
         _pool("openai", "codex", ["test"], max=3),
@@ -388,7 +381,6 @@ def test_max_parallel_binds_below_summed_pool_caps(tmp_path):
     assert rec.peak.get("worker", 0) == 2  # reaches, and never exceeds, the cap
 
 
-@pending_dispatcher
 def test_task_type_routes_to_its_pool_backend(tmp_path):
     """Core contract: a task's turma-type selects its pool, and the pool's
     backend runs it. `impl` -> the Claude pool/backend, `test` -> the Codex
@@ -415,7 +407,6 @@ def test_task_type_routes_to_its_pool_backend(tmp_path):
     assert set(codex.finished) == test_ids   # Codex backend ran the test tasks
 
 
-@pending_dispatcher
 def test_failure_halt_drains_in_flight_not_cancel(tmp_path):
     """Invariant 5: a halting failure stops scheduling new slots but lets
     in-flight workers reach their normal terminal — drain, not cancel."""
@@ -424,7 +415,8 @@ def test_failure_halt_drains_in_flight_not_cancel(tmp_path):
     # 'boom' fails (drives the halt); 'slow' is mid-flight and must still reach
     # its terminal (recorded in worker.finished), not be cancelled.
     worker = ControllableWorker(rec, delay=0.1, fail_ids={"boom"})
-    services = _services(tmp_path, beads, rec, _one(worker))
+    # max_retries=0 so 'boom' exhausts its budget on the first failure and halts
+    services = _services(tmp_path, beads, rec, _one(worker), max_retries=0)
     with pytest.raises(PlanningError):
         dispatch_concurrent("oauth", services,
                             router=_one_default_router(max=2), max_parallel=2)
