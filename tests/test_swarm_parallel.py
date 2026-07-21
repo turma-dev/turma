@@ -94,6 +94,16 @@ def test_build_router_rejects_empty():
         build_router([])
 
 
+def test_build_router_rejects_duplicate_pool_names():
+    # The dispatcher keys per-pool concurrency by name; two pools sharing a
+    # name would merge or bypass their caps, so the router must reject it.
+    with pytest.raises(PlanningError, match="duplicate pool name"):
+        build_router([
+            _pool("dup", "claude-code", ["impl"], max=1, default=True),
+            _pool("dup", "codex", ["test"], max=1),
+        ])
+
+
 # =====================================================================
 # Interval-recording fakes for the concurrency invariants
 # =====================================================================
@@ -246,15 +256,23 @@ class ControllableWorker:
     fail_ids: set[str] = field(default_factory=set)
     finished: list[str] = field(default_factory=list)
     barrier: "threading.Barrier | None" = None
+    # When set, only these task ids wait on the barrier; others skip it (so a
+    # task with no partner does not stall on a lone `barrier.wait` timeout).
+    barrier_ids: "set[str] | None" = None
 
     name: str = "recording"
+
+    def _waits_on_barrier(self, task_id: str) -> bool:
+        if self.barrier is None or task_id in self.fail_ids:
+            return False
+        return self.barrier_ids is None or task_id in self.barrier_ids
 
     def run(self, invocation: WorkerInvocation) -> WorkerResult:
         with self.rec.track(f"worker:{invocation.task_id}", "worker", hold=0):
             # Deterministic overlap (vs sleep-timing): block until `parties`
             # workers are concurrently here. Only a truly concurrent dispatcher
             # releases the barrier; a serial one times out (BrokenBarrierError).
-            if self.barrier is not None and invocation.task_id not in self.fail_ids:
+            if self._waits_on_barrier(invocation.task_id):
                 try:
                     self.barrier.wait(timeout=5)
                 except threading.BrokenBarrierError:
@@ -405,6 +423,38 @@ def test_task_type_routes_to_its_pool_backend(tmp_path):
     dispatch_concurrent("oauth", services, router=router, max_parallel=4)
     assert set(claude.finished) == impl_ids  # Claude backend ran the impl tasks
     assert set(codex.finished) == test_ids   # Codex backend ran the test tasks
+
+
+def test_saturated_pool_does_not_block_a_free_pool(tmp_path):
+    """No head-of-line blocking: a ready task whose pool is saturated must not
+    stall a ready task in a different pool that still has capacity. poolA (max=1)
+    holds two impl tasks; poolB (max=1) holds one test task. With the head task's
+    pool saturated by its first task, the scheduler must still reach and run the
+    free-pool task concurrently — not block on the saturated pool. A dispatcher
+    that acquired ready[0]'s pool slot before looking further would deadlock the
+    shared barrier (the poolB task never starts) and never reach peak 2."""
+    rec = Recorder()
+    ready = [_ref("a0", "impl"), _ref("a1", "impl"), _ref("b0", "test")]
+    beads = RecordingBeads(rec, ready=ready)
+    # a0 (poolA's first) and b0 (poolB) must overlap or the barrier times out;
+    # a1 is queued behind a0 in the saturated pool and skips the barrier.
+    barrier = threading.Barrier(2)
+    claude = ControllableWorker(
+        rec, delay=0.05, barrier=barrier, barrier_ids={"a0", "b0"},
+        name="claude-code",
+    )
+    codex = ControllableWorker(
+        rec, delay=0.05, barrier=barrier, barrier_ids={"a0", "b0"}, name="codex",
+    )
+    workers = {"claude-code": claude, "codex": codex}
+    services = _services(tmp_path, beads, rec, lambda backend: workers[backend])
+    router = build_router([
+        _pool("anthropic", "claude-code", ["impl"], max=1, default=True),
+        _pool("openai", "codex", ["test"], max=1),
+    ])
+    dispatch_concurrent("oauth", services, router=router, max_parallel=3)
+    assert rec.peak.get("worker", 0) >= 2
+    assert "b0" in codex.finished  # the free-pool task actually ran
 
 
 def test_failure_halt_drains_in_flight_not_cancel(tmp_path):

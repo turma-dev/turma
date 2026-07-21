@@ -10,13 +10,20 @@ Runs a feature's ready Beads tasks concurrently across provider pools:
   ``BeadsAdapter`` calls (one Dolt DB) and all shared-``.git`` metadata ops
   (worktree add/remove). The worker subprocess and the network push/PR run
   *outside* the lock, so worker execution is genuinely concurrent;
-- on a halting failure (retry budget exhausted), scheduling stops but in-flight
-  workers are **drained** to their normal terminal (commit/push/PR or
-  ``fail_task``) — never cancelled — then the run raises.
+- the scheduler picks a *currently-schedulable* ready task (one whose pool has
+  a free slot) rather than blocking on ``ready[0]``'s pool, so a saturated pool
+  never stalls ready work in a pool that still has capacity;
+- on a halting failure (retry budget exhausted) or an unexpected worker-thread
+  exception, scheduling stops but in-flight workers are **drained** to their
+  normal terminal (commit/push/PR or ``fail_task``) — never cancelled — then
+  the run raises.
 
 Workers are synchronous (`WorkerBackend.run` blocks), so concurrency uses
-threads; the lock is a `threading.Lock`. This is the dispatcher core; wiring it
-into ``run_swarm`` / the CLI is a separate step.
+threads. Slot accounting lives under a `threading.Condition` (`cv`): counters
+guarded by it, and workers notify it on release so the scheduler wakes exactly
+when a slot frees. The mutation lock is a separate `threading.Lock`; the two are
+never held nested. This is the dispatcher core; wiring it into ``run_swarm`` /
+the CLI is a separate step.
 """
 
 from __future__ import annotations
@@ -65,11 +72,17 @@ def dispatch_concurrent(
             "backend -> WorkerBackend resolver)"
         )
 
-    lock = threading.Lock()
-    global_slots = threading.Semaphore(max_parallel)
-    pool_slots = {pool.name: threading.Semaphore(pool.max) for pool in router.pools}
+    lock = threading.Lock()  # serializes all shared bd + .git mutation
+    cv = threading.Condition()  # guards the slot counters below
+    global_running = 0
+    pool_running = {pool.name: 0 for pool in router.pools}
     halt = threading.Event()
     halt_error: list[PlanningError] = []
+    # An unexpected exception in a worker thread (anything outside the normal
+    # worker-failure / commit-failure paths) must not vanish with the thread and
+    # silently drop a claimed task. Record the first, halt, and re-raise it after
+    # draining — a code/infra bug surfaces rather than a task going missing.
+    fatal_error: list[BaseException] = []
     threads: list[threading.Thread] = []
 
     def signal_halt(task_id: str) -> None:
@@ -90,6 +103,7 @@ def dispatch_concurrent(
             signal_halt(task_id)
 
     def run_task(task, pool) -> None:
+        nonlocal global_running
         try:
             # Worktree add is a shared-.git metadata op → under the lock.
             with lock:
@@ -156,38 +170,74 @@ def dispatch_concurrent(
                 pr_number=pr_number,
                 pr_url=pr_url,
             )
+        except Exception as exc:  # noqa: BLE001 — surface, never swallow
+            # An error the pipeline does not model as a task failure (worktree
+            # setup, body fetch, worker resolution, PR-number parse, an
+            # unexpected bd/git fault). Halt and carry it to the drain so it is
+            # raised, not lost with this thread.
+            if not fatal_error:
+                fatal_error.append(exc)
+            halt.set()
         finally:
-            pool_slots[pool.name].release()
-            global_slots.release()
+            with cv:
+                global_running -= 1
+                pool_running[pool.name] -= 1
+                cv.notify_all()
 
-    # Scheduling loop: claim ready tasks and hand each to a worker thread until
-    # no ready work remains or a halt is signalled. Only this thread claims, so
-    # there is no double-claim; a lost claim race just re-fetches.
+    # Scheduling loop: repeatedly pick a ready task that a free slot can run
+    # right now — global slots below max_parallel AND its pool below its cap —
+    # and hand it to a worker thread. Only this thread claims, so there is no
+    # double-claim; a lost claim race just re-fetches. Picking a *schedulable*
+    # task (not strictly ready[0]) keeps a saturated pool from stalling ready
+    # work in a pool with capacity.
     while not halt.is_set():
-        global_slots.acquire()
-        if halt.is_set():
-            global_slots.release()
-            break
         with lock:
             ready = services.beads.list_ready_tasks(feature)
-            task = ready[0] if ready else None
-        if task is None:
-            global_slots.release()
-            break  # no ready tasks remain → drain in-flight and finish
+        if halt.is_set():
+            break
 
-        pool = router.pool_for(_turma_type_of(task))
-        pool_slots[pool.name].acquire()
+        with cv:
+            task = None
+            pool = None
+            for candidate in ready:
+                candidate_pool = router.pool_for(_turma_type_of(candidate))
+                if (
+                    global_running < max_parallel
+                    and pool_running[candidate_pool.name] < candidate_pool.max
+                ):
+                    task, pool = candidate, candidate_pool
+                    global_running += 1
+                    pool_running[pool.name] += 1
+                    break
+            if task is None:
+                # Nothing schedulable right now. If nothing is in flight either,
+                # no in-flight worker can free a slot or re-ready a retried task,
+                # so we are done — drain (a no-op) and finish. Otherwise wait for
+                # a worker to release a slot (a retry may re-ready a task too);
+                # the timeout is a backstop, releases notify us directly.
+                if global_running == 0:
+                    break
+                cv.wait(timeout=1.0)
+                continue
+
+        # Claim outside the cv, under the mutation lock. On a race, roll the
+        # reserved slots back (and notify, in case the scheduler is waiting).
+        claim_failed = False
         with lock:
             try:
                 services.beads.claim_task(task.id)
+                _revert_beads_export(services)
             except PlanningError as exc:
                 services.emitter.emit(
                     "claim_race", task_id=task.id, detail=str(exc)
                 )
-                pool_slots[pool.name].release()
-                global_slots.release()
-                continue
-            _revert_beads_export(services)
+                claim_failed = True
+        if claim_failed:
+            with cv:
+                global_running -= 1
+                pool_running[pool.name] -= 1
+                cv.notify_all()
+            continue
         services.emitter.emit("task_claimed", task_id=task.id, title=task.title)
 
         thread = threading.Thread(
@@ -196,8 +246,11 @@ def dispatch_concurrent(
         thread.start()
         threads.append(thread)
 
-    # Drain: let every in-flight worker reach its normal terminal, then halt.
+    # Drain: let every in-flight worker reach its normal terminal, then surface
+    # an unexpected fault first, else a retry-exhaustion halt.
     for thread in threads:
         thread.join()
+    if fatal_error:
+        raise fatal_error[0]
     if halt_error:
         raise halt_error[0]
