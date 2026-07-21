@@ -457,59 +457,79 @@ def test_saturated_pool_does_not_block_a_free_pool(tmp_path):
     assert "b0" in codex.finished  # the free-pool task actually ran
 
 
-def test_halt_after_slot_reservation_starts_no_extra_task(tmp_path):
-    """A halt that lands after a slot is reserved but before the worker starts
-    must not start that extra task. 'boom' halts the run (here via an
-    unexpected exception, the fatal path) while the scheduler is mid-claim on
-    'extra'; the pre-start recheck must give the slot back and stop, leaving
-    'extra' unstarted rather than launching a worker after the run should stop.
+def test_halt_from_retry_exhaustion_starts_no_extra_task(tmp_path):
+    """Once a worker records retry-budget exhaustion, the scheduler claims and
+    starts no further task — via the real WorkerResult(status="failure") path,
+    which sets halt through `fail()` under the mutation lock (unlike the fatal
+    path). This is the race the reviewer flagged: `fail()` competes for the same
+    lock the scheduler holds to claim, so a post-claim recheck reads halt as
+    still-false and starts the extra task. The fix sets halt inside `fail()`'s
+    locked section and checks halt under the claim lock, before claiming.
 
-    Deadlock-free deterministic coordination: 'extra' is held out of `ready`
-    until 'boom' is parked at its gate — i.e. past its lock-holding setup phase.
-    Only then is 'extra' offered, so when the scheduler claims it (holding the
-    mutation lock), 'boom' can raise and set `halt` without needing that lock.
-    'extra''s claim opens the gate and waits for the raise, and the 20ms
-    `bd:claim_task` hold that follows gives `halt` ample margin to be set before
-    the scheduler's pre-start recheck reads it.
+    The halt is made to land in the narrow window the fix targets — after the
+    scheduler passes the loop-top check, while it is reserving 'extra'. The
+    router's `pool_for` (called during reservation, holding the `cv` but NOT the
+    mutation lock) releases boom to fail right then and waits until its failure
+    is being recorded; the scheduler's next step, the under-lock claim check,
+    then observes halt. 'extra' carries a distinct turma-type so `pool_for`
+    triggers only for its reservation, not boom's. Deterministic, no sleeps.
     """
     rec = Recorder()
-    boom_at_gate = threading.Event()  # boom → parked, past my lock phase
-    boom_gate = threading.Event()     # scheduler → raise now
-    boom_raised = threading.Event()   # boom → raised (halt about to set)
+    boom_started = threading.Event()   # boom → at worker.run, past lock phase
+    let_boom_fail = threading.Event()  # reservation → fail now
+    boom_failed = threading.Event()    # boom → failure being recorded (bd)
 
-    class CoordinatingBeads(RecordingBeads):
-        def list_ready_tasks(self, feature):
-            with self._bd("list_ready_tasks"):
-                base = [t for t in self.ready if t.id not in self.completed]
-                if not boom_at_gate.is_set():
-                    # Withhold 'extra' until boom is parked past its lock phase.
-                    return tuple(t for t in base if t.id != "extra")
-                return tuple(base)
-
-        def claim_task(self, task_id):
-            if task_id == "extra":
-                boom_gate.set()
-                boom_raised.wait(timeout=5)
-            return super().claim_task(task_id)
-
-    class RaisingWorker(ControllableWorker):
+    class GatedWorker(ControllableWorker):
         def run(self, invocation):
             if invocation.task_id == "boom":
-                boom_at_gate.set()
-                boom_gate.wait(timeout=5)
-                boom_raised.set()
-                raise RuntimeError("boom detonates")
-            return super().run(invocation)
+                boom_started.set()
+                let_boom_fail.wait(timeout=5)
+            return super().run(invocation)  # boom ∈ fail_ids → failure result
 
-    beads = CoordinatingBeads(rec, ready=[_ref("boom"), _ref("extra")])
-    worker = RaisingWorker(rec, delay=0.05)
-    services = _services(tmp_path, beads, rec, _one(worker))
-    with pytest.raises(RuntimeError, match="boom detonates"):
+    class RecordingFailBeads(RecordingBeads):
+        def fail_task(self, task_id, reason, *, retries_so_far, max_retries):
+            with self._bd("fail_task"):
+                boom_failed.set()
+
+    class TriggeringRouter(PoolRouter):
+        def pool_for(self, turma_type):
+            pool = super().pool_for(turma_type)
+            if turma_type == "chore":  # reserving 'extra'
+                boom_started.wait(timeout=5)
+                let_boom_fail.set()
+                boom_failed.wait(timeout=5)
+            return pool
+
+    pool = _pool("anthropic", "claude-code", ["impl"], max=2, default=True)
+    router = TriggeringRouter(pools=[pool], default=pool, by_type={"impl": pool})
+    beads = RecordingFailBeads(
+        rec, ready=[_ref("boom", "impl"), _ref("extra", "chore")]
+    )
+    worker = GatedWorker(rec, delay=0.05, fail_ids={"boom"})
+    # max_retries=0 → boom exhausts on its first failure and halts the run.
+    services = _services(tmp_path, beads, rec, _one(worker), max_retries=0)
+    with pytest.raises(PlanningError, match="retry budget exhausted"):
+        dispatch_concurrent("oauth", services, router=router, max_parallel=2)
+    # Only boom ever ran; extra was reserved but never claimed or started.
+    assert worker.finished == ["boom"]
+
+
+def test_fatal_worker_exception_halts_and_reraises(tmp_path):
+    """An exception outside the modelled failure paths (here worktree setup)
+    must not vanish with its thread: the run halts and re-raises the original
+    exception after draining."""
+    rec = Recorder()
+
+    class ExplodingWorktree(RecordingWorktree):
+        def setup(self, *, feature, task_id, base_branch):
+            raise RuntimeError(f"worktree kaboom on {task_id}")
+
+    beads = RecordingBeads(rec, ready=[_ref("t0")])
+    services = _services(tmp_path, beads, rec, _one(ControllableWorker(rec)))
+    services.worktree = ExplodingWorktree(rec, tmp_path)  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="worktree kaboom on t0"):
         dispatch_concurrent("oauth", services,
-                            router=_one_default_router(max=2), max_parallel=2)
-    # The extra task was reserved and claimed but never started: its worker
-    # never ran, so it is absent from `finished`.
-    assert "extra" not in worker.finished
+                            router=_one_default_router(), max_parallel=3)
 
 
 def test_failure_halt_drains_in_flight_not_cancel(tmp_path):
