@@ -13,8 +13,12 @@ Runs a feature's ready Beads tasks concurrently across provider pools:
 - the scheduler picks a *currently-schedulable* ready task (one whose pool has
   a free slot) rather than blocking on ``ready[0]``'s pool, so a saturated pool
   never stalls ready work in a pool that still has capacity;
-- on a halting failure (retry budget exhausted) or an unexpected worker-thread
-  exception, scheduling stops but in-flight workers are **drained** to their
+- every halt (retry budget exhausted, or an unexpected worker-thread exception)
+  is set under the mutation lock, and the scheduler checks halt under that same
+  lock immediately before it claims — so a task is claimed only when it will be
+  started (never claimed-then-abandoned), and no new task is claimed once a halt
+  is recorded;
+- on a halt, scheduling stops but in-flight workers are **drained** to their
   normal terminal (commit/push/PR or ``fail_task``) — never cancelled — then
   the run raises.
 
@@ -105,10 +109,15 @@ def dispatch_concurrent(
             halt.set()
 
     def fail(task_id: str, reason: str) -> None:
+        # signal_halt runs INSIDE the lock, atomically with recording the
+        # failure. The scheduler checks halt under this same lock before it
+        # claims (below), so once exhaustion is recorded no further task is
+        # claimed or started — closing the retry-exhaustion race where the
+        # scheduler, holding the lock to claim, would read halt as still-false
+        # and start an extra task before the failing worker could set it.
         with lock:
-            exhausted = _handle_failure(services, task_id, reason)
-        if exhausted:
-            signal_halt(task_id)
+            if _handle_failure(services, task_id, reason):
+                signal_halt(task_id)
 
     def run_task(task, pool) -> None:
         nonlocal global_running
@@ -182,10 +191,14 @@ def dispatch_concurrent(
             # An error the pipeline does not model as a task failure (worktree
             # setup, body fetch, worker resolution, PR-number parse, an
             # unexpected bd/git fault). Halt and carry it to the drain so it is
-            # raised, not lost with this thread.
-            if not fatal_error:
-                fatal_error.append(exc)
-            halt.set()
+            # raised, not lost with this thread. Set halt under the lock so the
+            # scheduler's under-lock claim check sees it atomically, same as the
+            # retry-exhaustion path. (This except runs with no lock held: every
+            # `with lock` block above has exited by the time it fires.)
+            with lock:
+                if not fatal_error:
+                    fatal_error.append(exc)
+                halt.set()
         finally:
             release_slot(pool.name)
 
@@ -225,36 +238,31 @@ def dispatch_concurrent(
                 cv.wait(timeout=1.0)
                 continue
 
-        # A worker may have exhausted its budget (or crashed) between reserving
-        # this slot and now. Do not claim new work once halting: give the slot
-        # back and stop scheduling.
-        if halt.is_set():
-            release_slot(pool.name)
-            break
-
-        # Claim outside the cv, under the mutation lock. On a race, roll the
-        # reserved slots back (and notify, in case the scheduler is waiting).
-        claim_failed = False
+        # Claim under the mutation lock, checking halt FIRST in the same locked
+        # section. Every halt-set (retry exhaustion and fatal) also runs under
+        # this lock, so the two are serialized: if a worker recorded exhaustion
+        # before us, we observe halt here and never claim; if we claim first, the
+        # task was decided before any halt existed. A task is therefore claimed
+        # only when it will be started — never claimed-then-abandoned — so a run
+        # never leaves an unattempted task in_progress to burn a retry.
+        outcome = "claimed"  # "claimed" | "halted" | "race"
         with lock:
-            try:
-                services.beads.claim_task(task.id)
-                _revert_beads_export(services)
-            except PlanningError as exc:
-                services.emitter.emit(
-                    "claim_race", task_id=task.id, detail=str(exc)
-                )
-                claim_failed = True
-        if claim_failed:
+            if halt.is_set():
+                outcome = "halted"
+            else:
+                try:
+                    services.beads.claim_task(task.id)
+                    _revert_beads_export(services)
+                except PlanningError as exc:
+                    services.emitter.emit(
+                        "claim_race", task_id=task.id, detail=str(exc)
+                    )
+                    outcome = "race"
+        if outcome != "claimed":
             release_slot(pool.name)
-            continue
-
-        # Re-check: claim_task can be slow (a bd subprocess), so a halt may have
-        # landed while we held the lock. Don't start another worker; give the
-        # slot back and stop. The task stays in_progress and the next run's
-        # reconcile phase recovers it (in_progress without a `turma-pr:` label).
-        if halt.is_set():
-            release_slot(pool.name)
-            break
+            if outcome == "halted":
+                break
+            continue  # claim race — another actor beat us; re-fetch and retry
         services.emitter.emit("task_claimed", task_id=task.id, title=task.title)
 
         thread = threading.Thread(
