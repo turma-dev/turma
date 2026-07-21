@@ -1,0 +1,32 @@
+# Pooled / parallel smoke config — copy to the scratch repo root.
+# See docs/smoke-pooled-parallel.md.
+
+[planning]
+# Only needed so `turma plan-to-beads` (which loads planning config) runs; the
+# smoke does not exercise planning.
+author_model = "claude-opus-4-6"
+critic_model = "claude-sonnet-4-6"
+
+[swarm]
+worker_backend = "claude-code"
+worker_timeout = 1800
+max_retries = 1
+worktree_root = ".worktrees"
+base_branch = "main"
+
+# Concurrent multi-pool execution: up to 2 top-level workers at once.
+max_parallel = 2
+
+# `impl`, `docs`, `spec` (and any unmatched type) → Claude; `test` → Codex.
+[[swarm.pools]]
+name    = "anthropic"
+backend = "claude-code"
+types   = ["impl", "docs", "spec"]
+max     = 2
+default = true
+
+[[swarm.pools]]
+name    = "openai"
+backend = "codex"
+types   = ["test"]
+max     = 2
