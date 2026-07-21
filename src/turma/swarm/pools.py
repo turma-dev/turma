@@ -62,6 +62,8 @@ def build_router(pools: Sequence[Pool]) -> PoolRouter:
     unroutable:
 
     - no pools are given;
+    - two pools share a ``name`` (the dispatcher keys per-pool concurrency
+      by name, so a collision would merge or bypass their caps);
     - a ``turma-type:`` value appears in more than one pool's ``types``
       (routing would be order-dependent);
     - the number of pools with ``default = true`` is not exactly one;
@@ -72,7 +74,14 @@ def build_router(pools: Sequence[Pool]) -> PoolRouter:
         raise PlanningError("swarm pools: at least one pool is required")
 
     by_type: dict[str, Pool] = {}
+    seen_names: set[str] = set()
     for pool in pools:
+        if pool.name in seen_names:
+            raise PlanningError(
+                f"swarm pools: duplicate pool name {pool.name!r}; pool names "
+                "must be unique"
+            )
+        seen_names.add(pool.name)
         if pool.max < 1:
             raise PlanningError(
                 f"swarm pool {pool.name!r}: max must be >= 1, got {pool.max}"
