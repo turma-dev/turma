@@ -269,17 +269,26 @@ def _ref(task_id, turma_type="impl"):
     )
 
 
-def _services(tmp_path, beads, worktree, git, pr, worker):
+def _services(tmp_path, beads, rec, worker_for):
+    """Build SwarmServices with recording adapters and a backend-keyed worker
+    resolver (`worker_for`: pool.backend name -> worker) — the multi-pool DI
+    shape. `worker_factory` (the sequential path) is set but unused here."""
     return SwarmServices(
         beads=beads,          # type: ignore[arg-type]
-        worktree=worktree,    # type: ignore[arg-type]
-        git=git,              # type: ignore[arg-type]
-        pr=pr,                # type: ignore[arg-type]
-        worker_factory=lambda: worker,  # type: ignore[return-value]
+        worktree=RecordingWorktree(rec, tmp_path),  # type: ignore[arg-type]
+        git=RecordingGit(rec),                       # type: ignore[arg-type]
+        pr=RecordingPr(rec),                         # type: ignore[arg-type]
+        worker_factory=lambda: worker_for("claude-code"),  # type: ignore[return-value]
+        worker_for=worker_for,   # type: ignore[arg-type]
         repo_root=tmp_path,
         base_branch="main",
         max_retries=1,
     )
+
+
+def _one(worker):
+    """Single-backend resolver: every backend name resolves to `worker`."""
+    return lambda backend: worker
 
 
 def _one_default_router(max=3):
@@ -313,10 +322,7 @@ def test_no_overlapping_beads_calls(tmp_path):
     no two BeadsAdapter subprocess calls ever overlap under concurrency."""
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(4)])
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), ControllableWorker(rec),
-    )
+    services = _services(tmp_path, beads, rec, _one(ControllableWorker(rec)))
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(), max_parallel=3)
     assert rec.overlapping("bd:") == []
@@ -328,10 +334,7 @@ def test_no_overlapping_git_metadata_ops(tmp_path):
     `.git`, so they must also serialize — no two overlap under concurrency."""
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(4)])
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), ControllableWorker(rec),
-    )
+    services = _services(tmp_path, beads, rec, _one(ControllableWorker(rec)))
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(), max_parallel=3)
     assert rec.overlapping("git:") == []
@@ -344,10 +347,7 @@ def test_two_workers_run_concurrently_outside_the_lock(tmp_path):
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(4)])
     worker = ControllableWorker(rec, delay=0.1)
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), worker,
-    )
+    services = _services(tmp_path, beads, rec, _one(worker))
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(max=3), max_parallel=3)
     assert rec.peak.get("worker", 0) >= 2
@@ -360,10 +360,7 @@ def test_pool_cap_binds(tmp_path):
     rec = Recorder()
     beads = RecordingBeads(rec, ready=[_ref(f"t{i}") for i in range(6)])
     worker = ControllableWorker(rec, delay=0.05)
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), worker,
-    )
+    services = _services(tmp_path, beads, rec, _one(worker))
     dispatch_concurrent("oauth", services,
                         router=_one_default_router(max=1), max_parallel=5)
     assert rec.peak.get("worker", 0) == 1
@@ -386,12 +383,36 @@ def test_max_parallel_binds_below_summed_pool_caps(tmp_path):
         _pool("anthropic", "claude-code", ["impl"], max=3, default=True),
         _pool("openai", "codex", ["test"], max=3),
     ])
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), worker,
-    )
+    services = _services(tmp_path, beads, rec, _one(worker))
     dispatch_concurrent("oauth", services, router=router, max_parallel=2)
     assert rec.peak.get("worker", 0) == 2  # reaches, and never exceeds, the cap
+
+
+@pending_dispatcher
+def test_task_type_routes_to_its_pool_backend(tmp_path):
+    """Core contract: a task's turma-type selects its pool, and the pool's
+    backend runs it. `impl` -> the Claude pool/backend, `test` -> the Codex
+    pool/backend. A dispatcher that ignored `pool.backend` (one shared worker)
+    would fail this."""
+    rec = Recorder()
+    impl_ids = {f"i{i}" for i in range(3)}
+    test_ids = {f"t{i}" for i in range(3)}
+    ready = (
+        [_ref(i, "impl") for i in impl_ids]
+        + [_ref(t, "test") for t in test_ids]
+    )
+    beads = RecordingBeads(rec, ready=ready)
+    claude = ControllableWorker(rec, delay=0.01, name="claude-code")
+    codex = ControllableWorker(rec, delay=0.01, name="codex")
+    workers = {"claude-code": claude, "codex": codex}
+    services = _services(tmp_path, beads, rec, lambda backend: workers[backend])
+    router = build_router([
+        _pool("anthropic", "claude-code", ["impl"], max=3, default=True),
+        _pool("openai", "codex", ["test"], max=3),
+    ])
+    dispatch_concurrent("oauth", services, router=router, max_parallel=4)
+    assert set(claude.finished) == impl_ids  # Claude backend ran the impl tasks
+    assert set(codex.finished) == test_ids   # Codex backend ran the test tasks
 
 
 @pending_dispatcher
@@ -403,10 +424,7 @@ def test_failure_halt_drains_in_flight_not_cancel(tmp_path):
     # 'boom' fails (drives the halt); 'slow' is mid-flight and must still reach
     # its terminal (recorded in worker.finished), not be cancelled.
     worker = ControllableWorker(rec, delay=0.1, fail_ids={"boom"})
-    services = _services(
-        tmp_path, beads, RecordingWorktree(rec, tmp_path),
-        RecordingGit(rec), RecordingPr(rec), worker,
-    )
+    services = _services(tmp_path, beads, rec, _one(worker))
     with pytest.raises(PlanningError):
         dispatch_concurrent("oauth", services,
                             router=_one_default_router(max=2), max_parallel=2)
