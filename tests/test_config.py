@@ -8,9 +8,11 @@ import pytest
 from turma.config import (
     ConfigError,
     SwarmConfig,
+    build_swarm_router,
     load_config,
     load_swarm_config,
 )
+from turma.errors import PlanningError
 
 
 VALID_CONFIG = """\
@@ -284,3 +286,133 @@ def test_load_config_still_requires_planning_author_model(
 
     with pytest.raises(ConfigError, match="planning.author_model"):
         load_config()
+
+
+# ---------------------------------------------------------------------
+# [[swarm.pools]] — pool config + router (swarm-parallel-multi-pool Task 2)
+# ---------------------------------------------------------------------
+
+POOLS_CONFIG = (
+    MINIMAL_CONFIG
+    + """
+[swarm]
+max_parallel = 4
+
+[[swarm.pools]]
+name = "anthropic"
+backend = "claude-code"
+types = ["impl", "spec"]
+max = 2
+default = true
+
+[[swarm.pools]]
+name = "openai"
+backend = "codex"
+types = ["test", "docs"]
+max = 2
+"""
+)
+
+
+def _load(tmp_path, monkeypatch, text):
+    (tmp_path / "turma.toml").write_text(text)
+    monkeypatch.chdir(tmp_path)
+    return load_config()
+
+
+def test_parses_swarm_pools(tmp_path, monkeypatch):
+    """[[swarm.pools]] parses into SwarmConfig.pools with max_parallel."""
+    swarm = _load(tmp_path, monkeypatch, POOLS_CONFIG).swarm
+    assert swarm.max_parallel == 4
+    assert [p.name for p in swarm.pools] == ["anthropic", "openai"]
+    anthropic = swarm.pools[0]
+    assert anthropic.backend == "claude-code"
+    assert anthropic.types == ("impl", "spec")
+    assert anthropic.max == 2 and anthropic.default is True
+
+
+def test_max_parallel_defaults_to_one(tmp_path, monkeypatch):
+    """No max_parallel key → 1 (today's sequential-equivalent default)."""
+    assert _load(tmp_path, monkeypatch, MINIMAL_CONFIG).swarm.max_parallel == 1
+
+
+def test_build_swarm_router_from_configured_pools(tmp_path, monkeypatch):
+    """build_swarm_router routes turma-type → pool → backend."""
+    router = build_swarm_router(_load(tmp_path, monkeypatch, POOLS_CONFIG).swarm)
+    assert router.pool_for("impl").backend == "claude-code"
+    assert router.pool_for("test").backend == "codex"
+    # unmatched type → the default pool
+    assert router.pool_for("chore").name == "anthropic"
+
+
+def test_build_swarm_router_backcompat_single_implicit_pool(tmp_path, monkeypatch):
+    """No [[swarm.pools]] → one implicit default pool from worker_backend that
+    serves every type."""
+    text = MINIMAL_CONFIG + '\n[swarm]\nworker_backend = "opencode"\n'
+    router = build_swarm_router(_load(tmp_path, monkeypatch, text).swarm)
+    assert router.pool_for("impl").backend == "opencode"
+    assert router.pool_for("anything").backend == "opencode"
+
+
+def test_build_swarm_router_backend_override(tmp_path, monkeypatch):
+    """--backend override → a single pool over all types on that backend,
+    ignoring any configured pools."""
+    router = build_swarm_router(
+        _load(tmp_path, monkeypatch, POOLS_CONFIG).swarm, backend_override="codex"
+    )
+    assert router.pool_for("impl").backend == "codex"
+    assert router.pool_for("test").backend == "codex"
+
+
+def test_duplicate_pool_types_is_config_error(tmp_path, monkeypatch):
+    text = (
+        MINIMAL_CONFIG
+        + """
+[[swarm.pools]]
+name = "a"
+backend = "claude-code"
+types = ["impl"]
+default = true
+
+[[swarm.pools]]
+name = "b"
+backend = "codex"
+types = ["impl"]
+"""
+    )
+    with pytest.raises(ConfigError, match="at most one pool"):
+        _load(tmp_path, monkeypatch, text)
+
+
+def test_pools_require_exactly_one_default_is_config_error(tmp_path, monkeypatch):
+    text = (
+        MINIMAL_CONFIG
+        + """
+[[swarm.pools]]
+name = "a"
+backend = "claude-code"
+types = ["impl"]
+
+[[swarm.pools]]
+name = "b"
+backend = "codex"
+types = ["test"]
+"""
+    )
+    with pytest.raises(ConfigError, match="exactly one pool"):
+        _load(tmp_path, monkeypatch, text)
+
+
+def test_pool_missing_name_is_config_error(tmp_path, monkeypatch):
+    text = (
+        MINIMAL_CONFIG
+        + '\n[[swarm.pools]]\nbackend = "claude-code"\ntypes = ["impl"]\ndefault = true\n'
+    )
+    with pytest.raises(ConfigError, match="name"):
+        _load(tmp_path, monkeypatch, text)
+
+
+def test_max_parallel_must_be_positive_is_config_error(tmp_path, monkeypatch):
+    text = MINIMAL_CONFIG + "\n[swarm]\nmax_parallel = 0\n"
+    with pytest.raises(ConfigError, match="max_parallel"):
+        _load(tmp_path, monkeypatch, text)

@@ -6,6 +6,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from turma.errors import PlanningError
+from turma.swarm.pools import Pool, PoolRouter, build_router
+
 
 class ConfigError(Exception):
     """Raised when turma.toml is missing, malformed, or incomplete."""
@@ -34,6 +37,11 @@ class SwarmConfig:
     max_retries: int = 1
     worktree_root: str = ".worktrees"
     base_branch: str = "main"
+    # Concurrent multi-pool execution (swarm-parallel-multi-pool). Defaults
+    # preserve today's sequential single-backend behavior: no pools + a global
+    # cap of 1. `max_parallel` counts top-level worker slots.
+    max_parallel: int = 1
+    pools: tuple[Pool, ...] = ()
 
 
 @dataclass
@@ -162,10 +170,116 @@ def _parse_swarm(swarm_raw: dict) -> SwarmConfig:
             "swarm.base_branch must be a non-empty string"
         )
 
+    max_parallel = swarm_raw.get("max_parallel", defaults.max_parallel)
+    if (
+        not isinstance(max_parallel, int)
+        or isinstance(max_parallel, bool)
+        or max_parallel < 1
+    ):
+        raise ConfigError("swarm.max_parallel must be a positive integer")
+
+    pools = _parse_pools(swarm_raw.get("pools", []))
+
     return SwarmConfig(
         worker_backend=worker_backend,
         worker_timeout=worker_timeout,
         max_retries=max_retries,
         worktree_root=worktree_root,
         base_branch=base_branch,
+        max_parallel=max_parallel,
+        pools=pools,
     )
+
+
+def _parse_pools(pools_raw: object) -> tuple[Pool, ...]:
+    """Parse `[[swarm.pools]]` into validated `Pool`s.
+
+    Per-key shape errors and the cross-pool rules (exactly one default, no
+    duplicate task types across pools, `max >= 1`) raise `ConfigError` so the
+    operator fixes turma.toml. The cross-pool rules reuse `build_router`.
+    """
+    if not isinstance(pools_raw, list):
+        raise ConfigError(
+            "swarm.pools must be an array of tables ([[swarm.pools]])"
+        )
+    if not pools_raw:
+        return ()
+
+    pools: list[Pool] = []
+    for index, entry in enumerate(pools_raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"swarm.pools[{index}] must be a table")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"swarm.pools[{index}].name must be a non-empty string"
+            )
+        backend = entry.get("backend")
+        if not isinstance(backend, str) or not backend:
+            raise ConfigError(
+                f"swarm.pools[{name!r}].backend must be a non-empty string"
+            )
+        types = entry.get("types", [])
+        if not isinstance(types, list) or not all(
+            isinstance(t, str) and t for t in types
+        ):
+            raise ConfigError(
+                f"swarm.pools[{name!r}].types must be a list of "
+                "non-empty strings"
+            )
+        max_slots = entry.get("max", 1)
+        if not isinstance(max_slots, int) or isinstance(max_slots, bool):
+            raise ConfigError(f"swarm.pools[{name!r}].max must be an integer")
+        default = entry.get("default", False)
+        if not isinstance(default, bool):
+            raise ConfigError(
+                f"swarm.pools[{name!r}].default must be a boolean"
+            )
+        pools.append(
+            Pool(
+                name=name,
+                backend=backend,
+                types=tuple(types),
+                max=max_slots,
+                default=default,
+            )
+        )
+
+    try:
+        build_router(pools)  # cross-pool validation only
+    except PlanningError as exc:
+        raise ConfigError(f"swarm.pools: {exc}") from exc
+    return tuple(pools)
+
+
+def build_swarm_router(
+    config: SwarmConfig, *, backend_override: str | None = None
+) -> PoolRouter:
+    """Build the routing table for a run from a `SwarmConfig`.
+
+    `--backend <id>` (``backend_override``) wins: a single pool over all types
+    on that backend. Otherwise the configured `[[swarm.pools]]` are used; with
+    no pools configured, one implicit default pool over all types from
+    `worker_backend` reproduces today's single-backend behavior.
+    """
+    if backend_override is not None:
+        return build_router([
+            Pool(
+                name=backend_override,
+                backend=backend_override,
+                types=(),
+                max=config.max_parallel,
+                default=True,
+            )
+        ])
+    if config.pools:
+        return build_router(list(config.pools))
+    return build_router([
+        Pool(
+            name=config.worker_backend,
+            backend=config.worker_backend,
+            types=(),
+            max=config.max_parallel,
+            default=True,
+        )
+    ])

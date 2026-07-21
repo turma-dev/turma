@@ -30,6 +30,32 @@ worktree_root = ".worktrees"
 # Base branch for PRs opened by the orchestrator.
 base_branch = "main"
 
+# Global cap on concurrent top-level worker slots (parallel multi-pool
+# execution). Default 1 = today's sequential, one-task-at-a-time behavior.
+# Counts top-level slots only; a backend may spawn its own subagents.
+max_parallel = 1
+
+# Provider pools for concurrent multi-pool routing (optional). With no
+# [[swarm.pools]] declared, one implicit pool serves every task type on
+# `worker_backend` above — i.e. current behavior. When declared, a task's
+# `turma-type:` label selects its pool; unmatched types route to the pool
+# with `default = true` (exactly one required). A task type may appear in at
+# most one pool's `types`. `--backend` overrides all of this to a single pool
+# for the run. Example:
+#
+# [[swarm.pools]]
+# name    = "anthropic"
+# backend = "claude-code"
+# types   = ["impl", "spec"]
+# max     = 2            # per-pool concurrency cap
+# default = true         # unmatched types route here (exactly one default)
+#
+# [[swarm.pools]]
+# name    = "openai"
+# backend = "codex"
+# types   = ["test", "docs"]
+# max     = 2
+
 [models]
 impl_complex = "claude-opus-4-6"
 spec = "claude-sonnet-4-6"
