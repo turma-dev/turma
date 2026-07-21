@@ -86,8 +86,8 @@ UI/distribution surfaces stay deferred behind it.
     mutation lock around Beads + worktree ops.
   - `src/turma/swarm/worktree.py` — worktree add/removal + branch ops invoked
     under the lock.
-  - `src/turma/swarm/beads.py` — `BeadsAdapter` calls invoked under the lock
-    (no per-method change; the caller holds the lock).
+  - `src/turma/transcription/beads.py` — `BeadsAdapter` calls invoked under the
+    lock (no per-method change; the caller holds the lock).
   - `src/turma/swarm/events.py` — `run_id`, timestamps, `started`, `completed`,
     `heartbeat`.
   - `src/turma/config.py`, `turma.example.toml` — `[[swarm.pools]]`.
@@ -96,7 +96,7 @@ UI/distribution surfaces stay deferred behind it.
   - tests under `tests/test_swarm_*.py`; `README.md`, `docs/architecture.md`,
     `CHANGELOG.md`.
 - **New runtime deps:** none anticipated (`asyncio`, `uuid`, `datetime`,
-  `threading`/`asyncio` locks are stdlib). Confirmed during implementation.
+  `threading`/`asyncio` locks are stdlib). Confirm during implementation.
 
 ## Out of Scope
 
