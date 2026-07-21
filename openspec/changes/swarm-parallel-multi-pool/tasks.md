@@ -15,7 +15,8 @@ are pinned before any implementation.
       in-flight ≤ `MAX_PARALLEL`, and each pool never exceeds its `Semaphore(cap)`.
 - [ ] **Routing.** `turma-type:` → pool → backend selection; default-pool
       fallback for an unmatched type; `--backend` single-pool override; absent
-      `[[swarm.pools]]` reproduces today's single-backend behavior.
+      `[[swarm.pools]]` reproduces today's single-backend behavior; config-load
+      **errors** on duplicate explicit types across pools and on ≠1 default pool.
 - [ ] **`run.v1` identity.** Every event carries `run_id` (stable within a run) +
       `ts`; `started` is first; `completed` fires once per task with `outcome`;
       `heartbeat` appears during the worker wait; interleaved events are each
@@ -32,7 +33,8 @@ are pinned before any implementation.
 - [ ] A pool-registry/router: `turma-type:` label → pool → backend (from the
       existing worker registry) + cap. Unmatched types route to the `default =
       true` pool; config-load requires exactly one default pool when
-      `[[swarm.pools]]` is present (validate + error otherwise).
+      `[[swarm.pools]]` is present, and rejects duplicate explicit types across
+      pools (a type may appear in at most one pool's `types`).
 - [ ] Back-compat: no `[[swarm.pools]]` ⇒ one implicit pool over all types using
       `[swarm].worker_backend`; `--backend <id>` overrides to a single pool for
       the whole run.

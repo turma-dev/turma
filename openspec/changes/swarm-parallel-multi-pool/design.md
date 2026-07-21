@@ -76,7 +76,10 @@ max      = 2
   pool** — the pool marked `default = true`. Config-load requires **exactly one**
   `default = true` pool whenever `[[swarm.pools]]` is present (the back-compat
   implicit pool is the default), so an unmatched type always has a home and never
-  errors at run time. Each pool binds one backend from the existing worker
+  errors at run time. A `turma-type:` value may appear in **at most one** pool's
+  `types`; duplicate explicit types across pools are a **config-load error**, so
+  routing is never order-dependent. Each pool binds one backend from the existing
+  worker
   registry.
 - **Back-compat.** With no `[[swarm.pools]]` block, behavior is today's:
   one implicit pool over all types using `[swarm].worker_backend`, `max = 1` (or
@@ -183,8 +186,9 @@ Test-first, concurrency-invariant-focused (the risky part is races, not the JSON
 - **Routing.** `turma-type:` → pool → backend selection; default-pool fallback;
   `--backend` single-pool override; empty/absent `[[swarm.pools]]` = today's
   behavior.
-- **Failure halts the run.** Retry-budget exhaustion in one slot stops new
-  scheduling and exits nonzero, in-flight slots resolved to a safe boundary.
+- **Failure halts the run (drain).** Retry-budget exhaustion in one slot stops
+  new scheduling and exits nonzero; in-flight slots are **drained to a clean
+  terminal, not cancelled** (assert the terminal was reached, not cancellation).
 - **`run.v1` additions.** Every event carries `run_id` + `ts`; `started` first,
   `completed` per task with `outcome`, `heartbeat` during the worker wait;
   interleaved events from concurrent slots are each valid NDJSON and groupable by
