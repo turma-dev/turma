@@ -38,6 +38,7 @@ BACKEND=<backend>   # claude-code | codex | opencode
 
 # 1. Reset the feature's task to a fresh `open` state
 "$TURMA_REPO/.venv/bin/turma" plan-to-beads --feature <feat> --force
+git restore --staged --worktree -- .beads/issues.jsonl        # see note below
 
 # 2. Drive one task end to end
 "$TURMA_REPO/.venv/bin/turma" run --feature <feat> --max-tasks 1 --backend "$BACKEND"
@@ -45,8 +46,18 @@ BACKEND=<backend>   # claude-code | codex | opencode
 # 3. Verify checks 1–4 below, then merge the PR on GitHub (no --delete-branch)
 
 # 4. Re-run to exercise merge-advancement (check 5)
+git restore --staged --worktree -- .beads/issues.jsonl        # see note below
 "$TURMA_REPO/.venv/bin/turma" run --feature <feat>
 ```
+
+> **Why `git restore` before each `turma run`:** any interleaved `bd` command —
+> `plan-to-beads --force` here, and `bd show` during verification — re-exports
+> `.beads/issues.jsonl` and leaves it dirty in the working tree, which
+> `turma run`'s bd-state-clean preflight refuses (`error: .beads/issues.jsonl
+> has uncommitted changes in main's working tree`). Discarding the working-tree
+> change is safe — the task and PR state live in the Dolt DB + GitHub, not in
+> `issues.jsonl`. (Surfaced by the 2026-07-21 three-backend dogfood; see the
+> preflight-fragility finding in the planning notes.)
 
 Verify all five, for **each** backend:
 
