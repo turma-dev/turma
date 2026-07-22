@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import time
 from pathlib import Path
 
 from turma import __version__
 from turma.config import ConfigError, build_swarm_router, load_swarm_config
-from turma.errors import PlanningError
+from turma.errors import PlanningError, SwarmHalted
 from turma.planning import (
     default_planning_services,
     render_plan_snapshot,
@@ -22,7 +23,7 @@ from turma.swarm import (
     run_swarm,
     status_readout,
 )
-from turma.swarm.events import JsonEmitter
+from turma.swarm.events import HeartbeatTicker, JsonEmitter
 from turma.swarm.worker import registered_worker_backends
 from turma.transcription import TranscriptionResult, transcribe_to_beads
 from turma.transcription.beads import BeadsAdapter
@@ -355,10 +356,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}")
             return 1
     if args.command == "run":
-        # In --json mode every line — including the terminal failure —
-        # is a turma.run.v1 event, so route errors through the emitter
-        # instead of the shared `error: <msg>` text path.
+        # In --json mode every line — the terminal failure AND the run
+        # lifecycle (run_started / run_completed / heartbeat) — is a
+        # turma.run.v1 event. The lifecycle envelope + heartbeat are
+        # --json-only, CLI-owned: they bookend the whole invocation (including
+        # a pre-run config/services failure, where there is no services.emitter
+        # yet), and the default text path runs the core sequence bare.
         emitter = JsonEmitter() if args.json else None
+        started_at = time.monotonic()
+        heartbeat: HeartbeatTicker | None = None
+        run_outcome = "error"  # until a cleaner terminal is reached
 
         def _run_error(exc: Exception) -> int:
             if emitter is not None:
@@ -369,21 +376,20 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             config = load_swarm_config()
-        except ConfigError as exc:
-            return _run_error(exc)
-
-        # CLI flags take precedence over [swarm] in turma.toml; all
-        # other knobs (worker_timeout, max_retries, worktree_root,
-        # base_branch) come from config since they have no flag.
-        backend = args.backend or config.swarm.worker_backend
-        # Route through the concurrent multi-pool dispatcher when the operator
-        # asked for parallelism (max_parallel > 1) or declared [[swarm.pools]];
-        # otherwise keep the sequential loop. `--backend` collapses routing to a
-        # single-backend pool. The default config (max_parallel = 1, no pools)
-        # passes router=None, so behavior is unchanged.
-        use_concurrent = config.swarm.max_parallel > 1 or bool(config.swarm.pools)
-        router = build_swarm_router(config.swarm, backend_override=args.backend)
-        try:
+            # CLI flags take precedence over [swarm] in turma.toml; all other
+            # knobs come from config since they have no flag.
+            backend = args.backend or config.swarm.worker_backend
+            # Route through the concurrent multi-pool dispatcher when the
+            # operator asked for parallelism (max_parallel > 1) or declared
+            # [[swarm.pools]]; otherwise keep the sequential loop. `--backend`
+            # collapses routing to a single-backend pool. The default config
+            # (max_parallel = 1, no pools) passes router=None — unchanged.
+            use_concurrent = (
+                config.swarm.max_parallel > 1 or bool(config.swarm.pools)
+            )
+            router = build_swarm_router(
+                config.swarm, backend_override=args.backend
+            )
             services = default_swarm_services(
                 repo_root=Path.cwd(),
                 backend=backend,
@@ -393,6 +399,28 @@ def main(argv: list[str] | None = None) -> int:
                 worktree_root=config.swarm.worktree_root,
                 emitter=emitter,
             )
+            # Config + services built → the run actually starts.
+            if emitter is not None:
+                emitter.emit(
+                    "run_started",
+                    feature=args.feature,
+                    dry_run=args.dry_run,
+                    mode="concurrent" if use_concurrent else "sequential",
+                    max_parallel=config.swarm.max_parallel,
+                    **(
+                        {
+                            "pools": [
+                                {"name": p.name, "backend": p.backend, "max": p.max}
+                                for p in router.pools
+                            ]
+                        }
+                        if use_concurrent
+                        else {"backend": backend}
+                    ),
+                )
+                heartbeat = HeartbeatTicker(
+                    emitter, config.swarm.heartbeat_interval, started_at
+                ).start()
             run_swarm(
                 args.feature,
                 services=services,
@@ -402,9 +430,22 @@ def main(argv: list[str] | None = None) -> int:
                 router=router if use_concurrent else None,
                 max_parallel=config.swarm.max_parallel,
             )
-        except PlanningError as exc:
+            run_outcome = "completed"
+            return 0
+        except SwarmHalted as exc:  # subclass of PlanningError — must precede it
+            run_outcome = "halted"
             return _run_error(exc)
-        return 0
+        except (ConfigError, PlanningError) as exc:
+            return _run_error(exc)  # run_outcome stays "error"
+        finally:
+            if heartbeat is not None:
+                heartbeat.stop()
+            if emitter is not None:
+                emitter.emit(
+                    "run_completed",
+                    outcome=run_outcome,
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
     if args.command == "status":
         # `status --json` is a snapshot command, so a failure is a
         # structured error object (matching `plan --json`), not a bare

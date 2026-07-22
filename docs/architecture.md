@@ -234,6 +234,17 @@ flushed object per line) for live surfaces — the text output is
 byte-for-byte unchanged (see
 `openspec/changes/run-json-events/`).
 
+Under `--json` the stream also carries **identity and lifecycle** so
+it stays consumable once the concurrent dispatcher interleaves events
+from several worker threads (`run-v1-stream-identity`): every event
+has a per-run `run_id` (a `uuid4` hex) and a `ts` (ISO-8601 UTC,
+stamped at emit), and the CLI bookends the run with `run_started` /
+`run_completed` (`outcome` ∈ `completed` | `halted` | `error`) plus a
+periodic `heartbeat` (cadence `[swarm].heartbeat_interval`, 0
+disables). These lifecycle events are `--json`-only — text mode is
+untouched. Both emitters serialize their writes so concurrent
+worker-thread events stay line-atomic.
+
 ### bd-state ownership
 
 bd's dolt database (`.beads/embeddeddolt/`) is gitignored

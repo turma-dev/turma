@@ -434,3 +434,42 @@ default = true
     )
     with pytest.raises(ConfigError, match="unknown worker backend"):
         _load(tmp_path, monkeypatch, text)
+
+
+# ---------------------------------------------------------------------
+# [swarm].heartbeat_interval (run-v1-stream-identity)
+# ---------------------------------------------------------------------
+
+
+def test_heartbeat_interval_defaults_to_15(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "turma.toml").write_text('[swarm]\nworker_backend = "claude-code"\n')
+    monkeypatch.chdir(tmp_path)
+    assert load_swarm_config().swarm.heartbeat_interval == 15
+
+
+def test_heartbeat_interval_explicit_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "turma.toml").write_text("[swarm]\nheartbeat_interval = 30\n")
+    monkeypatch.chdir(tmp_path)
+    assert load_swarm_config().swarm.heartbeat_interval == 30
+
+
+def test_heartbeat_interval_zero_disables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "turma.toml").write_text("[swarm]\nheartbeat_interval = 0\n")
+    monkeypatch.chdir(tmp_path)
+    assert load_swarm_config().swarm.heartbeat_interval == 0
+
+
+@pytest.mark.parametrize("bad", ["-1", '"soon"', "1.5", "true"])
+def test_heartbeat_interval_rejects_invalid(
+    bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "turma.toml").write_text(f"[swarm]\nheartbeat_interval = {bad}\n")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ConfigError, match="heartbeat_interval"):
+        load_swarm_config()

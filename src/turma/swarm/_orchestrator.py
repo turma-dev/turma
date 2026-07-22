@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from turma.errors import PlanningError
+from turma.errors import PlanningError, SwarmHalted
 from turma.swarm.dispatch import dispatch_concurrent
 from turma.swarm.events import JsonEmitter, RunEmitter, TextEmitter
 from turma.swarm.git import COMMIT_MESSAGE_TEMPLATE, GitAdapter
@@ -601,7 +601,7 @@ def _apply_repairs(
 
     if exhausted_ids:
         joined = ", ".join(exhausted_ids)
-        raise PlanningError(
+        raise SwarmHalted(
             f"retry budget exhausted on {joined} during repair phase; "
             "halting run. Triage with `bd list --label "
             "needs_human_review`."
@@ -741,7 +741,7 @@ def _advance_merged_prs(
 
     if exhausted_ids:
         joined = ", ".join(exhausted_ids)
-        raise PlanningError(
+        raise SwarmHalted(
             f"retry budget exhausted on {joined} during "
             "merge-advancement phase; halting run. Triage with "
             "`bd list --label needs_human_review`."
@@ -800,7 +800,7 @@ def _main_loop(
 
         exhausted = _run_single_task(feature, task, services)
         if exhausted:
-            raise PlanningError(
+            raise SwarmHalted(
                 f"retry budget exhausted on {task.id}; halting run. "
                 f"Triage with `bd show {task.id}` and "
                 "`bd list --label needs_human_review`."
