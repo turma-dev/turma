@@ -152,17 +152,14 @@ def dispatch_concurrent(
             if result.status != "success":
                 fail(task.id, result.reason or f"worker {result.status}")
                 return
-            if not services.git.status_is_dirty(ref.path):
+            if not services.git.status_is_dirty(ref.path, ignore_bd_export=True):
                 fail(task.id, CLEAN_TREE_REASON)
                 return
 
             try:
                 with lock:
-                    services.git.commit_all_with_bd_export(
-                        ref.path,
-                        _render_commit_message(task, feature),
-                        beads=services.beads,
-                        repo_root=services.repo_root,
+                    services.git.commit_worker_changes(
+                        ref.path, _render_commit_message(task, feature)
                     )
                 services.emitter.emit("commit", task_id=task.id)
                 services.git.push_branch(ref.path, ref.branch)  # network

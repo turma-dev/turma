@@ -218,10 +218,10 @@ class RecordingWorktree:
 class RecordingGit:
     rec: Recorder
 
-    def status_is_dirty(self, worktree):
+    def status_is_dirty(self, worktree, *, ignore_bd_export=False):
         return True
 
-    def commit_all_with_bd_export(self, worktree, message, *, beads, repo_root):
+    def commit_worker_changes(self, worktree, message):
         with self.rec.track("git:commit", "git"):
             return "deadbeef"
 

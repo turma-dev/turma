@@ -248,20 +248,17 @@ on main. After each Turma-initiated bd mutation
 file to its index version via `GitAdapter.revert_paths`
 (`git restore --staged --worktree -- .beads/issues.jsonl`,
 needed because bd's `export.git-add=true` default also
-stages the file). The dolt db keeps the mutation; the
-export gets regenerated when the next worker commit's
-pre-commit hook fires in a worktree.
+stages the file). The dolt db keeps the mutation, and bd's
+own Dolt-over-git auto-sync propagates it to origin — so the
+git-tracked `.beads/issues.jsonl` is a regenerable backup,
+not the propagation path.
 
 This keeps `fetch_and_ff_base`'s `merge --ff-only` step
 able to run cleanly between `turma run` iterations. The
 2026-04-26 chained-flow live smoke caught the dirty-tree
 failure mode that motivated this contract; see
 `openspec/changes/swarm-beads-state-merge-cleanliness/`
-for the full rationale, including the v1 product
-decision to accept weakened cross-clone visibility (tail
-mutations live in local dolt only until a future worker
-commit captures them) and the operator-visible warning
-that surfaces this lag at end of run.
+for the full rationale.
 
 A preflight check at the top of `run_swarm` refuses to
 start if `.beads/issues.jsonl` is already dirty —
@@ -281,46 +278,38 @@ export. Operators set the knob once via
 `bd config set export.interval 0` (persisted in
 `.beads/config.yaml`).
 
-At the worker-commit boundary, Turma owns the bd-state
-write end-to-end. `commit_all_with_bd_export` runs an
-explicit `bd export -o <worktree>/.beads/issues.jsonl` from
-main's repo root (where Turma's bd db with the claim-side
-mutations lives), asserts the destination file exists, then
-commits the worker's tree with `core.hooksPath=/dev/null`
+At the worker-commit boundary, task commits are **code
+only**. `commit_worker_changes` stages the worker's file
+changes with `git add -A`, then explicitly unstages the
+export with `git reset -q -- .beads/issues.jsonl` (a plain
+`add` pathspec exclude can't un-stage a `.beads/issues.jsonl`
+that bd already staged via `export.git-add`; `git reset` — not
+`restore --staged` — is also a clean no-op when the export is
+untracked, which task commits leave it), then commits with
+`core.hooksPath=/dev/null`
 to bypass bd's pre-commit hook for that single invocation.
-The bypass is scoped to the one git invocation; bd's other
-hooks (post-checkout, post-merge, prepare-commit-msg) still
-fire normally.
+The bypass is load-bearing: it stops bd's hook from
+re-exporting and re-staging `.beads/issues.jsonl` back into
+the otherwise code-only commit (and still sidesteps the bd
+1.0.2 wrong-path hook bug, [steveyegge/beads#3311][bd-3311],
+that corrupted main's HEAD when the export rode a worker
+commit). The bypass is scoped to the one git invocation;
+bd's other hooks (post-checkout, post-merge,
+prepare-commit-msg) still fire normally.
 
-The protocol is load-bearing on every bd version Turma
-supports, but for two different reasons:
+Task branches carry no bd export by design: committing a
+derived snapshot of shared bd state on every branch made
+sibling PRs — opened off the same base before any merged —
+conflict on `.beads/issues.jsonl` (the first live pooled
+dogfood hit this under concurrent dispatch; a sequential run
+over two-or-more ready tasks does too). bd state reaches
+other clones through bd's Dolt auto-sync instead, verified
+push-on-mutate and durable across fresh clones.
 
-- **bd 1.0.2 (still on Homebrew at the time of this
-  writing).** Bd's pre-commit hook, fired against an index
-  containing `D .beads/issues.jsonl` (the state `bd prime`
-  itself creates inside a registered worktree), misroutes
-  the export to the worktree's repo root and stages the
-  move — corrupting main's HEAD on PR merge. Filed as
-  [steveyegge/beads#3311][bd-3311]. Without the bypass +
-  explicit export, the worker commit captures the wrong
-  shape.
-- **bd 1.0.3+ (fix shipped 2026-04-24, PR `#3347`: "scrub
-  git hook env and skip cross-worktree git-add").** The
-  wrong-path defect is fixed, but 1.0.3 also deliberately
-  declines to do cross-worktree git-add at all — bd's hook
-  exports correctly but does NOT stage the export into the
-  worktree's commit. Without Turma's explicit export +
-  add, Turma's claim-side bd mutations would never reach
-  origin/main on PR merge. The hook bypass therefore
-  remains correct and necessary on 1.0.3+, just for a
-  state-propagation reason rather than a bug-avoidance
-  reason.
-
-See `openspec/changes/swarm-worker-commit-bd-ownership/`
-for the full contract, including the no-agent shell-only
-reproducer for the upstream bd defect on 1.0.2 and the
-recorded follow-up for the negative-control integration
-test that becomes version-sensitive on 1.0.3+.
+See `openspec/changes/swarm-bd-export-serialization/` for
+the full rationale, and `swarm-worker-commit-bd-ownership`
+for the superseded export-on-commit model and the upstream
+bd defect the bypass originally worked around.
 
 [bd-3311]: https://github.com/steveyegge/beads/issues/3311
 

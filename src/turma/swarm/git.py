@@ -51,15 +51,22 @@ class GitAdapter:
         if shutil.which("git") is None:
             raise PlanningError(GIT_INSTALL_HINT)
 
-    def status_is_dirty(self, worktree: Path) -> bool:
-        """True iff `git status --porcelain=v1` emits any tracked changes."""
-        result = self._run(
-            [
-                "git", "-C", str(worktree),
-                "status", "--porcelain=v1",
-            ],
-            step="git status",
-        )
+    def status_is_dirty(
+        self, worktree: Path, *, ignore_bd_export: bool = False
+    ) -> bool:
+        """True iff `git status --porcelain=v1` emits any tracked changes.
+
+        With ``ignore_bd_export=True`` the bd export (`.beads/issues.jsonl`) is
+        excluded — matching exactly what `commit_worker_changes` stages — so
+        "did the worker leave real changes?" is decided on the same set that
+        would actually be committed. Without the exclusion, a stray bd rewrite
+        of the export could make an otherwise-clean worktree look dirty and the
+        code-only commit would then find nothing to stage.
+        """
+        argv = ["git", "-C", str(worktree), "status", "--porcelain=v1"]
+        if ignore_bd_export:
+            argv += ["--", ".", ":!.beads/issues.jsonl"]
+        result = self._run(argv, step="git status")
         return bool(result.stdout.strip())
 
     def commit_all(self, worktree: Path, message: str) -> str:
@@ -96,56 +103,47 @@ class GitAdapter:
             )
         return sha
 
-    def commit_all_with_bd_export(
+    def commit_worker_changes(
         self,
         worktree: Path,
         message: str,
-        *,
-        beads,  # type: ignore[no-untyped-def] -- duck-typed; see _FakeBeads in tests
-        repo_root: Path,
     ) -> str:
-        """Worker-commit boundary protocol — see
-        `openspec/changes/swarm-worker-commit-bd-ownership/`.
+        """Commit the worker's changes on a task branch — **code only**.
 
-        Five-step sequence per worker commit:
+        Four steps:
 
-        1. `beads.export(output_path=<worktree>/.beads/issues.jsonl,
-           cwd=repo_root)` — captures main's bd db state at the
-           commit boundary. Absolute output path; cwd pinned so
-           there is no cwd-relative ambiguity in bd's path
-           resolution (the upstream defect this protocol works
-           around).
-        2. Assert the destination file exists. If bd reported
-           zero exit but the path does not exist (the upstream-
-           fix edge case), raise PlanningError naming the path
-           BEFORE any git mutation runs.
-        3. `git status --porcelain=v1` empty-commit guard.
-        4. `git -C <worktree> add -A` to stage everything,
-           including the just-exported `.beads/issues.jsonl`.
-        5. `git -C <worktree> -c core.hooksPath=/dev/null commit
-           -m <message>` to commit with bd's pre-commit hook
-           bypassed locally. The hook misroutes the export to
-           the worktree's repo root when fired against the index
-           shape that `bd prime` itself creates; bypassing it for
-           this one commit produces the canonical shape.
+        1. `git status --porcelain=v1` empty-commit guard (excluding the bd
+           export) — refuse if the worker left the tree clean.
+        2. `git -C <worktree> add -A` — stage the worker's file changes.
+        3. `git -C <worktree> reset -q -- .beads/issues.jsonl` — unstage the bd
+           export. A `git add` pathspec exclude only controls what `add`
+           *stages*; it cannot un-stage a `.beads/issues.jsonl` that bd already
+           staged (bd's `export.git-add=true` default). `git reset` on the path
+           drops it from the index regardless of how it got staged (modified,
+           deleted, added), and — unlike `git restore --staged` — is a clean
+           no-op (exit 0) when the export is untracked and unstaged, which is
+           reachable here since task commits never track it (bd only writes the
+           export on a bd write/export).
+        4. `git -C <worktree> -c core.hooksPath=/dev/null commit -m <message>`.
+
+        Task commits must not carry `.beads/issues.jsonl`. That file is a
+        derived snapshot of shared bd state; committing it on every task branch
+        made sibling PRs (opened off the same base before any merged) conflict on
+        it (see `openspec/changes/swarm-bd-export-serialization/`). bd state
+        propagates on its own via bd's Dolt-over-git auto-sync, so Turma neither
+        exports into the worktree nor commits the export here.
+
+        The `core.hooksPath=/dev/null` bypass is **load-bearing** and must stay:
+        it stops bd's pre-commit hook from re-exporting and re-staging
+        `.beads/issues.jsonl` into this commit (and still sidesteps the bd
+        wrong-path hook bug). Removing it re-introduces the export on the branch.
 
         Returns the new commit SHA via a final `rev-parse HEAD`.
 
-        Failure-boundary contract: ANY of the five steps raising
-        means zero git mutations occur after the failing step.
-        Either all steps run (and the commit captures the
-        canonical shape) or no commit is generated. There is no
-        partial-commit intermediate state.
+        Failure-boundary contract: any step raising means zero git mutations
+        occur after the failing step — no partial-commit intermediate state.
         """
-        beads_export_path = worktree / ".beads" / "issues.jsonl"
-        beads.export(output_path=beads_export_path, cwd=repo_root)
-        if not beads_export_path.exists():
-            raise PlanningError(
-                "bd export reported success but destination path "
-                f"is missing: {beads_export_path}"
-            )
-
-        if not self.status_is_dirty(worktree):
+        if not self.status_is_dirty(worktree, ignore_bd_export=True):
             raise PlanningError(
                 "nothing to commit: worktree is clean. "
                 "Did the worker actually modify any tracked files?"
@@ -154,6 +152,17 @@ class GitAdapter:
         self._run(
             ["git", "-C", str(worktree), "add", "-A"],
             step="git add",
+        )
+        # Unstage the bd export in case bd already staged it — the exclusion
+        # must be an un-stage, not just an add-time filter (see docstring).
+        # `git reset` (not `restore --staged`): a clean no-op when the export is
+        # untracked, which is reachable since task commits never track it.
+        self._run(
+            [
+                "git", "-C", str(worktree),
+                "reset", "-q", "--", ".beads/issues.jsonl",
+            ],
+            step="git reset",
         )
         self._run(
             [

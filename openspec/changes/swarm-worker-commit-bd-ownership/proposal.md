@@ -1,3 +1,12 @@
+> **Partly superseded (2026-07-21) by `swarm-bd-export-serialization`.** The
+> worker-commit-boundary bd *export* (Outcome §2 below) is removed: task commits
+> are now **code-only** and bd state propagates on its own via bd's Dolt-over-git
+> auto-sync (committing the export on every task branch made concurrent/multi-PR
+> runs conflict on `.beads/issues.jsonl`). What stays from this arc: the
+> `export.interval=0` contract (§1, Finding 1) and the `core.hooksPath=/dev/null`
+> bypass — the bypass is now load-bearing to keep bd's auto-export *out* of
+> code-only task commits.
+
 ## Why
 
 The 2026-04-26b chained-flow smoke against

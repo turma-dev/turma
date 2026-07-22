@@ -161,6 +161,12 @@ Verify, in order:
 Merge the three PRs and optionally re-run once more; the sweep closes them and
 cleans the worktrees (`merge-advancement: <id> → MERGED, closed`).
 
+> **Task PRs are code-only** (`swarm-bd-export-serialization`): the worker commit
+> excludes `.beads/issues.jsonl`, so sibling PRs opened off the same base merge
+> **without conflicts**. bd state propagates on its own via bd's Dolt auto-sync,
+> not through the git-committed export. If you ever see a `.beads/issues.jsonl`
+> conflict on a task PR, that invariant has regressed.
+
 ## Phase D — failed-worker path stays sane (optional)
 
 Force a deterministic worker failure without a flaky agent by shrinking the

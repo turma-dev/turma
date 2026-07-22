@@ -88,7 +88,9 @@ class StubWorktreeManager:
 class StubGitAdapter:
     calls: list[tuple] = field(default_factory=list)
 
-    def status_is_dirty(self, worktree: Path) -> bool:
+    def status_is_dirty(
+        self, worktree: Path, *, ignore_bd_export: bool = False
+    ) -> bool:
         self.calls.append(("status_is_dirty", worktree))
         return False
 

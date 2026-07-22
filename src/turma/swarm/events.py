@@ -134,13 +134,6 @@ def _render_text(event: str, fields: dict[str, object]) -> str:
             f"swarm: {task_id} failed (attempt "
             f"{f['attempt']}/{f['max_attempts']}): {f['reason']}"
         )
-    if event == "bd_state_unpropagated":
-        return (
-            "bd-state: local mutations not yet propagated to "
-            "origin. Run `bd export && git commit -- "
-            ".beads/issues.jsonl` to capture them, or rely on "
-            "the next `turma run` worker commit to propagate."
-        )
     raise KeyError(f"unknown run event: {event!r}")
 
 
