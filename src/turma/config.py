@@ -43,6 +43,9 @@ class SwarmConfig:
     # cap of 1. `max_parallel` counts top-level worker slots.
     max_parallel: int = 1
     pools: tuple[Pool, ...] = ()
+    # `turma run --json` heartbeat cadence in seconds (run-v1-stream-identity).
+    # 0 disables. JSON-only; ignored in text mode.
+    heartbeat_interval: int = 15
 
 
 @dataclass
@@ -179,6 +182,19 @@ def _parse_swarm(swarm_raw: dict) -> SwarmConfig:
     ):
         raise ConfigError("swarm.max_parallel must be a positive integer")
 
+    heartbeat_interval = swarm_raw.get(
+        "heartbeat_interval", defaults.heartbeat_interval
+    )
+    if (
+        not isinstance(heartbeat_interval, int)
+        or isinstance(heartbeat_interval, bool)
+        or heartbeat_interval < 0
+    ):
+        raise ConfigError(
+            "swarm.heartbeat_interval must be a non-negative integer "
+            "(seconds; 0 disables)"
+        )
+
     pools = _parse_pools(swarm_raw.get("pools", []))
 
     return SwarmConfig(
@@ -189,6 +205,7 @@ def _parse_swarm(swarm_raw: dict) -> SwarmConfig:
         base_branch=base_branch,
         max_parallel=max_parallel,
         pools=pools,
+        heartbeat_interval=heartbeat_interval,
     )
 
 

@@ -14,7 +14,12 @@ import threading
 import time
 from datetime import datetime
 
-from turma.swarm.events import RUN_SCHEMA, JsonEmitter, TextEmitter
+from turma.swarm.events import (
+    RUN_SCHEMA,
+    HeartbeatTicker,
+    JsonEmitter,
+    TextEmitter,
+)
 
 
 def test_json_emitter_injects_stable_run_id_and_iso_ts() -> None:
@@ -96,3 +101,36 @@ def test_text_emitter_concurrent_prints_stay_intact() -> None:
     lines = stream.getvalue().splitlines()
     assert len(lines) == 80
     assert all(line.startswith("commit: ") for line in lines)
+
+
+def test_heartbeat_ticker_fires_periodically_then_stops() -> None:
+    buf = io.StringIO()
+    em = JsonEmitter(stream=buf)
+    ticker = HeartbeatTicker(
+        em, interval_seconds=0.02, started_at=time.monotonic()
+    ).start()
+    time.sleep(0.11)  # ~5 intervals
+    ticker.stop()
+
+    heartbeats = [
+        json.loads(line)
+        for line in buf.getvalue().splitlines()
+        if json.loads(line)["event"] == "heartbeat"
+    ]
+    assert len(heartbeats) >= 1
+    assert all("elapsed_ms" in h and h["schema"] == RUN_SCHEMA for h in heartbeats)
+
+    # After stop, no further heartbeats fire.
+    n_after_stop = len(buf.getvalue().splitlines())
+    time.sleep(0.06)
+    assert len(buf.getvalue().splitlines()) == n_after_stop
+
+
+def test_heartbeat_ticker_disabled_when_interval_zero() -> None:
+    buf = io.StringIO()
+    em = JsonEmitter(stream=buf)
+    ticker = HeartbeatTicker(em, interval_seconds=0, started_at=time.monotonic())
+    ticker.start()  # no thread spawned
+    time.sleep(0.05)
+    ticker.stop()
+    assert buf.getvalue() == ""

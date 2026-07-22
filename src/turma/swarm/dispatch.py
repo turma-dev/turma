@@ -35,7 +35,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
-from turma.errors import PlanningError
+from turma.errors import PlanningError, SwarmHalted
 from turma.swarm.pools import PoolRouter
 from turma.swarm.worker import WorkerInvocation
 
@@ -100,7 +100,7 @@ def dispatch_concurrent(
     def signal_halt(task_id: str) -> None:
         if not halt.is_set():
             halt_error.append(
-                PlanningError(
+                SwarmHalted(
                     f"retry budget exhausted on {task_id}; halting run. "
                     f"Triage with `bd show {task_id}` and "
                     "`bd list --label needs_human_review`."

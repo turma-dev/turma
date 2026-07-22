@@ -35,6 +35,11 @@ base_branch = "main"
 # Counts top-level slots only; a backend may spawn its own subagents.
 max_parallel = 1
 
+# Cadence (seconds) of the `heartbeat` keepalive on the `turma run --json`
+# event stream, so a consumer can tell a live run from one hung inside a long
+# worker step. 0 disables. JSON-only — ignored in text mode.
+heartbeat_interval = 15
+
 # Provider pools for concurrent multi-pool routing (optional). With no
 # [[swarm.pools]] declared, one implicit pool serves every task type on
 # `worker_backend` above — i.e. current behavior. When declared, a task's

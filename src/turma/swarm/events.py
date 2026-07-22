@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Protocol, TextIO
@@ -206,3 +207,48 @@ class JsonEmitter:
         with self._lock:
             self._stream.write(line)
             self._stream.flush()
+
+
+class HeartbeatTicker:
+    """Emit periodic `heartbeat` events on a daemon thread until stopped.
+
+    The CLI starts this around the execution phase of a `--json` run so a
+    consumer can tell a live run from one hung inside a long blocking
+    `worker.run` (up to `worker_timeout`) — no natural in-loop emit fires during
+    that stretch, so only a timer keeps the stream alive.
+
+    `interval_seconds <= 0` disables it (no thread spawned). `elapsed_ms` on each
+    event is measured from `started_at` (a `time.monotonic()` value the caller
+    captured at run start). Stop is immediate: the wait *is* the interval, and
+    `stop()` sets the event the wait watches.
+    """
+
+    def __init__(
+        self,
+        emitter: RunEmitter,
+        interval_seconds: float,
+        started_at: float,
+    ) -> None:
+        self._emitter = emitter
+        self._interval = interval_seconds
+        self._started_at = started_at
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "HeartbeatTicker":
+        if self._interval > 0:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._emitter.emit(
+                "heartbeat",
+                elapsed_ms=int((time.monotonic() - self._started_at) * 1000),
+            )
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 1.0)

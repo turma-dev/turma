@@ -9,7 +9,7 @@ import pytest
 
 from turma.cli import build_parser, main
 from turma.config import SwarmConfig, TurmaConfig, PlanningConfig, ConfigError
-from turma.errors import PlanningError
+from turma.errors import PlanningError, SwarmHalted
 from turma.swarm.pools import Pool
 
 
@@ -405,22 +405,27 @@ def test_main_run_config_error_exits_1(
 
 
 @patch("turma.cli.load_swarm_config")
-def test_main_run_json_error_emits_error_event(
+def test_main_run_json_config_error_envelope(
     mock_load_swarm_config: MagicMock,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """In --json mode the terminal failure is an `error` event NDJSON
-    line, not the `error: <msg>` text line."""
+    """A pre-run config failure in --json mode still gets the lifecycle bookend:
+    `error` + `run_completed(outcome="error")`, with **no** `run_started`
+    (nothing started). Both carry `run_id` + `ts` (run-v1-stream-identity)."""
     mock_load_swarm_config.side_effect = ConfigError("turma.toml not found")
     exit_code = main(["run", "--feature", "oauth", "--json"])
     assert exit_code == 1
-    out = capsys.readouterr().out.strip()
-    assert json.loads(out) == {
-        "schema": "turma.run.v1",
-        "event": "error",
-        "message": "turma.toml not found",
-    }
-    assert "error: " not in out
+    out = capsys.readouterr().out
+    events = [json.loads(line) for line in out.splitlines() if line.strip()]
+    # error, then the terminal bookend — no run_started (never started).
+    assert [e["event"] for e in events] == ["error", "run_completed"]
+    assert events[0]["message"] == "turma.toml not found"
+    assert events[-1]["outcome"] == "error"
+    assert all(
+        e["schema"] == "turma.run.v1" and e["run_id"] and e["ts"] for e in events
+    )
+    assert len({e["run_id"] for e in events}) == 1  # one run_id
+    assert "error: " not in out  # not the text path
 
 
 # ---------------------------------------------------------------------
@@ -709,3 +714,125 @@ def test_main_status_planning_error_from_readout_exits_1(
     assert "bd list" in out
     # No partial readout printed before the error.
     assert "feature: oauth" not in out
+
+
+# ---------------------------------------------------------------------
+# run.v1 stream identity — CLI lifecycle envelope (run-v1-stream-identity)
+# ---------------------------------------------------------------------
+
+
+def _json_run_events(capsys) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_json_lifecycle_bookends_completed(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--json` run: `run_started` first (mode/fields), `run_completed` last
+    with outcome `completed`; every event carries one `run_id` + `ts`."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(worker_backend="claude-code", heartbeat_interval=0)
+    )
+    mock_services_factory.return_value = MagicMock()
+
+    assert main(["run", "--feature", "oauth", "--json"]) == 0
+
+    events = _json_run_events(capsys)
+    assert events[0]["event"] == "run_started"
+    assert events[-1]["event"] == "run_completed"
+    started = events[0]
+    assert started["feature"] == "oauth"
+    assert started["dry_run"] is False
+    assert started["mode"] == "sequential"
+    assert started["max_parallel"] == 1
+    assert started["backend"] == "claude-code"
+    assert events[-1]["outcome"] == "completed"
+    assert "duration_ms" in events[-1]
+    assert all(e["run_id"] and e["ts"] for e in events)
+    assert len({e["run_id"] for e in events}) == 1
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_json_run_started_concurrent_lists_pools(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under a pooled config, `run_started` reports `mode=concurrent` + pools."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(pools=_TWO_POOLS, max_parallel=4, heartbeat_interval=0)
+    )
+    mock_services_factory.return_value = MagicMock()
+
+    assert main(["run", "--feature", "oauth", "--json"]) == 0
+
+    started = _json_run_events(capsys)[0]
+    assert started["event"] == "run_started"
+    assert started["mode"] == "concurrent"
+    assert started["max_parallel"] == 4
+    assert {p["name"] for p in started["pools"]} == {"anthropic", "openai"}
+    assert "backend" not in started
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_json_halt_outcome(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `SwarmHalted` from run_swarm → `run_completed(outcome="halted")` (plus
+    an `error` event), exit 1 — distinct from an unexpected error."""
+    mock_load_swarm_config.return_value = _stub_config(
+        SwarmConfig(heartbeat_interval=0)
+    )
+    mock_services_factory.return_value = MagicMock()
+    mock_run_swarm.side_effect = SwarmHalted("retry budget exhausted on bd-1")
+
+    assert main(["run", "--feature", "oauth", "--json"]) == 1
+
+    events = _json_run_events(capsys)
+    kinds = [e["event"] for e in events]
+    assert kinds[0] == "run_started"
+    assert "error" in kinds
+    assert kinds[-1] == "run_completed"
+    assert events[-1]["outcome"] == "halted"
+
+
+@patch("turma.cli.load_swarm_config")
+@patch("turma.cli.default_swarm_services")
+@patch("turma.cli.run_swarm")
+def test_main_run_text_mode_emits_no_lifecycle(
+    mock_run_swarm: MagicMock,
+    mock_services_factory: MagicMock,
+    mock_load_swarm_config: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Text mode is truly untouched: no `run_started` / `run_completed` /
+    `heartbeat`, and no ticker (the CLI never builds a JsonEmitter)."""
+    mock_load_swarm_config.return_value = _stub_config(SwarmConfig())
+    mock_services_factory.return_value = MagicMock()
+
+    assert main(["run", "--feature", "oauth"]) == 0  # no --json
+
+    out = capsys.readouterr().out
+    assert "run_started" not in out
+    assert "run_completed" not in out
+    assert "heartbeat" not in out
+    # `default_swarm_services` got emitter=None (text path builds no JsonEmitter).
+    assert mock_services_factory.call_args.kwargs["emitter"] is None
