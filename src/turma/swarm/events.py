@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import uuid
+from datetime import datetime, timezone
 from typing import Protocol, TextIO
 
 RUN_SCHEMA = "turma.run.v1"
@@ -138,13 +141,23 @@ def _render_text(event: str, fields: dict[str, object]) -> str:
 
 
 class TextEmitter:
-    """Emit run events as the historical operator-facing text lines."""
+    """Emit run events as the historical operator-facing text lines.
+
+    Writes are serialized by a lock: the concurrent dispatcher emits task events
+    from several worker threads (a pooled `turma run` without `--json` too), so
+    the `print()` calls must not interleave. Lifecycle / heartbeat events are
+    `--json`-gated and never reach this emitter — `_render_text` is unchanged and
+    still raises on a genuinely unknown event.
+    """
 
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream if stream is not None else sys.stdout
+        self._lock = threading.Lock()
 
     def emit(self, event: str, /, **fields: object) -> None:
-        print(_render_text(event, fields), file=self._stream)
+        line = _render_text(event, fields)  # render (and validate) outside the lock
+        with self._lock:
+            print(line, file=self._stream)
 
 
 # ---------------------------------------------------------------------
@@ -155,17 +168,41 @@ class TextEmitter:
 class JsonEmitter:
     """Emit run events as `turma.run.v1` NDJSON, one object per line.
 
-    Flushes after each event so streaming consumers (UI / MCP) see
-    progress live. `text`-only fields (used solely by `TextEmitter`) are
-    dropped from the payload via the emit-site contract: callers pass
-    structured fields; nothing text-shaped is passed that shouldn't be
-    in the JSON.
+    Every event carries a per-run `run_id` (a `uuid4` hex, one per invocation, so
+    interleaved concurrent events are correlatable) and a `ts` (ISO-8601 UTC,
+    stamped at emit time, so consumers order by real time not stream position).
+    Flushes after each event so streaming consumers (UI / MCP) see progress live.
+
+    Writes are serialized by a lock so concurrent worker-thread events and the
+    heartbeat stay line-atomic. The lock is held only around `write` + `flush`
+    (the JSON is built outside it); emit is line-atomic and synchronous — it does
+    not decouple the run from a slow consumer stream.
+
+    `text`-only fields (used solely by `TextEmitter`) are dropped from the payload
+    via the emit-site contract: callers pass structured fields; nothing
+    text-shaped is passed that shouldn't be in the JSON.
     """
 
-    def __init__(self, stream: TextIO | None = None) -> None:
+    def __init__(
+        self, stream: TextIO | None = None, run_id: str | None = None
+    ) -> None:
         self._stream = stream if stream is not None else sys.stdout
+        self._run_id = run_id if run_id is not None else uuid.uuid4().hex
+        self._lock = threading.Lock()
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
 
     def emit(self, event: str, /, **fields: object) -> None:
-        payload = {"schema": RUN_SCHEMA, "event": event, **fields}
-        self._stream.write(json.dumps(payload) + "\n")
-        self._stream.flush()
+        payload = {
+            "schema": RUN_SCHEMA,
+            "event": event,
+            "run_id": self._run_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            **fields,
+        }
+        line = json.dumps(payload) + "\n"
+        with self._lock:
+            self._stream.write(line)
+            self._stream.flush()

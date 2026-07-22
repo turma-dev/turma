@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -2416,12 +2417,19 @@ def test_json_happy_loop_event_order(tmp_path: Path) -> None:
     by = {e["event"]: e for e in events}
     assert by["fetch_advanced"]["base_branch"] == "main"
     assert by["reconcile_summary"]["in_progress_count"] == 0
-    assert by["task_claimed"] == {
-        "schema": "turma.run.v1",
-        "event": "task_claimed",
-        "task_id": "bd-1",
-        "title": "Wire OAuth",
-    }
+    # Additive identity (run-v1-stream-identity): every event carries one
+    # run_id for the whole run and an ISO-8601 ts.
+    run_ids = {e["run_id"] for e in events}
+    assert len(run_ids) == 1 and all(run_ids)
+    for e in events:
+        datetime.fromisoformat(e["ts"])
+    # task_claimed still carries its task fields (alongside schema/run_id/ts).
+    tc = by["task_claimed"]
+    assert (tc["event"], tc["task_id"], tc["title"]) == (
+        "task_claimed",
+        "bd-1",
+        "Wire OAuth",
+    )
     assert by["worker_running"]["timeout_s"] == 1800
     assert by["task_opened"]["pr_number"] == 1
     assert by["task_opened"]["pr_url"].endswith("/pull/1")
