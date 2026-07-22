@@ -119,11 +119,6 @@ class SwarmServices:
     # (pool.backend name -> WorkerBackend). None on the sequential path, which
     # uses `worker_factory`. See `swarm-parallel-multi-pool`.
     worker_for: Callable[[str], WorkerBackend] | None = None
-    # Run-scoped mutable counter — reset at run_swarm start,
-    # incremented in `_revert_beads_export`, read at run_swarm end
-    # to decide whether to print the tail-mutation warning.
-    # See `swarm-beads-state-merge-cleanliness` Task 4.
-    _bd_mutations_during_run: int = 0
 
 
 def default_swarm_services(
@@ -230,10 +225,6 @@ def run_swarm(
 
     _preflight(feature, services.repo_root)
 
-    # Reset the run-scoped tail-mutation counter so the end-of-run
-    # warning reflects only this invocation's bd updates.
-    services._bd_mutations_during_run = 0
-
     # bd export.interval=0 is a Turma contract — see
     # `swarm-worker-commit-bd-ownership`. The default 60s throttle
     # defers exports to the next bd command (read or write), so any
@@ -298,20 +289,6 @@ def run_swarm(
     else:
         _main_loop(feature, services, max_tasks)
 
-    # Tail-mutation telemetry: if any Turma bd update fired during
-    # this run, the dolt db now holds mutations that origin/main's
-    # `.beads/issues.jsonl` snapshot doesn't. Same-clone reentrancy
-    # is preserved, but cross-clone visibility lags until a future
-    # worker commit's pre-commit hook captures the state — and if no
-    # future worker run happens, the lag is unbounded until manual
-    # action. Surface this so operators can decide between manually
-    # `bd export && git commit`-ing now or waiting for the cycle to
-    # propagate. See
-    # `openspec/changes/swarm-beads-state-merge-cleanliness/
-    # design.md` "Shareability contract" for the v1 acceptance.
-    if services._bd_mutations_during_run > 0:
-        services.emitter.emit("bd_state_unpropagated")
-
 
 # ---------------------------------------------------------------------
 # Preflight
@@ -356,11 +333,11 @@ def _revert_beads_export(services: SwarmServices) -> None:
     db (the source of truth for bd state) keeps the mutation;
     this revert disposes of the export-file dirtiness so main's
     working tree stays clean for the next iteration's
-    `fetch_and_ff_base`.
-
-    Increments the run-scoped tail-mutation counter on the
-    services container so the end-of-run warning (Task 4) can
-    surface when bd state is local-only.
+    `fetch_and_ff_base`. bd's own Dolt-over-git auto-sync
+    propagates the mutation to origin (see
+    `swarm-bd-export-serialization`); the export file itself is a
+    regenerable backup, not the propagation path, so there is no
+    end-of-run "unpropagated" state to warn about.
 
     See `openspec/changes/swarm-beads-state-merge-cleanliness/
     design.md` "Adapter contract" for why this targets
@@ -369,7 +346,6 @@ def _revert_beads_export(services: SwarmServices) -> None:
     export is regenerable).
     """
     services.git.revert_paths(services.repo_root, _BEADS_EXPORT)
-    services._bd_mutations_during_run += 1
 
 
 _BEADS_CONFIG_VALUE_PATTERN = re.compile(r"^([\w.-]+)\s*:\s*(.*)$")
@@ -868,17 +844,12 @@ def _run_single_task(
         reason = result.reason or f"worker {result.status}"
         return _handle_failure(services, task.id, reason)
 
-    if not services.git.status_is_dirty(ref.path):
+    if not services.git.status_is_dirty(ref.path, ignore_bd_export=True):
         return _handle_failure(services, task.id, CLEAN_TREE_REASON)
 
     try:
         message = _render_commit_message(task, feature)
-        services.git.commit_all_with_bd_export(
-            ref.path,
-            message,
-            beads=services.beads,
-            repo_root=services.repo_root,
-        )
+        services.git.commit_worker_changes(ref.path, message)
         services.emitter.emit("commit", task_id=task.id)
         services.git.push_branch(ref.path, ref.branch)
         services.emitter.emit("push", task_id=task.id)
@@ -1005,12 +976,7 @@ def _complete_pending_task(
     task = _lookup_task(services.beads, feature, task_id)
     description = services.beads.get_task_body(task_id)
     message = _render_commit_message(task, feature)
-    services.git.commit_all_with_bd_export(
-        ref.path,
-        message,
-        beads=services.beads,
-        repo_root=services.repo_root,
-    )
+    services.git.commit_worker_changes(ref.path, message)
     services.git.push_branch(ref.path, ref.branch)
     pr_url = services.pr.open_pr(
         branch=ref.branch,

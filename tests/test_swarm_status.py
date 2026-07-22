@@ -104,7 +104,9 @@ class StubGit:
 
     # status_readout does not call GitAdapter at all, but we track
     # mutation surfaces here to pin that invariant.
-    def status_is_dirty(self, worktree: Path) -> bool:
+    def status_is_dirty(
+        self, worktree: Path, *, ignore_bd_export: bool = False
+    ) -> bool:
         self.calls.append(("status_is_dirty", worktree))
         return False
 

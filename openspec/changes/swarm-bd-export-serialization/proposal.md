@@ -24,68 +24,74 @@ latent defect surfaces immediately.
 The committed export is not incidental: `swarm-worker-commit-bd-ownership`
 introduced it as the **worker-commit propagation pathway** — how bd state reaches
 `origin/main` when a task PR merges — and preserving that propagation was an
-explicit constraint of that arc. So the fix cannot simply drop the export; it
-must re-home propagation onto a path that does not put a shared, divergent
-snapshot on every task branch.
+explicit constraint of that arc. So the fix must preserve propagation while
+removing the per-task snapshot. The Task-0 check (below) proved bd's own
+Dolt-over-git auto-sync already propagates mutations durably across clones, so
+the fix **removes the per-task export and relies on bd auto-sync** — no
+git-committed export needed. (Had bd-sync not been proven, the fallback was to
+re-home propagation onto a serialized, orchestrator-owned main-side path; see
+the design's "Rejected fallback (Option 2)".)
 
 ## What Changes
 
-Establish the invariant: **task branches carry code changes only; bd-export
-propagation, if needed, happens exactly once through a serialized,
-orchestrator-owned authority path — never smuggled through per-task PRs.**
+Establish the invariant: **task branches carry code changes only; the bd export
+(`.beads/issues.jsonl`) is never committed on a task branch.**
 
-- The worker-commit boundary (`commit_all_with_bd_export`, used by the sequential
-  loop, the reconcile-repair phase, and the concurrent dispatcher) **stops
-  staging `.beads/issues.jsonl`** on task branches. Task commits contain the
-  worker's file changes and nothing bd-export-shaped.
-- bd-export propagation to `origin/main` moves to a single **serialized,
-  main-side** update owned by the orchestrator (default: at merge-advancement /
-  under the authority that already owns main's bd state), so exactly one
-  authoritative export reaches origin, with no divergent branch snapshots to
-  conflict.
+- The worker-commit boundary (`commit_all_with_bd_export` → `commit_worker_changes`,
+  used by the sequential loop, the reconcile-repair phase, and the concurrent
+  dispatcher) **stops staging `.beads/issues.jsonl`** on task branches. Task
+  commits contain the worker's file changes and nothing bd-export-shaped.
+- bd state propagates to `origin/main` through **bd's own Dolt-over-git
+  auto-sync** — verified push-on-mutate and durable across clones (Task 0) — so
+  Turma builds **no** separate propagation path. (A serialized, orchestrator-owned
+  main-side export commit was the fallback had bd-sync not been proven; see the
+  design's "Rejected fallback (Option 2)".)
 
 ## Guardrails (explicit)
 
 - **Propagation must not silently regress.** bd state a merged task implies (task
   closed, PR-labelled, etc.) must still reach `origin/main` for other clones —
-  via the new serialized path, verified by test, before the per-branch export is
+  proven (Task 0) to happen via bd's auto-sync before the per-branch export is
   removed. Converting a *visible git conflict* into *invisible cross-clone state
   loss* is the failure this change must avoid.
 - **Dolt remains canonical.** `.beads/issues.jsonl` is a derived export; the git
-  propagation is a convenience layer over the authoritative Dolt DB.
-- The `swarm-beads-state-merge-cleanliness` revert-after-mutation contract, the
-  bd-state-clean preflight, and the tail-mutation warning stay correct — adjusted
-  only as the new main-side update requires.
+  propagation was a convenience layer over the authoritative Dolt DB.
+- The `swarm-beads-state-merge-cleanliness` revert-after-mutation contract and the
+  bd-state-clean preflight stay correct and unchanged (Turma adds no new git
+  writer of the export). The end-of-run "unpropagated" tail-warning is removed —
+  bd's auto-sync handles propagation, so there is no lag to surface.
 - Sequential single-task-per-run behavior stays byte-for-byte where it already
   avoided the conflict.
 
-## Gated simplification (bd self-sync → Option 1)
+## The decision gate (bd self-sync → Option 1, SELECTED)
 
-If a pre-implementation check proves bd's own Dolt-over-git remote sync
-propagates *mutations* durably and bidirectionally to other clones — the dogfood
-showed `bd init` bootstrapping from the remote, but that only proves
-pull-on-init, not push-on-mutate — then the git export propagation is obsolete
-redundancy and the serialized main-side update collapses to "remove it entirely."
-Until that is proven, the serialized main-side path is built (the safe default:
-relying on unverified bd behavior risks turning a visible conflict into invisible
-cross-clone state loss). The check is a gate on Task 3's shape; it does not block
-authoring this change or removing the per-branch export.
+The pre-implementation check (operator-run, needs a live bd) **proved** bd's own
+Dolt-over-git remote sync propagates *mutations* durably to other clones — a
+`bd note` in one clone, its export reverted and never committed, was visible in a
+fresh clone — not just pull-on-init, and Turma never passes bd's `--sandbox`
+(which would disable auto-sync). So the git export propagation is obsolete
+redundancy: **Option 1 is selected — the per-branch export is removed and no
+serialized main-side path is built.** (Had the check failed, the fallback was the
+serialized main-side path; see the design's "Rejected fallback (Option 2)". The
+gate was on Task 3's shape, not on removing the per-branch export.)
 
 ## Capabilities
 
 ### Modified Capabilities
 
 - **Worker-commit boundary** (`swarm-worker-commit-bd-ownership`): task commits no
-  longer carry `.beads/issues.jsonl`; export/propagation responsibility moves to a
-  serialized, orchestrator-owned step.
+  longer carry `.beads/issues.jsonl`; propagation is bd's Dolt auto-sync, not a
+  git-committed export.
 
 ## Impact
 
-- `src/turma/swarm/git.py` — `commit_all_with_bd_export` staging/export behavior.
-- `src/turma/swarm/_orchestrator.py` — serialized main-side propagation; preflight
-  / revert / tail-warning coherence.
+- `src/turma/swarm/git.py` — `commit_all_with_bd_export` → `commit_worker_changes`
+  (code-only staging; unstage the export via `git reset`).
+- `src/turma/swarm/_orchestrator.py` — the two clean-tree checks exclude the
+  export (`status_is_dirty(ignore_bd_export=True)`); the obsolete end-of-run "bd
+  state unpropagated" warning + its counter are removed.
 - Tests: `tests/test_swarm_git.py`, `tests/test_swarm_git_integration.py`,
-  `tests/test_swarm_run.py`, plus a new failing reproducer.
+  `tests/test_swarm_run.py`, plus new reproducers.
 - Docs: `docs/smoke-pooled-parallel.md`; the `swarm-worker-commit-bd-ownership`
   rationale is amended (its propagation-via-task-PR mechanism is superseded).
 

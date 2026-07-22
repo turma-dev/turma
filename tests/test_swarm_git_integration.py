@@ -292,8 +292,8 @@ def test_path_is_dirty_against_real_git(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# commit_all_with_bd_export — real git + real bd
-# (swarm-worker-commit-bd-ownership Task 3)
+# commit_worker_changes — real git + real bd
+# (swarm-bd-export-serialization; code-only task commits)
 # ---------------------------------------------------------------------
 
 
@@ -418,25 +418,27 @@ def _install_bd_pre_commit_hook(clone: Path) -> None:
 
 
 @needs_bd
-def test_commit_all_with_bd_export_against_real_git_and_real_bd(
+def test_commit_worker_changes_against_real_git_and_real_bd(
     tmp_path: Path,
 ) -> None:
-    """Happy commit-boundary protocol against real git + real bd.
+    """Happy commit-boundary against real git + real bd.
 
-    Walks the exact reproducer setup from the upstream bd
-    defect document and asserts that
-    `commit_all_with_bd_export` produces the CORRECT commit
-    shape:
+    Walks the upstream-bd-defect reproducer setup and asserts that
+    `commit_worker_changes` produces a **code-only** commit
+    (swarm-bd-export-serialization): the commit's diff touches the worker's
+    file and nothing bd-export-shaped.
 
-    - the worker's task file added
-    - `.beads/issues.jsonl` updated (NOT deleted) at the right
-      path
-    - no rogue `issues.jsonl` at the worktree root
+    - the worker's task file is committed
+    - the commit does NOT touch `.beads/issues.jsonl` — not added, modified,
+      or deleted. Even though `bd prime` deletes it in the worktree, the
+      explicit unstage (`git reset -q -- .beads/issues.jsonl`) keeps that
+      change out of the commit.
+    - no rogue root-level `issues.jsonl` (the hook bypass blocks bd's hook
+      from creating one).
 
-    The negative-control test below pins that the SAME setup
-    using a plain `git commit` does produce the buggy shape;
-    these two tests together prove the workaround is what
-    fixes it (not some unrelated detail of the fixture)."""
+    The negative-control test below pins that a plain `git commit` (bd hook
+    live) DOES produce the buggy shape — proving the hook bypass is what
+    keeps the export out, not some incidental detail of the fixture."""
     bare, clone = _make_bd_init_clone(tmp_path)
 
     # Cut a registered worktree from main, the same way Turma's
@@ -444,11 +446,8 @@ def test_commit_all_with_bd_export_against_real_git_and_real_bd(
     worktree = tmp_path / "worktree"
     _git(clone, "worktree", "add", "-b", "task/probe/x", str(worktree), "main")
 
-    # Run `bd prime` inside the worktree — this is the trigger
-    # that leaves `D .beads/issues.jsonl` staged in subsequent
-    # `git status`. The protocol's first step (bd export from
-    # repo_root) must overwrite that with a correct file at
-    # the right path.
+    # `bd prime` deletes `.beads/issues.jsonl` in the worktree (the upstream
+    # trigger). The code-only commit must NOT stage that deletion.
     subprocess.run(
         ["bd", "prime"],
         cwd=worktree,
@@ -458,43 +457,104 @@ def test_commit_all_with_bd_export_against_real_git_and_real_bd(
         timeout=30,
     )
 
-    # Worker-side write — any non-bd change so the commit has
-    # something to capture besides the bd export.
+    # Worker-side write — a non-bd change so the commit has content.
     (worktree / "STAGE.txt").write_text("stage one complete\n")
 
-    # Run the protocol.
+    # Run the commit boundary.
     adapter = GitAdapter()
-    beads = BeadsAdapter()
-    sha = adapter.commit_all_with_bd_export(
+    sha = adapter.commit_worker_changes(
         worktree,
-        "[impl] integration: worker-commit-boundary happy path",
-        beads=beads,
-        repo_root=clone,
+        "[impl] integration: code-only worker commit",
     )
 
-    # Inspect the commit's tree.
-    tree_listing = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", sha],
+    # Inspect what the commit actually CHANGED (its diff), not just the tree —
+    # the tree still carries base's `.beads/issues.jsonl`; the point is that
+    # this commit didn't touch it.
+    changed = subprocess.run(
+        ["git", "show", "--pretty=", "--name-status", sha],
         cwd=clone,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
 
-    # The worker file is present.
-    assert "STAGE.txt" in tree_listing, (
-        f"STAGE.txt missing from commit {sha}; tree: {tree_listing}"
+    # The worker file changed.
+    assert any(line.endswith("STAGE.txt") for line in changed), (
+        f"STAGE.txt not in commit diff {sha}; changed: {changed}"
     )
-    # `.beads/issues.jsonl` is present at the canonical path.
-    assert ".beads/issues.jsonl" in tree_listing, (
-        f".beads/issues.jsonl missing from commit {sha}; "
-        f"tree: {tree_listing}"
+    # The commit did NOT touch any bd export file — not `.beads/issues.jsonl`
+    # (the base version stays untouched) and not a rogue root `issues.jsonl`.
+    assert not any("issues.jsonl" in line for line in changed), (
+        f"commit {sha} touched a bd export file; changed: {changed}"
     )
-    # And critically: NO rogue `issues.jsonl` at the repo root.
-    assert "issues.jsonl" not in tree_listing, (
-        f"rogue root-level issues.jsonl in commit {sha}; "
-        f"tree: {tree_listing}"
+
+
+def test_commit_worker_changes_drops_a_pre_staged_bd_export(
+    tmp_path: Path,
+) -> None:
+    """Regression (real git, no bd): a `.beads/issues.jsonl` that is already
+    STAGED — bd's `export.git-add=true` does this — must not land in the commit.
+    A plain `git add` pathspec exclude would NOT unstage it; the explicit
+    `git reset -q` does. Pins the exact bug the pathspec-only version had."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    # commit_worker_changes runs a plain `git commit` (no inline -c identity),
+    # so give the repo a local identity — CI runners have none configured.
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / ".beads").mkdir()
+    (repo / ".beads" / "issues.jsonl").write_text('{"id":"base"}\n')
+    (repo / "code.py").write_text("v0\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "seed")
+
+    # bd-style: modify AND stage the export, plus an unstaged worker change.
+    (repo / ".beads" / "issues.jsonl").write_text('{"id":"DIVERGENT"}\n')
+    _git(repo, "add", ".beads/issues.jsonl")   # pre-staged
+    (repo / "code.py").write_text("v1\n")        # unstaged worker change
+
+    sha = GitAdapter().commit_worker_changes(repo, "[impl] worker change")
+
+    changed = subprocess.run(
+        ["git", "show", "--pretty=", "--name-only", sha],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout
+    assert "code.py" in changed
+    assert "issues.jsonl" not in changed, (
+        f"pre-staged bd export leaked into the commit; changed: {changed!r}"
     )
+
+
+def test_commit_worker_changes_commits_when_export_untracked(
+    tmp_path: Path,
+) -> None:
+    """Regression (real git, no bd): `.beads/issues.jsonl` absent from HEAD and
+    the index — reachable because task commits never track it and bd only writes
+    it on a bd write/export — must NOT abort the commit. The unstage step uses
+    `git reset` (a clean no-op on an unknown path), not `git restore --staged`
+    (which exits 1 on an unknown pathspec)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    # commit_worker_changes runs a plain `git commit` (no inline -c identity),
+    # so give the repo a local identity — CI runners have none configured.
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "code.py").write_text("v0\n")   # no .beads/issues.jsonl anywhere
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "seed")
+
+    (repo / "code.py").write_text("v1\n")    # worker change only
+
+    sha = GitAdapter().commit_worker_changes(repo, "[impl] worker change")
+
+    changed = subprocess.run(
+        ["git", "show", "--pretty=", "--name-only", sha],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout
+    assert "code.py" in changed
+    assert "issues.jsonl" not in changed
 
 
 @needs_bd
@@ -515,14 +575,13 @@ def test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug(
     `steveyegge/beads#3311`, "scrub git hook env and skip
     cross-worktree git-add"). See
     `openspec/changes/swarm-worker-commit-bd-ownership/tasks.md`
-    Task 5 for the recorded version-sensitivity follow-up:
-    the protocol's hook bypass remains load-bearing on 1.0.3+
-    for a different reason (1.0.3 deliberately skips cross-
-    worktree git-add, so Turma's explicit export is what
-    captures bd state into worker commits). Do NOT silence
-    this test on 1.0.3 — reshape it (skipif on bd version,
-    convert to regression-on-fixed-version, or remove) per
-    the spec's Task 5 follow-up guidance.
+    Task 5 for the recorded version-sensitivity follow-up. Under
+    `swarm-bd-export-serialization` the hook bypass is load-bearing for a
+    NEW reason regardless of bd version: task commits are code-only, and the
+    bypass is what stops bd's pre-commit hook from re-exporting and re-adding
+    `.beads/issues.jsonl` into the commit. Do NOT silence this test on 1.0.3+
+    — reshape it (skipif on bd version, convert to regression-on-fixed-
+    version, or remove) per the spec's Task 5 follow-up guidance.
 
     No other test in the suite references the buggy shape; this
     is the single source of truth on what an unexpected pass
@@ -571,8 +630,9 @@ def test_plain_commit_after_bd_prime_reproduces_upstream_bd_bug(
         "Expected upstream bd defect: rogue root-level "
         "`issues.jsonl` in the plain-commit tree. If this "
         "assertion fails, see the docstring — upstream may "
-        "have fixed the defect and the hook-bypass workaround "
-        "in commit_all_with_bd_export may be removable. "
+        "have fixed the defect. Note the hook bypass in "
+        "commit_worker_changes stays load-bearing regardless (it keeps "
+        "bd's auto-export out of code-only task commits). "
         f"Tree: {tree_listing}"
     )
     assert ".beads/issues.jsonl" not in tree_listing, (

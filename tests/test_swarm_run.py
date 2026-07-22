@@ -185,7 +185,9 @@ class StubGit:
     dirty_paths: set[str] = field(default_factory=set)
     calls: list[tuple] = field(default_factory=list)
 
-    def status_is_dirty(self, worktree: Path) -> bool:
+    def status_is_dirty(
+        self, worktree: Path, *, ignore_bd_export: bool = False
+    ) -> bool:
         self.calls.append(("status_is_dirty", str(worktree)))
         return self.dirty
 
@@ -195,25 +197,19 @@ class StubGit:
             raise self.commit_raises
         return "deadbeef"
 
-    def commit_all_with_bd_export(
+    def commit_worker_changes(
         self,
         worktree: Path,
         message: str,
-        *,
-        beads,
-        repo_root: Path,
     ) -> str:
-        # Tracks the worker-commit-boundary protocol introduced by
-        # swarm-worker-commit-bd-ownership. Records the call as
-        # `commit_all_with_bd_export` so existing assertions that
-        # match on the recorded op name surface clearly when they
-        # rely on the old `commit_all` shape.
+        # The worker-commit boundary (swarm-bd-export-serialization): code-only
+        # task commits, no bd export. Records the call as
+        # `commit_worker_changes` so call-sequence assertions match the op name.
         self.calls.append(
             (
-                "commit_all_with_bd_export",
+                "commit_worker_changes",
                 str(worktree),
                 message,
-                str(repo_root),
             )
         )
         if self.commit_raises is not None:
@@ -464,7 +460,7 @@ def test_dry_run_never_calls_any_mutation(tmp_path: Path) -> None:
     # swarm-merge-advancement-stabilization Task 4.
     mutating_git = {
         "commit_all",
-        "commit_all_with_bd_export",
+        "commit_worker_changes",
         "push_branch",
         "fetch_and_ff_base",
     }
@@ -951,80 +947,6 @@ def test_export_interval_preflight_spawns_no_subprocess_on_refusal(
 
 
 # ---------------------------------------------------------------------
-# Tail-mutation telemetry (swarm-beads-state-merge-cleanliness Task 4)
-# ---------------------------------------------------------------------
-
-
-_TAIL_WARNING_PREFIX = "bd-state: local mutations not yet propagated"
-
-
-def test_run_swarm_warns_on_unpropagated_tail_mutations(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """When bd mutations fired during the run (claim, mark_pr_open,
-    etc.), Turma's revert-after-mutation contract leaves them in
-    local dolt only — origin/main won't see them until a future
-    worker commit captures them. The warning surfaces this lag at
-    the moment of decision so the operator can choose to manually
-    `bd export && git commit` or rely on the next run."""
-    _scratch_feature(tmp_path)
-    task = _ref("bd-1", title="Wire OAuth")
-    beads = StubBeads(ready_queue=[(task,)])
-    services, *_ = _make_services(
-        tmp_path, beads=beads, worker_results=[_success()]
-    )
-
-    run_swarm("oauth", services=services)
-
-    captured = capsys.readouterr()
-    assert _TAIL_WARNING_PREFIX in captured.out
-    # Operator-actionable: name the manual escape-hatch command.
-    assert "bd export" in captured.out
-    assert ".beads/issues.jsonl" in captured.out
-    # Order: warning comes after the final swarm log line.
-    swarm_done_idx = captured.out.find("swarm: no ready tasks remain")
-    warning_idx = captured.out.find(_TAIL_WARNING_PREFIX)
-    assert swarm_done_idx >= 0 and warning_idx >= 0
-    assert warning_idx > swarm_done_idx
-
-
-def test_run_swarm_skips_warning_when_no_mutations(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A no-op run (empty ready_queue, no in_progress tasks, no
-    merge-advancement work) fires zero bd mutations → zero reverts
-    → no warning. Without this filter, every `turma run` would
-    print the warning, defeating the purpose."""
-    _scratch_feature(tmp_path)
-    beads = StubBeads(ready_queue=[])  # empty
-    services, *_ = _make_services(tmp_path, beads=beads)
-
-    run_swarm("oauth", services=services)
-
-    captured = capsys.readouterr()
-    assert _TAIL_WARNING_PREFIX not in captured.out
-
-
-def test_dry_run_skips_tail_mutation_warning(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Dry-run skips all bd-mutation paths, so by definition no
-    tail mutations exist. The warning is a real-run-only signal;
-    don't fire it under dry-run."""
-    _scratch_feature(tmp_path)
-    task = _ref("bd-1", title="Wire OAuth")
-    beads = StubBeads(ready_queue=[(task,)])
-    services, *_ = _make_services(
-        tmp_path, beads=beads, worker_results=[_success()]
-    )
-
-    run_swarm("oauth", services=services, dry_run=True)
-
-    captured = capsys.readouterr()
-    assert _TAIL_WARNING_PREFIX not in captured.out
-
-
-# ---------------------------------------------------------------------
 # Beads-state revert wiring (swarm-beads-state-merge-cleanliness Task 3)
 # ---------------------------------------------------------------------
 
@@ -1144,16 +1066,15 @@ def test_single_task_happy_loop(
     # `path_is_dirty` (preflight) + `revert_paths` (after each
     # bd mutation) are added by swarm-beads-state-merge-
     # cleanliness Tasks 2+3; `fetch_and_ff_base` is from swarm-
-    # merge-advancement-stabilization Task 4;
-    # `commit_all_with_bd_export` is from swarm-worker-commit-
-    # bd-ownership Task 2.
+    # merge-advancement-stabilization Task 4; `commit_worker_changes`
+    # is the code-only worker commit from swarm-bd-export-serialization.
     git_steps = [c[0] for c in git.calls]
     assert git_steps == [
         "path_is_dirty",
         "fetch_and_ff_base",
         "revert_paths",                # after claim_task
         "status_is_dirty",
-        "commit_all_with_bd_export",
+        "commit_worker_changes",
         "push_branch",
         "revert_paths",                # after mark_pr_open
     ]
@@ -1292,10 +1213,10 @@ def test_clean_tree_after_success_triggers_fail_task(tmp_path: Path) -> None:
     ]
     # No commit, no push, no PR. Match either the legacy
     # `commit_all` or the new worker-commit-boundary protocol
-    # `commit_all_with_bd_export`; this test pins "no commit
+    # `commit_worker_changes`; this test pins "no commit
     # path fired", which must hold regardless of which method
     # the orchestrator uses.
-    commit_ops = {"commit_all", "commit_all_with_bd_export"}
+    commit_ops = {"commit_all", "commit_worker_changes"}
     assert not any(c[0] in commit_ops for c in git.calls)
     assert pr.calls == []
 
@@ -1411,8 +1332,8 @@ def test_repair_missing_worktree_path(tmp_path: Path) -> None:
     assert [e[0] for e in beads.failed] == ["bd-gone"]
     # No commit/push/PR from the repair phase for this finding.
     # Match either legacy `commit_all` or the new
-    # `commit_all_with_bd_export`.
-    commit_ops = {"commit_all", "commit_all_with_bd_export"}
+    # `commit_worker_changes`.
+    commit_ops = {"commit_all", "commit_worker_changes"}
     assert not any(c[0] in commit_ops for c in git.calls)
     assert pr.calls == [] or all(
         c[0] != "open_pr" for c in pr.calls
@@ -1460,9 +1381,9 @@ def test_repair_completion_pending_runs_commit_push_pr_label(
     # swarm-worker-commit-bd-ownership Task 2 — same defect
     # surface (bd's pre-commit hook misroutes the export) as
     # the main worker flow, so the repair callsite was migrated
-    # to `commit_all_with_bd_export` alongside the main one.
+    # to `commit_worker_changes` alongside the main one.
     git_steps = [c[0] for c in git.calls]
-    assert "commit_all_with_bd_export" in git_steps
+    assert "commit_worker_changes" in git_steps
     assert "push_branch" in git_steps
     assert any(c[0] == "open_pr" for c in pr.calls)
     # Task labelled; not closed; worktree NOT cleaned up.
@@ -2491,7 +2412,6 @@ def test_json_happy_loop_event_order(tmp_path: Path) -> None:
         "push",
         "task_opened",
         "done",
-        "bd_state_unpropagated",
     ]
     by = {e["event"]: e for e in events}
     assert by["fetch_advanced"]["base_branch"] == "main"

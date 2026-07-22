@@ -175,7 +175,6 @@ reconcile: 0 in-progress tasks
 swarm: claimed <id> — Append a line to SMOKE.txt
 swarm: opened <id> (PR: https://github.com/<you>/turma-run-smoke/pull/1; awaiting merge)
 swarm: no ready tasks remain; done
-bd-state: local mutations not yet propagated to origin. Run `bd export && git commit -- .beads/issues.jsonl` to capture them, or rely on the next `turma run` worker commit to propagate.
 ```
 
 The `fetch:` line at the top reflects the base-branch sync the
@@ -183,20 +182,18 @@ orchestrator runs once per non-dry-run invocation. On a fresh
 repo at origin/main this is a no-op fast-forward; the line
 prints either way so operators can confirm the sync happened.
 
-The trailing `bd-state:` warning is the v1 tradeoff for
-keeping main's working tree clean. Turma reverts
+There is no trailing `bd-state:` warning. Turma reverts
 `.beads/issues.jsonl` after every bd mutation (claim,
 mark_pr_open, etc.) so the next `turma run`'s
-`merge --ff-only` doesn't refuse on a dirty file. The dolt
-db (the source of truth, gitignored at `.beads/embeddeddolt/`)
-keeps the mutations, but they don't reach origin/main until
-a future worker commit's pre-commit hook captures them.
-Operators in a multi-clone deployment can manually run
-`bd export && git commit` to capture state immediately;
-single-operator deployments can ignore the warning and let
-the next `turma run` propagate. See
-`openspec/changes/swarm-beads-state-merge-cleanliness/`
-for the full shareability contract.
+`merge --ff-only` doesn't refuse on a dirty file, and bd's
+own Dolt-over-git auto-sync propagates the mutation to
+origin. The dolt db (the source of truth, gitignored at
+`.beads/embeddeddolt/`) is authoritative; the tracked
+`.beads/issues.jsonl` export is a regenerable backup, not
+the propagation path — task commits are code-only and never
+carry it. See
+`openspec/changes/swarm-beads-state-merge-cleanliness/` and
+`swarm-bd-export-serialization/` for the full contract.
 
 Claude Code runs inside `.worktrees/smoke-run/<id>/`,
 creates `SMOKE.txt`, writes `.task_complete`. The orchestrator
@@ -266,13 +263,13 @@ reconcile: 1 in-progress task
 reconcile:   <id> → skipped (merge-tracked at PR #<N>)
 merge-advancement: <id> → MERGED, closed
 swarm: no ready tasks remain; done
-bd-state: local mutations not yet propagated to origin. Run `bd export && git commit -- .beads/issues.jsonl` to capture them, or rely on the next `turma run` worker commit to propagate.
 ```
 
-The `bd-state:` warning fires because merge-advancement's
-`unmark_pr_open` + `close_task` mutated the dolt db. See
-the explanation under Step 2 above for the full
-shareability contract.
+Merge-advancement's `unmark_pr_open` + `close_task` mutate
+the dolt db; bd's auto-sync propagates them to origin and
+Turma's revert keeps main's tree clean, so there is no
+trailing `bd-state:` warning. See the explanation under
+Step 2 above.
 
 Verify:
 
@@ -374,24 +371,17 @@ merge-advancement: <task-A-id> → MERGED, closed
 swarm: claimed <task-B-id> — Append stage two marker to STAGE.txt
 swarm: opened <task-B-id> (PR: ...; awaiting merge)
 swarm: stopping at --max-tasks=1
-bd-state: local mutations not yet propagated to origin. Run `bd export && git commit -- .beads/issues.jsonl` to capture them, or rely on the next `turma run` worker commit to propagate.
 ```
 
-The `bd-state:` warning fires because this iteration ran
-multiple bd mutations (sweep's unmark+close on task A, plus
-claim+mark on task B). The dolt db has all of them; main's
-working tree is clean (the revert ran after each); origin's
-`.beads/issues.jsonl` snapshot does **not** include them yet.
-Per the v1 product decision documented in
-`docs/architecture.md` ("bd-state ownership"), tail mutations
-after the last worker commit have **no propagation guarantee**:
-a future `turma run` may produce a worker commit that captures
-them, but if no future worker run happens (e.g. the feature
-ships and the operator stops running Turma), task B's
-`mark_pr_open` stays in the local dolt db indefinitely. The
-escape hatch the warning points at — `bd export && git commit
--- .beads/issues.jsonl` — is the manual fallback when an
-operator wants origin's snapshot caught up immediately.
+This iteration ran multiple bd mutations (sweep's
+unmark+close on task A, plus claim+mark on task B). The dolt
+db has all of them, bd's Dolt-over-git auto-sync propagates
+them to origin, and Turma's revert-after-mutation keeps
+main's working tree clean — so there is no trailing
+`bd-state:` warning and no cross-clone propagation gap. Task
+commits are code-only and never carry `.beads/issues.jsonl`
+(see `docs/architecture.md`, "bd-state ownership"); bd owns
+propagation of its own state.
 **Critical regression check** for
 `swarm-beads-state-merge-cleanliness`: `git status` between
 the two `turma run` invocations should report zero changes
