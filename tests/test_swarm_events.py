@@ -14,6 +14,8 @@ import threading
 import time
 from datetime import datetime
 
+import pytest
+
 from turma.swarm.events import (
     RUN_SCHEMA,
     HeartbeatTicker,
@@ -43,6 +45,15 @@ def test_json_emitter_run_id_is_pinnable() -> None:
     em = JsonEmitter(stream=buf, run_id="fixed123")
     em.emit("commit", task_id="t1")
     assert json.loads(buf.getvalue())["run_id"] == "fixed123"
+
+
+@pytest.mark.parametrize("reserved", ["schema", "event", "run_id", "ts"])
+def test_json_emitter_rejects_reserved_envelope_fields(reserved: str) -> None:
+    """A caller can't override the envelope (schema/event/run_id/ts) — that would
+    break the one-stable-run_id / fresh-ts / fixed-schema contract."""
+    em = JsonEmitter(stream=io.StringIO())
+    with pytest.raises(ValueError, match="reserved"):
+        em.emit("worker_running", **{reserved: "x"})
 
 
 class _InterleavingStream:

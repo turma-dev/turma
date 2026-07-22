@@ -27,6 +27,10 @@ from typing import Protocol, TextIO
 
 RUN_SCHEMA = "turma.run.v1"
 
+# Envelope fields the emitter owns; a caller must not pass them as event
+# fields (that would break the one-run_id / fresh-ts / fixed-schema contract).
+_RESERVED_EVENT_FIELDS = frozenset({"schema", "event", "run_id", "ts"})
+
 
 class RunEmitter(Protocol):
     """Runtime shape for a run-event sink."""
@@ -196,6 +200,13 @@ class JsonEmitter:
         return self._run_id
 
     def emit(self, event: str, /, **fields: object) -> None:
+        conflicts = _RESERVED_EVENT_FIELDS.intersection(fields)
+        if conflicts:
+            raise ValueError(
+                f"run event {event!r} passed reserved envelope field(s) "
+                f"{sorted(conflicts)}; schema/event/run_id/ts are owned by the "
+                "emitter and must not be set by callers"
+            )
         payload = {
             "schema": RUN_SCHEMA,
             "event": event,
