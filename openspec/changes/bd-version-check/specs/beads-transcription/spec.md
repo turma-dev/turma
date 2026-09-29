@@ -172,9 +172,17 @@ and warnings SHALL NOT appear on stdout.
 - **THEN** stdout is a `turma.status.v1` object with an `error` field
   and the command exits 1
 
-#### Scenario: warnings keep JSON stdout clean
+#### Scenario: warnings keep run --json stdout clean
 
 - **WHEN** the version is undetermined, or untested with the override,
-  during `turma run --json` or `turma status --json`
-- **THEN** the warning appears on stderr and every stdout line remains
-  valid JSON for that command's schema
+  during `turma run --json`
+- **THEN** the warning appears on stderr, and every stdout line is a
+  valid JSON document (`turma.run.v1` is newline-delimited JSON)
+
+#### Scenario: warnings keep status --json stdout clean
+
+- **WHEN** the version is undetermined, or untested with the override,
+  during `turma status --json`
+- **THEN** the warning appears on stderr, and the complete stdout
+  parses as one JSON object (`turma.status.v1` is a single indented,
+  multi-line document, so individual lines aren't JSON)

@@ -151,7 +151,10 @@ during service construction as a `turma.run.v1` `error` event, and
 `status --json` as a `turma.status.v1` error object (`_run_error` and
 `_status_error` in `cli.py`). The refusal reuses those paths, so no new
 schema fields are introduced. Warnings go to stderr and never enter
-stdout, so a `--json` consumer's stream stays parseable.
+stdout, so both output shapes stay parseable: `run --json` is
+newline-delimited JSON, so every stdout line must parse on its own;
+`status --json` is one indented, multi-line object (`json.dumps(...,
+indent=2)`), so the whole of stdout must parse as one document.
 
 ## Testing strategy
 

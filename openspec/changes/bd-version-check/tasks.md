@@ -52,8 +52,12 @@ is green.
       touch no Beads state (no mutation calls recorded).
 - [ ] 3.2 Failing tests: `run --json` and `status --json` report a
       refusal through their existing error path (the `turma.run.v1`
-      `error` event and the `turma.status.v1` error object), and an
-      undetermined-version warning doesn't appear on stdout.
+      `error` event and the `turma.status.v1` error object). With an
+      undetermined version, and with an untested version plus the
+      override, the warning goes to stderr and stdout stays parseable
+      in each command's own format: for `run --json`, every stdout line
+      parses as JSON; for `status --json`, the complete stdout parses as
+      one JSON object.
 - [ ] 3.3 Real-tool test, skipped when `bd` isn't on PATH and run with
       `TURMA_ALLOW_UNTESTED_BD` unset: call `bd version --json`
       directly and assert that the output parses and its `version`
