@@ -37,7 +37,8 @@ against them before touching any Beads state.
   `version`.
 - **Below the minimum:** refuse with a `PlanningError` that names the
   installed version, the supported range, and how to upgrade.
-- **Newer than the last tested minor version:** refuse by default,
+- **Untested (release base at or above the ceiling, so pre-releases of
+  an untested version count too):** refuse by default,
   naming the version and the tested range. An explicit opt-out,
   `TURMA_ALLOW_UNTESTED_BD=1`, turns the refusal into a warning on
   stderr and proceeds.
@@ -72,7 +73,10 @@ change, gated on a live smoke run (see Out of Scope).
 ### Modified Capabilities
 
 - **Beads adapter construction** (`beads-transcription`): validates the
-  bd version as well as its presence.
+  bd version as well as its presence. The spec delta
+  (`specs/beads-transcription/spec.md`) uses `ADDED` requirements,
+  because the capability has no base spec in `openspec/specs/` yet (see
+  the design's Spec delta section).
 
 ## Impact
 

@@ -48,13 +48,39 @@ refusal.
 
 A pure function, `parse_bd_version(text) -> BdVersion | None`:
 
-- accepts `MAJOR.MINOR.PATCH` with an optional leading `v` and an
-  optional pre-release suffix (`1.3.1-rc.1`)
-- returns `None` for anything else (`dev`, `unknown`, empty)
+- accepts `MAJOR.MINOR.PATCH`, with an optional leading `v`, an
+  optional pre-release suffix (`-rc.1`), and an optional build-metadata
+  suffix (`+homebrew.1`), in that order
+- returns `None` for anything else (`dev`, `unknown`, empty, `1.0`,
+  `1.0.2.3`)
 
-Ordering: compare `(major, minor, patch)`. A pre-release sorts
-**below** its release (`1.1.0-rc.1 < 1.1.0`). Build metadata is
-ignored.
+Build metadata is accepted by the syntax and ignored by every
+comparison: `1.0.2+x` is classified exactly as `1.0.2`.
+
+Pre-releases are handled differently at each bound, deliberately:
+
+- **Minimum:** semantic-version precedence, where a pre-release
+  precedes its release. `1.0.2-rc.1` is **below minimum**: it's a build
+  from before the version Turma was verified against.
+- **Ceiling:** compare the release base only (`MAJOR.MINOR.PATCH` with
+  the pre-release removed). `1.1.0-rc.1` is **untested**, not in range.
+  Plain precedence would put it below `1.1.0` and admit a 1.1 build
+  nobody has tested; comparing the base closes that gap.
+
+Boundary table, used verbatim as the parameterized test:
+
+| Version | Classification |
+|---|---|
+| `1.0.1` | below minimum |
+| `1.0.2-rc.1` | below minimum |
+| `1.0.2` | in range |
+| `1.0.2+build.5` | in range |
+| `1.0.9-rc.1` | in range |
+| `1.0.99` | in range |
+| `1.1.0-rc.1` | untested |
+| `1.1.0-rc.1+abc` | untested |
+| `1.1.0` | untested |
+| `1.3.0` | untested |
 
 Constants in `beads.py`:
 
@@ -66,15 +92,15 @@ BD_MAX_EXCLUSIVE = (1, 1, 0)    # first untested version
 The ceiling is exclusive and set at a minor boundary, because upstream
 shipped behaviour changes in patch releases within 1.0.x (1.0.3, 1.0.5).
 That's a known imprecision: 1.0.3–1.0.5 fall inside the range but
-haven't been smoke-tested. See Open Questions.
+haven't been smoke-tested. See Decisions.
 
 ## Outcomes
 
 | Installed | Default | `TURMA_ALLOW_UNTESTED_BD=1` |
 |---|---|---|
 | in range | proceed silently | proceed silently |
-| below `BD_MIN_VERSION` | refuse | refuse (no override) |
-| ≥ `BD_MAX_EXCLUSIVE` | refuse | warn on stderr, proceed |
+| below minimum (precedes `BD_MIN_VERSION`) | refuse | refuse (no override) |
+| untested (release base ≥ `BD_MAX_EXCLUSIVE`) | refuse | warn on stderr, proceed |
 | undetermined | warn on stderr, proceed | warn on stderr, proceed |
 
 **Too old has no override.** Turma's adapter depends on argv and JSON
@@ -133,10 +159,9 @@ Two layers, test-first per acceptance criterion:
 
 1. **Unit (subprocess mocked).** Patch `subprocess.run` and
    `shutil.which` in `turma.transcription.beads`:
-   - the parser table: release, `v` prefix, pre-release,
-     garbage → `None`
-   - ordering: pre-release below release, boundaries inclusive and
-     exclusive as specified
+   - the parser table: release, `v` prefix, pre-release, build
+     metadata, pre-release plus build metadata; garbage → `None`
+   - the boundary table above, parameterized
    - each row of the outcomes table, including the override set to
      `1`, set to `true` (no effect), and unset
    - a non-zero exit, a timeout, and invalid JSON each count as
@@ -144,10 +169,16 @@ Two layers, test-first per acceptance criterion:
    - the message renders the range from the constants
    - existing adapter tests still construct the adapter: the shared
      fixtures gain a default in-range `bd version --json` response
-2. **Real tool (skipped without `bd`).** Construct `BeadsAdapter()`
-   against the real `bd` on PATH and assert that the installed version
-   parses (not `None`). This catches upstream changes to the
-   `version --json` shape without asserting which version is installed.
+2. **Real tool (skipped without `bd`).** Run `bd version --json`
+   directly (not through the adapter) and assert that the output parses
+   and has a string `version` field that `parse_bd_version` accepts.
+   This catches upstream changes to the `version --json` shape without
+   assuming which version is installed. A second assertion constructs
+   `BeadsAdapter()` and checks that the result matches the
+   classification of that same parsed version: success when in range,
+   `PlanningError` when below minimum or untested (with the override
+   unset in the test environment). The test therefore passes on any
+   installed bd, including one newer than the ceiling.
 
 ## Rejected alternatives
 
@@ -164,21 +195,28 @@ Two layers, test-first per acceptance criterion:
 - **Check in the CLI layer.** Three call sites instead of one, and a
   future caller that constructs the adapter directly would skip it.
 
-## Open questions (for review)
+## Decisions (resolved in review)
 
-1. **Ceiling granularity.** `< 1.1.0` admits 1.0.3–1.0.5, which include
-   the 1.0.5 export-default flip and haven't been smoke-tested. The
-   alternative is a patch-exact ceiling (`< 1.0.3`), which is stricter
-   but refuses the upstream fix for #3311. Recommendation: keep
-   `< 1.1.0` and let the follow-up 1.3.0 smoke settle the range for
-   real; the reviewer may prefer strict.
-2. **Override name.** `TURMA_ALLOW_UNTESTED_BD` follows no existing
-   Turma convention, because Turma has no user-facing env vars yet. A
-   `[beads] allow_untested = true` key in `turma.toml` is the
-   alternative. An env var is proposed because it's per-shell and
-   deliberate, and it doesn't linger in a config file after the ceiling
-   is raised.
-3. **Install hint URL.** `BEADS_INSTALL_HINT` and the README link to
-   `github.com/steveyegge/beads`, and upstream now lives at
-   `github.com/gastownhall/beads`. Fixing that link is trivial and is
-   folded into Task 3 unless the reviewer wants it split out.
+1. **Ceiling stays `< 1.1.0`.** It admits 1.0.3–1.0.5, which haven't
+   been smoke-tested (including the 1.0.5 export-default flip), but it
+   keeps the 1.0.3 upstream fix for #3311. A patch-exact `< 1.0.3` would
+   refuse that fix. The planned 1.3.0 smoke run is where support gets
+   widened.
+2. **The override is the env var `TURMA_ALLOW_UNTESTED_BD=1`,** not a
+   `turma.toml` key. It's deliberate and per-shell, and it doesn't
+   linger in a config file after the ceiling is raised.
+3. **The Beads links move to `github.com/gastownhall/beads` in this
+   change** (Task 3.5). `BEADS_INSTALL_HINT` and the README still point
+   at the old `steveyegge/beads` location, and the fix is user-facing
+   maintenance directly tied to installing bd.
+4. **Pre-releases at the ceiling are untested.** `1.1.0-rc.1` is
+   classified by its release base, so it can't slip into the range by
+   sorting below `1.1.0` (see Parsing and comparing).
+
+## Spec delta
+
+`openspec/specs/` has no `beads-transcription` spec yet, and OpenSpec
+allows only `ADDED` requirements against a capability with no existing
+spec. `MODIFIED` and `RENAMED` require one. So the delta in
+`specs/beads-transcription/spec.md` uses `## ADDED Requirements`, even
+though the behaviour it describes modifies an existing adapter.

@@ -6,15 +6,18 @@ acceptance criteria before the implementation.
 ## Task 1: version parser and comparator
 
 - [ ] 1.1 Failing tests for `parse_bd_version`: `1.0.2`, `v1.0.2`,
-      `1.3.1-rc.1` parse; `dev`, `unknown`, `""`, `1.0` return `None`.
-- [ ] 1.2 Failing tests for ordering: pre-release below its release;
-      `BD_MIN_VERSION` is inclusive; `BD_MAX_EXCLUSIVE` is exclusive.
-- [ ] 1.3 Implement `BdVersion`, `parse_bd_version`, and the two
-      constants in `src/turma/transcription/beads.py`. The function is
-      pure: no subprocess.
+      `1.0.2+homebrew.1`, `1.3.1-rc.1`, and `1.3.1-rc.1+abc123` parse;
+      `dev`, `unknown`, `""`, `1.0`, and `1.0.2.3` return `None`.
+- [ ] 1.2 Failing parameterized test for classification: every row of
+      the design's boundary table (`1.0.1` through `1.3.0`), covering
+      pre-release below its release at the minimum, pre-release by
+      release base at the ceiling, and build metadata ignored.
+- [ ] 1.3 Implement `BdVersion`, `parse_bd_version`, the classifier,
+      and the two constants in `src/turma/transcription/beads.py`.
+      These are pure functions: no subprocess.
 
-**Done when:** the parser and ordering tests pass. No behaviour change
-to `BeadsAdapter` yet.
+**Done when:** the parser and classification tests pass. No behaviour
+change to `BeadsAdapter` yet.
 
 ## Task 2: the check in `BeadsAdapter.__init__`
 
@@ -51,18 +54,24 @@ is green.
       refusal through their existing error path (the `turma.run.v1`
       `error` event and the `turma.status.v1` error object), and an
       undetermined-version warning doesn't appear on stdout.
-- [ ] 3.3 Real-tool test, skipped when `bd` isn't on PATH:
-      `BeadsAdapter()` constructs, and the installed version parses.
+- [ ] 3.3 Real-tool test, skipped when `bd` isn't on PATH and run with
+      `TURMA_ALLOW_UNTESTED_BD` unset: call `bd version --json`
+      directly and assert that the output parses and its `version`
+      field is accepted by `parse_bd_version`. Then construct
+      `BeadsAdapter()` and assert that the outcome matches that
+      version's classification: success when in range, `PlanningError`
+      when below minimum or untested. The test passes on any installed
+      bd, not just 1.0.2.
 - [ ] 3.4 Docs: `README.md` (the Beads install section and the
       prerequisites list gain the supported range and
       `TURMA_ALLOW_UNTESTED_BD`), and a short note where
       `docs/architecture.md` describes the Beads adapter.
 - [ ] 3.5 Update the install-hint and README links from
-      `steveyegge/beads` to `gastownhall/beads` (design Open Question 3).
+      `steveyegge/beads` to `gastownhall/beads` (design Decision 3).
 
-**Done when:** the CLI tests pass, the real-tool test passes locally
-with bd 1.0.2 installed, the docs state the range, and the validation
-baseline in `AGENTS.md` passes.
+**Done when:** the CLI tests pass, the real-tool test passes locally,
+the docs state the range, `openspec validate bd-version-check --strict`
+passes, and the validation baseline in `AGENTS.md` passes.
 
 ## Follow-up (separate change, not in this one)
 
